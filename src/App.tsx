@@ -1,10 +1,11 @@
 /**
- * Market Research Agent V2 — Main Application
+ * Market Research Agent V2 — Universal Intelligence Application
  * Adhering strictly to the V2 Architecture Blueprint.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header.js';
+import { HomeWorkspace } from './components/HomeWorkspace.js';
 import { NewResearchModal } from './components/NewResearchModal.js';
 import { ResearchProgress } from './components/ResearchProgress.js';
 import { ReportViewer } from './components/ReportViewer.js';
@@ -23,40 +24,34 @@ import type {
 export default function App() {
   const [currentJob, setCurrentJob] = useState<ResearchJob | null>(null);
   const [report, setReport] = useState<FullResearchReport | null>(null);
+  const [recentJobs, setRecentJobs] = useState<ResearchJob[]>([]);
   const [events, setEvents] = useState<ResearchEvent[]>([]);
-  const [activeView, setActiveView] = useState<'report' | 'evidence' | 'sources' | 'progress' | 'print'>('report');
+  const [activeView, setActiveView] = useState<'workspace' | 'report' | 'evidence' | 'sources' | 'progress' | 'print'>('workspace');
   const [isNewModalOpen, setIsNewModalOpen] = useState<boolean>(false);
   const [inspectedClaim, setInspectedClaim] = useState<Claim | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Initial Load: fetch existing jobs or benchmark
+  // Initial Load: Fetch existing research jobs list (without forcing a mock report)
   useEffect(() => {
-    fetch('/api/v1/research')
-      .then(res => res.json())
-      .then(data => {
-        if (data.jobs && data.jobs.length > 0) {
-          const firstJob = data.jobs[0];
-          setCurrentJob(firstJob);
-          if (firstJob.report) {
-            setReport(firstJob.report);
-            setActiveView('report');
-          } else {
-            setActiveView('progress');
-            subscribeToEvents(firstJob.id);
-          }
-        } else {
-          // Fallback to load canonical benchmark
-          loadBenchmark('ev-charging-india-2027');
-        }
-      })
-      .catch(() => {
-        loadBenchmark('ev-charging-india-2027');
-      });
+    fetchJobsList();
 
     return () => {
       eventSourceRef.current?.close();
     };
   }, []);
+
+  const fetchJobsList = () => {
+    fetch('/api/v1/research')
+      .then(res => res.json())
+      .then(data => {
+        if (data.jobs && data.jobs.length > 0) {
+          setRecentJobs(data.jobs);
+        }
+      })
+      .catch(err => {
+        console.warn('Could not fetch jobs list:', err);
+      });
+  };
 
   const loadBenchmark = async (benchmarkId: string) => {
     try {
@@ -64,7 +59,7 @@ export default function App() {
       if (res.ok) {
         const benchmarkReport: FullResearchReport = await res.json();
         setReport(benchmarkReport);
-        setCurrentJob({
+        const benchmarkJob: ResearchJob = {
           id: benchmarkReport.job_id,
           question: benchmarkReport.question,
           industry: benchmarkReport.industry,
@@ -88,7 +83,8 @@ export default function App() {
           },
           stages: [],
           report: benchmarkReport,
-        });
+        };
+        setCurrentJob(benchmarkJob);
         setActiveView('report');
       }
     } catch (e) {
@@ -118,6 +114,7 @@ export default function App() {
             if (updatedJob.report) {
               setReport(updatedJob.report);
             }
+            fetchJobsList();
           });
       } catch (err) {
         console.error('Error parsing SSE event:', err);
@@ -180,6 +177,17 @@ export default function App() {
     }
   };
 
+  const handleOpenExistingJob = (job: ResearchJob) => {
+    setCurrentJob(job);
+    if (job.report) {
+      setReport(job.report);
+      setActiveView('report');
+    } else {
+      setActiveView('progress');
+      subscribeToEvents(job.id);
+    }
+  };
+
   const handleCancelJob = async () => {
     if (!currentJob) return;
     try {
@@ -220,6 +228,14 @@ export default function App() {
 
       {/* Main Body View */}
       <main className="flex-1 pb-16">
+        {activeView === 'workspace' && (
+          <HomeWorkspace
+            onLaunchResearch={handleLaunchResearch}
+            recentJobs={recentJobs}
+            onOpenJob={handleOpenExistingJob}
+          />
+        )}
+
         {activeView === 'progress' && currentJob && (
           <ResearchProgress
             job={currentJob}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   TrendingUp, 
   ShieldCheck, 
@@ -18,7 +18,11 @@ import {
   Award,
   CheckCircle2,
   Lock,
-  ArrowUpRight
+  ArrowUpRight,
+  Search,
+  Copy,
+  Check,
+  Download
 } from 'lucide-react';
 import type { FullResearchReport, Claim } from '../types.js';
 import { FinancialCalculator } from './FinancialCalculator.js';
@@ -36,6 +40,8 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
   onNavigateTab,
 }) => {
   const [activeSection, setActiveSection] = useState<string>('summary');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
 
   // Helper to parse text and make citation pills interactive e.g. [1], [14]
   const renderInteractiveText = (text: string) => {
@@ -63,6 +69,24 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
     });
   };
 
+  const handleCopySummary = () => {
+    const content = `${report.title}\n\nExecutive Summary:\n${report.executive_summary}\n\nVerified Evidence Score: ${report.evidence_score_breakdown.overall_score}/100\nForecast TAM: ${FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency)} (${report.financial_models.cagr_pct}% CAGR)`;
+    navigator.clipboard.writeText(content);
+    setCopiedSummary(true);
+    setTimeout(() => setCopiedSummary(false), 2000);
+  };
+
+  // Filter competitors based on search
+  const filteredCompetitors = useMemo(() => {
+    if (!searchQuery.trim()) return report.competitors;
+    const q = searchQuery.toLowerCase();
+    return report.competitors.filter(c => 
+      c.name.toLowerCase().includes(q) || 
+      c.description.toLowerCase().includes(q) ||
+      c.target_customer.toLowerCase().includes(q)
+    );
+  }, [report.competitors, searchQuery]);
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8 space-y-8">
       {/* Report Header & Evidence Score Card */}
@@ -71,7 +95,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           <div className="space-y-2 max-w-3xl">
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-400 border border-cyan-500/20">
-                Market Research Report &bull; V2
+                Market Intelligence Report &bull; V2
               </span>
               <span className="text-xs text-slate-400 font-mono">
                 Generated: {new Date(report.generated_at).toLocaleDateString()}
@@ -92,7 +116,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
             </div>
           </div>
 
-          {/* Evidence Score Card (Section 61) */}
+          {/* Evidence Score Card */}
           <div className="rounded-xl border border-cyan-500/30 bg-slate-950 p-5 lg:min-w-[280px]">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -121,6 +145,38 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Quick Search & Export Utility Bar */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/60 p-3 rounded-xl border border-slate-800 text-xs">
+        <div className="relative w-full sm:w-80">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search within report sections..."
+            className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+          />
+        </div>
+
+        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <button
+            onClick={handleCopySummary}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"
+          >
+            {copiedSummary ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+            <span>{copiedSummary ? 'Copied to Clipboard!' : 'Copy Summary'}</span>
+          </button>
+          <a
+            href={`/api/v1/research/${report.job_id}/export/csv`}
+            download
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>Export CSV</span>
+          </a>
         </div>
       </div>
 
@@ -160,12 +216,16 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
             <div className="pt-3 border-t border-slate-800 mt-2">
               <button
                 onClick={() => onNavigateTab('evidence')}
-                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-slate-300 hover:bg-slate-800 text-xs transition-colors"
+                className="w-full flex items-center justify-between rounded-lg px-3 py-2 text-cyan-400 hover:bg-cyan-500/10 transition-colors"
               >
-                <span className="flex items-center gap-1.5 font-semibold text-emerald-400">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  Claims & Citations ({report.claims.length})
-                </span>
+                <span>Evidence Explorer ({report.claims.length})</span>
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => onNavigateTab('sources')}
+                className="w-full flex items-center justify-between rounded-lg px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800/40 transition-colors"
+              >
+                <span>Sources Directory ({report.sources.length})</span>
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -173,113 +233,126 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="lg:col-span-9 space-y-10 text-slate-200">
+        <div className="lg:col-span-9 space-y-10">
           {/* 1. Executive Summary */}
           <section id="summary" className="space-y-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
-              <h2 className="text-xl font-bold text-white">1. Executive Summary & Market Sizing</h2>
+              <Sparkles className="h-5 w-5 text-cyan-400" />
+              <h2 className="text-xl font-bold text-white">1. Executive Summary & Synthesis</h2>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-6 leading-relaxed text-sm text-slate-200 space-y-4">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-5 text-slate-200 text-sm leading-relaxed space-y-4">
               <p>{renderInteractiveText(report.executive_summary)}</p>
-              {report.sections[0] && (
-                <p>{renderInteractiveText(report.sections[0].content)}</p>
-              )}
+
+              {report.sections.map(sec => (
+                <div key={sec.id} className="pt-3 border-t border-slate-800 space-y-1.5">
+                  <h3 className="font-bold text-cyan-300 text-sm">{sec.title}</h3>
+                  <p className="text-slate-300 text-xs leading-relaxed">{renderInteractiveText(sec.content)}</p>
+                </div>
+              ))}
             </div>
           </section>
 
-          {/* 2. Market Sizing & CAGR */}
+          {/* 2. Sizing & Deterministic CAGR */}
           <section id="sizing" className="space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-cyan-400" />
-                2. Market Sizing (TAM / SAM / SOM) & Verified CAGR
-              </h2>
-              <span className="rounded bg-emerald-500/10 px-2.5 py-1 text-xs font-bold text-emerald-400 border border-emerald-500/20">
-                CAGR: {report.financial_models.cagr_pct}%
-              </span>
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+              <TrendingUp className="h-5 w-5 text-blue-400" />
+              <h2 className="text-xl font-bold text-white">2. Market Sizing & Deterministic CAGR</h2>
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Total Addressable Market (TAM)
-                </span>
-                <div className="mt-2 text-2xl font-bold font-mono text-white">
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-1">
+                <span className="text-xs font-medium text-slate-400">Total Addressable Market (Base)</span>
+                <div className="text-2xl font-black text-white font-mono">
+                  {FinancialEngine.formatCurrency(report.financial_models.tam_current, report.financial_models.currency)}
+                </div>
+                <span className="text-[11px] text-slate-400">Validated Year {report.financial_models.year_start}</span>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-1">
+                <span className="text-xs font-medium text-slate-400">Deterministic Forecast ({report.financial_models.year_end})</span>
+                <div className="text-2xl font-black text-cyan-400 font-mono">
                   {FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency)}
                 </div>
-                <p className="mt-1 text-xs text-slate-400">2030 Verified Forecast</p>
+                <span className="text-[11px] text-emerald-400 font-semibold">
+                  Verified CAGR: {report.financial_models.cagr_pct}%
+                </span>
               </div>
 
-              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Serviceable Available Market (SAM)
-                </span>
-                <div className="mt-2 text-2xl font-bold font-mono text-white">
-                  {FinancialEngine.formatCurrency(report.financial_models.sam, report.financial_models.currency)}
-                </div>
-                <p className="mt-1 text-xs text-slate-400">Addressable B2B Depots & CPOs</p>
-              </div>
-
-              <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-5">
-                <span className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
-                  Serviceable Obtainable Market (SOM)
-                </span>
-                <div className="mt-2 text-2xl font-bold font-mono text-cyan-300">
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-1">
+                <span className="text-xs font-medium text-slate-400">Serviceable Market (SAM &bull; SOM)</span>
+                <div className="text-2xl font-black text-blue-400 font-mono">
                   {FinancialEngine.formatCurrency(report.financial_models.som, report.financial_models.currency)}
                 </div>
-                <p className="mt-1 text-xs text-slate-400">Realistic Year 3 Market Capture</p>
+                <span className="text-[11px] text-slate-400">
+                  Target Serviceable Obtainable Pool
+                </span>
               </div>
             </div>
           </section>
 
-          {/* 3. Competitive Landscape Matrix */}
+          {/* 3. Competitor Matrix */}
           <section id="competitors" className="space-y-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
-              <Building2 className="h-5 w-5 text-blue-400" />
-              <h2 className="text-xl font-bold text-white">3. Competitive Landscape & Positioning Matrix</h2>
+              <Building2 className="h-5 w-5 text-indigo-400" />
+              <h2 className="text-xl font-bold text-white">3. Competitive Intelligence Matrix</h2>
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {report.competitors.map(comp => (
+              {filteredCompetitors.map(comp => (
                 <div
                   key={comp.id}
-                  className="rounded-xl border border-slate-800 bg-slate-900/50 p-5 space-y-3 hover:border-slate-700 transition-colors"
+                  className="rounded-xl border border-slate-800 bg-slate-900/40 p-5 space-y-3 hover:border-slate-700 transition-colors"
                 >
                   <div className="flex items-start justify-between">
                     <div>
-                      <h3 className="text-base font-bold text-white">{comp.name}</h3>
-                      <span className="text-xs text-slate-400 font-medium">{comp.category}</span>
-                    </div>
-                    <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
-                      comp.market_position === 'LEADER'
-                        ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    }`}>
-                      {comp.market_position}
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-slate-300 leading-relaxed">{comp.description}</p>
-
-                  <div className="space-y-1.5 text-xs">
-                    <div className="text-slate-400">
-                      <strong className="text-slate-300">Pricing Model:</strong> {comp.pricing_summary}
-                    </div>
-                    <div className="text-slate-400">
-                      <strong className="text-slate-300">Target Segment:</strong> {comp.target_customer}
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-base font-bold text-white">{comp.name}</h3>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          comp.market_position === 'LEADER'
+                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                            : comp.market_position === 'CHALLENGER'
+                            ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}>
+                          {comp.market_position}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">{comp.description}</p>
                     </div>
                   </div>
 
-                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
-                    <span>Verified Citations: {comp.verified_claims_count}</span>
-                    <a
-                      href={comp.website}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 font-semibold"
-                    >
-                      Website <ArrowUpRight className="h-3 w-3" />
-                    </a>
+                  <div className="space-y-2 text-xs pt-2 border-t border-slate-800/80">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Target Segment:</span>
+                      <span className="font-semibold text-slate-200">{comp.target_customer}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Observed Pricing:</span>
+                      <span className="font-mono text-cyan-400">{comp.pricing_summary}</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs pt-2">
+                    <div className="rounded-lg bg-emerald-950/30 border border-emerald-500/20 p-2.5">
+                      <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block mb-1">
+                        Strengths
+                      </span>
+                      <ul className="list-disc list-inside text-[11px] text-slate-300 space-y-0.5">
+                        {comp.strengths.slice(0, 2).map((s, idx) => (
+                          <li key={idx} className="truncate">{s}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="rounded-lg bg-rose-950/30 border border-rose-500/20 p-2.5">
+                      <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block mb-1">
+                        Weaknesses
+                      </span>
+                      <ul className="list-disc list-inside text-[11px] text-slate-300 space-y-0.5">
+                        {comp.weaknesses.slice(0, 2).map((w, idx) => (
+                          <li key={idx} className="truncate">{w}</li>
+                        ))}
+                      </ul>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -289,7 +362,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           {/* 4. Customer Segments */}
           <section id="customers" className="space-y-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
-              <Users className="h-5 w-5 text-indigo-400" />
+              <Users className="h-5 w-5 text-purple-400" />
               <h2 className="text-xl font-bold text-white">4. Customer Segments & Buying Criteria</h2>
             </div>
 
@@ -364,10 +437,10 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
                       <td className="px-4 py-3 font-semibold text-white">{pt.tier_name}</td>
                       <td className="px-4 py-3 text-slate-400">{pt.competitor_name}</td>
                       <td className="px-4 py-3 font-mono font-bold text-cyan-400">
-                        {pt.currency === 'INR' ? '₹' : '$'}{pt.amount}/{pt.unit.toLowerCase()}
+                        {FinancialEngine.formatCurrency(pt.amount, pt.currency)}/{pt.unit.toLowerCase()}
                       </td>
                       <td className="px-4 py-3 font-mono text-slate-300">
-                        {pt.currency === 'INR' ? '₹' : '$'}{pt.annualized_amount.toLocaleString()}/yr
+                        {FinancialEngine.formatCurrency(pt.annualized_amount, pt.currency)}/yr
                       </td>
                       <td className="px-4 py-3 text-slate-300">{pt.target_segment}</td>
                     </tr>
@@ -380,9 +453,12 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           {/* 6. Deterministic Financial Scenarios Engine */}
           <section id="financials" className="space-y-4">
             <FinancialCalculator
-              initialArpu={4500}
-              initialCac={3800}
+              initialArpu={report.financial_models.currency === 'INR' ? 48000 : 4800}
+              initialCac={report.financial_models.currency === 'INR' ? 38000 : 3800}
               initialMargin={78}
+              tamCurrent={report.financial_models.tam_current}
+              tamForecast={report.financial_models.tam_forecast}
+              cagr={report.financial_models.cagr_pct}
               currency={report.financial_models.currency}
             />
           </section>
@@ -441,49 +517,39 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           <section id="recommendations" className="space-y-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
               <Lightbulb className="h-5 w-5 text-yellow-400" />
-              <h2 className="text-xl font-bold text-white">9. Strategic Recommendations (2027 Entry Playbook)</h2>
+              <h2 className="text-xl font-bold text-white">9. Strategic Roadmap & GTM Playbook</h2>
             </div>
 
             <div className="space-y-3">
               {report.recommendations.map(rec => (
                 <div
                   key={rec.id}
-                  className="rounded-xl border border-cyan-500/20 bg-slate-900/60 p-5 space-y-2 text-xs"
+                  className="rounded-xl border border-slate-800 bg-slate-900/40 p-5 space-y-3"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/10 text-cyan-400 font-bold font-mono text-[10px]">
-                        &check;
+                      <span className="rounded bg-cyan-500/10 px-2 py-0.5 text-[10px] font-bold text-cyan-400 border border-cyan-500/20">
+                        {rec.priority} PRIORITY
                       </span>
-                      <h3 className="text-sm font-bold text-white">{rec.title}</h3>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        rec.priority === 'CRITICAL' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' : 'bg-cyan-500/10 text-cyan-400'
-                      }`}>
-                        {rec.priority}
-                      </span>
-                      <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300">
+                      <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-slate-300">
                         {rec.timeframe}
                       </span>
                     </div>
                   </div>
-                  <p className="text-slate-300 leading-relaxed">{rec.rationale}</p>
+
+                  <h3 className="text-base font-bold text-white">{rec.title}</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    <strong className="text-white">Rationale:</strong> {rec.rationale}
+                  </p>
+
+                  {rec.risk_factors.length > 0 && (
+                    <div className="text-[11px] text-amber-300 bg-amber-950/20 border border-amber-500/20 p-2.5 rounded-lg">
+                      <strong>Watch Outs:</strong> {rec.risk_factors.join('; ')}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
-          </section>
-
-          {/* 10. Research Limitations */}
-          <section className="rounded-xl border border-slate-800 bg-slate-950 p-5 text-xs text-slate-400 space-y-2">
-            <h4 className="font-bold uppercase tracking-wider text-slate-300">
-              Methodological Disclosures & Limitations (Section 132)
-            </h4>
-            <ul className="list-disc list-inside space-y-1">
-              {report.limitations.map((lim, i) => (
-                <li key={i}>{lim}</li>
-              ))}
-            </ul>
           </section>
         </div>
       </div>

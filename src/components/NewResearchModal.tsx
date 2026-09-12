@@ -23,31 +23,40 @@ interface NewResearchModalProps {
 
 const PRESET_BENCHMARKS = [
   {
+    id: 'b2b-ai-agent-saas',
+    title: 'B2B AI Agent Workflow SaaS (North America)',
+    industry: 'Enterprise AI & Workflow Automation',
+    geography: 'North America',
+    timeHorizon: '2026-2030',
+    description: 'Enterprise willingness-to-pay, security compliance, usage-based pricing models, and incumbent ERP bundling risk.',
+    badge: 'AI & Enterprise SaaS',
+  },
+  {
+    id: 'custom-warehouse-robotics',
+    title: 'Autonomous Mobile Robots (AMR) in Logistics',
+    industry: 'Warehouse Automation & AMR Robotics',
+    geography: 'United States & APAC',
+    timeHorizon: '2026-2031',
+    description: '3PL warehouse labor economics, RaaS subscription models, and warehouse execution system (WES) integration.',
+    badge: 'Robotics & Industrial',
+  },
+  {
+    id: 'fintech-cross-border',
+    title: 'Cross-Border B2B Payment Rails & Infrastructure',
+    industry: 'FinTech & Cross-Border Rails',
+    geography: 'Europe & Southeast Asia',
+    timeHorizon: '2026-2030',
+    description: 'ISO 20022 compliance, interchange fee compression, FX spread monetization, and real-time settlement APIs.',
+    badge: 'FinTech & Payments',
+  },
+  {
     id: 'ev-charging-india-2027',
-    title: 'Indian EV Charging Software Market (2027 Entry)',
+    title: 'Smart Fleet Depot Charging & Telemetry (India)',
     industry: 'EV Charging Software & CPMS',
     geography: 'India',
     timeHorizon: '2027-2032',
     description: 'B2B fleet depot orchestration, ToD multi-tariffs, PM E-DRIVE subsidy impact, and OCPP 2.0.1 smart-charging.',
-    badge: 'Canonical Benchmark (Section 1)',
-  },
-  {
-    id: 'custom-legal-tech',
-    title: 'B2B AI Legal Research SaaS in India',
-    industry: 'LegalTech & Enterprise AI',
-    geography: 'India',
-    timeHorizon: '2026-2030',
-    description: 'Bar Council regulations, law firm willingness-to-pay, pricing models, and domestic court API access.',
-    badge: 'Section 130 Case Study',
-  },
-  {
-    id: 'custom-warehouse-robotics',
-    title: 'Autonomous Mobile Robots (AMR) in US Logistics',
-    industry: 'Warehouse Automation & AMR Robotics',
-    geography: 'United States',
-    timeHorizon: '2026-2031',
-    description: '3PL warehouse labor economics, RaaS subscription models, and warehouse execution system (WES) integration.',
-    badge: 'Industrial Deep-Dive',
+    badge: 'Mobility & CleanTech',
   },
 ];
 
@@ -70,8 +79,8 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
 }) => {
   const [question, setQuestion] = useState('');
   const [industry, setIndustry] = useState('');
-  const [geography, setGeography] = useState('India');
-  const [timeHorizon, setTimeHorizon] = useState('2027-2032');
+  const [geography, setGeography] = useState('Global');
+  const [timeHorizon, setTimeHorizon] = useState('2026-2030');
   const [targetCompany, setTargetCompany] = useState('');
   const [competitors, setCompetitors] = useState('');
   const [selectedObjectives, setSelectedObjectives] = useState<string[]>(COMMON_OBJECTIVES);
@@ -131,34 +140,35 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Quick Presets / Benchmarks */}
+        {/* Quick Presets / Multi-Sector Starters */}
         <div className="mt-5">
           <div className="flex items-center justify-between mb-2.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <BookOpen className="h-3.5 w-3.5 text-cyan-400" />
-              Pre-Configured Golden Benchmarks
+              Multi-Industry Quick Starters
             </label>
-            <span className="text-[11px] text-cyan-400/80">1-Click Instant Evaluation</span>
+            <span className="text-[11px] text-cyan-400/80">1-Click Population</span>
           </div>
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             {PRESET_BENCHMARKS.map(p => (
               <button
                 key={p.id}
                 type="button"
                 onClick={() => handleSelectPreset(p)}
-                className="group flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-left hover:border-cyan-500/50 hover:bg-slate-950 transition-all"
+                className="group flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-left hover:border-cyan-500/50 hover:bg-slate-950 transition-all cursor-pointer"
               >
                 <div>
                   <div className="mb-1 flex items-center justify-between">
                     <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-400 border border-cyan-500/20">
                       {p.badge}
                     </span>
+                    <span className="text-[10px] text-slate-400 font-mono">{p.geography}</span>
                   </div>
                   <h4 className="text-xs font-bold text-slate-200 group-hover:text-cyan-300 transition-colors">
                     {p.title}
@@ -166,7 +176,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   <p className="mt-1 text-[11px] line-clamp-2 text-slate-400">{p.description}</p>
                 </div>
                 <div className="mt-2.5 flex items-center justify-between text-[11px] font-medium text-cyan-400">
-                  <span>{p.id === 'ev-charging-india-2027' ? 'Load Canonical Benchmark' : 'Fill Parameters'}</span>
+                  <span>Populate Parameters</span>
                   <ArrowRight className="h-3 w-3 group-hover:translate-x-0.5 transition-transform" />
                 </div>
               </button>
@@ -187,7 +197,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                 required
                 value={question}
                 onChange={e => setQuestion(e.target.value)}
-                placeholder="e.g. Analyze the Indian EV charging software market for a startup entering in 2027."
+                placeholder="e.g. Analyze the B2B AI Agent Software market in North America for an entrant in 2026."
                 className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
               />
             </div>
@@ -203,7 +213,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   type="text"
                   value={industry}
                   onChange={e => setIndustry(e.target.value)}
-                  placeholder="e.g. EV Charging Software / CPMS"
+                  placeholder="e.g. Enterprise AI SaaS / FinTech"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -217,7 +227,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   type="text"
                   value={geography}
                   onChange={e => setGeography(e.target.value)}
-                  placeholder="e.g. India / APAC / US"
+                  placeholder="e.g. Global / North America / Europe"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -231,7 +241,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   type="text"
                   value={timeHorizon}
                   onChange={e => setTimeHorizon(e.target.value)}
-                  placeholder="e.g. 2027-2032"
+                  placeholder="e.g. 2026-2030"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -248,7 +258,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   type="text"
                   value={competitors}
                   onChange={e => setCompetitors(e.target.value)}
-                  placeholder="e.g. Kazam, Pulse Energy, Statiq, ChargeZone"
+                  placeholder="e.g. Salesforce, UiPath, Retool, CrewAI"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -262,7 +272,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                   type="text"
                   value={targetCompany}
                   onChange={e => setTargetCompany(e.target.value)}
-                  placeholder="e.g. Hardware-agnostic B2B depot SaaS"
+                  placeholder="e.g. API-first consumption model"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -281,7 +291,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
                       type="button"
                       key={obj}
                       onClick={() => toggleObjective(obj)}
-                      className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition-all ${
+                      className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition-all cursor-pointer ${
                         isSelected
                           ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-300'
                           : 'border-slate-800 bg-slate-900 text-slate-400 hover:border-slate-700'
@@ -300,7 +310,7 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
           <div className="flex items-start gap-2.5 rounded-lg border border-slate-800 bg-slate-950 p-3 text-[11px] text-slate-400">
             <Info className="h-4 w-4 text-cyan-400 flex-shrink-0 mt-0.5" />
             <p>
-              <strong className="text-slate-200">V2 Architectural Enforcement:</strong> Every statement produced will be grounded in discovered external sources. Numeric assertions will be calculated deterministically with Python/TS formulas, and claims audited for provenance before report generation.
+              <strong className="text-slate-200">Universal V2 Architecture:</strong> Works for any industry domain worldwide. Statements are grounded in discovered sources with deterministic financial math and verified claim offsets.
             </p>
           </div>
 
@@ -309,14 +319,14 @@ export const NewResearchModal: React.FC<NewResearchModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 transition-colors"
+              className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!question.trim()}
-              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all"
+              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
             >
               <Sparkles className="h-4 w-4" />
               Launch Research Pipeline

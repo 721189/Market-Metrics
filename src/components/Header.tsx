@@ -9,7 +9,8 @@ import {
   Database,
   Sparkles,
   BarChart3,
-  Cpu
+  Cpu,
+  Home
 } from 'lucide-react';
 import type { FullResearchReport, ResearchJob } from '../types.js';
 
@@ -18,8 +19,8 @@ interface HeaderProps {
   report: FullResearchReport | null;
   onNewResearch: () => void;
   onSelectBenchmark: (benchmarkId: string) => void;
-  activeView: 'report' | 'evidence' | 'sources' | 'progress';
-  setActiveView: (view: 'report' | 'evidence' | 'sources' | 'progress') => void;
+  activeView: 'workspace' | 'report' | 'evidence' | 'sources' | 'progress';
+  setActiveView: (view: 'workspace' | 'report' | 'evidence' | 'sources' | 'progress') => void;
   onExportJson: () => void;
   onPrintReport: () => void;
 }
@@ -40,70 +41,88 @@ export const Header: React.FC<HeaderProps> = ({
     <header className="sticky top-0 z-40 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         {/* Brand identity */}
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20">
+        <div 
+          onClick={() => setActiveView('workspace')}
+          className="flex items-center gap-3 cursor-pointer group"
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20 group-hover:scale-105 transition-transform">
             <Cpu className="h-5 w-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="font-bold tracking-tight text-white sm:text-lg">Market Research Agent</span>
-              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-500/20">V2</span>
+              <span className="font-bold tracking-tight text-white sm:text-lg group-hover:text-cyan-300 transition-colors">Market Intelligence</span>
+              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-500/20">V2 Agent</span>
             </div>
-            <p className="hidden text-xs text-slate-400 sm:block">Evidence-Backed Market Intelligence Engine</p>
+            <p className="hidden text-[11px] text-slate-400 sm:block">Universal Evidence-Backed Research Engine</p>
           </div>
         </div>
 
         {/* Navigation View Switcher */}
-        {report && (
-          <div className="flex items-center rounded-lg bg-slate-900/90 p-1 border border-slate-800 text-xs">
-            <button
-              onClick={() => setActiveView('report')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                activeView === 'report'
-                  ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <FileText className="h-3.5 w-3.5" />
-              Report
-            </button>
-            <button
-              onClick={() => setActiveView('evidence')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                activeView === 'evidence'
-                  ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Evidence & Claims ({report.claims.length})
-            </button>
-            <button
-              onClick={() => setActiveView('sources')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                activeView === 'sources'
-                  ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Database className="h-3.5 w-3.5" />
-              Sources ({report.sources.length})
-            </button>
-            {isJobRunning && (
+        <div className="flex items-center rounded-lg bg-slate-900/90 p-1 border border-slate-800 text-xs">
+          <button
+            onClick={() => setActiveView('workspace')}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
+              activeView === 'workspace'
+                ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Home className="h-3.5 w-3.5" />
+            Workspace
+          </button>
+
+          {report && (
+            <>
               <button
-                onClick={() => setActiveView('progress')}
+                onClick={() => setActiveView('report')}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                  activeView === 'progress'
+                  activeView === 'report'
                     ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                    : 'text-amber-400 hover:text-amber-300 animate-pulse'
+                    : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Layers className="h-3.5 w-3.5" />
-                Live Pipeline
+                <FileText className="h-3.5 w-3.5" />
+                Report
               </button>
-            )}
-          </div>
-        )}
+              <button
+                onClick={() => setActiveView('evidence')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
+                  activeView === 'evidence'
+                    ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <ShieldCheck className="h-3.5 w-3.5" />
+                Evidence ({report.claims.length})
+              </button>
+              <button
+                onClick={() => setActiveView('sources')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
+                  activeView === 'sources'
+                    ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Database className="h-3.5 w-3.5" />
+                Sources ({report.sources.length})
+              </button>
+            </>
+          )}
+
+          {isJobRunning && (
+            <button
+              onClick={() => setActiveView('progress')}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
+                activeView === 'progress'
+                  ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
+                  : 'text-amber-400 hover:text-amber-300 animate-pulse'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              Live Pipeline
+            </button>
+          )}
+        </div>
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">

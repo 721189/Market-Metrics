@@ -1,9 +1,14 @@
 /**
- * Full-Stack Express Server for Market Research Agent V2
- * Meets all blueprint API requirements & Vite SPA middleware integration.
+ * Full-Stack High-Performance Express Server for Market Research Agent V2
+ * Features:
+ * - Resilient In-Memory LRU Store with max capacity pruning
+ * - Queue Management & Concurrency Control
+ * - Heartbeat Keep-Alive for Server-Sent Events (SSE) with leak prevention
+ * - Full multi-format export endpoints (JSON & CSV)
+ * - Vite SPA Middleware Integration
  */
 
-import express from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -16,28 +21,48 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  // Middleware with size safety limits
+  app.use(express.json({ limit: '500kb' }));
+  app.use(express.urlencoded({ extended: true, limit: '500kb' }));
 
-  // -------------------------------------------------------------
-  // HEALTH & READINESS ENDPOINTS (Section 44)
-  // -------------------------------------------------------------
-  app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  // Basic request logger & timing
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      if (req.path.startsWith('/api') && duration > 500) {
+        console.log(`[API Slow] ${req.method} ${req.path} took ${duration}ms`);
+      }
+    });
+    next();
   });
 
-  app.get('/ready', (req, res) => {
-    res.json({
+  // -------------------------------------------------------------
+  // HEALTH & READINESS ENDPOINTS
+  // -------------------------------------------------------------
+  app.get('/health', (req: Request, res: Response) => {
+    res.status(200).json({ 
+      status: 'ok', 
+      uptime_seconds: process.uptime(),
+      memory_usage_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      timestamp: new Date().toISOString() 
+    });
+  });
+
+  app.get('/ready', (req: Request, res: Response) => {
+    res.status(200).json({
       status: 'ready',
       gemini_configured: Boolean(process.env.GEMINI_API_KEY),
       environment: process.env.NODE_ENV || 'development',
+      active_jobs_count: ResearchPipelineManager.listJobs().length,
       version: '2.0.0',
     });
   });
 
   // -------------------------------------------------------------
-  // BENCHMARK DATASETS (Golden fixtures for immediate review)
+  // BENCHMARK DATASETS (Golden fixtures)
   // -------------------------------------------------------------
-  app.get('/api/v1/benchmarks', (req, res) => {
+  app.get('/api/v1/benchmarks', (req: Request, res: Response) => {
     res.json({
       benchmarks: [
         {
@@ -55,7 +80,7 @@ async function startServer() {
     });
   });
 
-  app.get('/api/v1/benchmarks/:id', (req, res) => {
+  app.get('/api/v1/benchmarks/:id', (req: Request, res: Response) => {
     const bm = BENCHMARKS[req.params.id];
     if (!bm) {
       return res.status(404).json({ error: { code: 'BENCHMARK_NOT_FOUND', message: 'Benchmark not found' } });
@@ -64,28 +89,34 @@ async function startServer() {
   });
 
   // -------------------------------------------------------------
-  // RESEARCH JOBS API (Section 38 - 43)
+  // RESEARCH JOBS API
   // -------------------------------------------------------------
-  // Create research job
-  app.post('/api/v1/research', async (req, res) => {
+  // Create research job with strict validation
+  app.post('/api/v1/research', async (req: Request, res: Response) => {
     try {
       const { question, industry, geography, time_horizon, objectives, target_company, competitors, scope_depth } = req.body;
 
-      if (!question) {
+      if (!question || typeof question !== 'string' || question.trim().length < 3) {
         return res.status(400).json({
-          error: { code: 'INVALID_REQUEST', message: 'Research question is required' },
+          error: { code: 'INVALID_REQUEST', message: 'A valid research question (min 3 chars) is required' },
         });
       }
 
+      // Sanitize inputs
+      const sanitizedQuestion = question.trim().slice(0, 1000);
+      const sanitizedIndustry = (industry || 'Software & Technology').toString().trim().slice(0, 200);
+      const sanitizedGeography = (geography || 'Global').toString().trim().slice(0, 100);
+      const sanitizedHorizon = (time_horizon || '2026-2030').toString().trim().slice(0, 50);
+
       const job = await ResearchPipelineManager.createAndRunJob({
-        question,
-        industry: industry || 'Technology & Software',
-        geography: geography || 'Global',
-        time_horizon: time_horizon || '2026-2030',
-        objectives: objectives || ['Market Sizing', 'Competitors', 'Pricing', 'Regulatory', 'Recommendations'],
-        target_company,
-        competitors,
-        scope_depth: scope_depth || 'standard',
+        question: sanitizedQuestion,
+        industry: sanitizedIndustry,
+        geography: sanitizedGeography,
+        time_horizon: sanitizedHorizon,
+        objectives: Array.isArray(objectives) ? objectives.map(o => String(o).slice(0, 100)) : undefined,
+        target_company: target_company ? String(target_company).slice(0, 200) : undefined,
+        competitors: Array.isArray(competitors) ? competitors.map(c => String(c).slice(0, 100)) : undefined,
+        scope_depth: scope_depth === 'exhaustive' ? 'exhaustive' : scope_depth === 'standard' ? 'standard' : 'deep',
       });
 
       res.status(201).json({
@@ -103,13 +134,13 @@ async function startServer() {
   });
 
   // List all jobs
-  app.get('/api/v1/research', (req, res) => {
+  app.get('/api/v1/research', (req: Request, res: Response) => {
     const jobs = ResearchPipelineManager.listJobs();
-    res.json({ jobs });
+    res.json({ jobs, total: jobs.length });
   });
 
   // Get job details & progress
-  app.get('/api/v1/research/:id', (req, res) => {
+  app.get('/api/v1/research/:id', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job) {
       return res.status(404).json({
@@ -120,7 +151,7 @@ async function startServer() {
   });
 
   // Cancel job
-  app.post('/api/v1/research/:id/cancel', (req, res) => {
+  app.post('/api/v1/research/:id/cancel', (req: Request, res: Response) => {
     const cancelled = ResearchPipelineManager.cancelJob(req.params.id);
     if (!cancelled) {
       return res.status(400).json({
@@ -130,8 +161,8 @@ async function startServer() {
     res.json({ status: 'CANCELLED', job_id: req.params.id });
   });
 
-  // Server-Sent Events (SSE) stream for live job progress
-  app.get('/api/v1/research/:id/events', (req, res) => {
+  // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive
+  app.get('/api/v1/research/:id/events', (req: Request, res: Response) => {
     const jobId = req.params.id;
     const job = ResearchPipelineManager.getJob(jobId);
 
@@ -142,8 +173,9 @@ async function startServer() {
     }
 
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
     // Send all existing events first
@@ -152,73 +184,123 @@ async function startServer() {
       res.write(`data: ${JSON.stringify(evt)}\n\n`);
     });
 
+    // Heartbeat to keep connection alive through any intermediate proxies
+    const heartbeatInterval = setInterval(() => {
+      res.write(': heartbeat\n\n');
+    }, 15000);
+
     // Listen for new events
     const eventHandler = (evt: any) => {
       res.write(`data: ${JSON.stringify(evt)}\n\n`);
       if (evt.event_type === 'completed' || evt.event_type === 'error') {
-        // Close after finish
         setTimeout(() => {
+          clearInterval(heartbeatInterval);
           pipelineEmitter.off(`event:${jobId}`, eventHandler);
           res.end();
-        }, 1000);
+        }, 1500);
       }
     };
 
     pipelineEmitter.on(`event:${jobId}`, eventHandler);
 
     req.on('close', () => {
+      clearInterval(heartbeatInterval);
       pipelineEmitter.off(`event:${jobId}`, eventHandler);
     });
   });
 
   // Get Sources
-  app.get('/api/v1/research/:id/sources', (req, res) => {
+  app.get('/api/v1/research/:id/sources', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
-    res.json({ sources: job.report.sources });
+    res.json({ sources: job.report.sources, count: job.report.sources.length });
   });
 
   // Get Evidence Pool
-  app.get('/api/v1/research/:id/evidence', (req, res) => {
+  app.get('/api/v1/research/:id/evidence', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
-    res.json({ evidence: job.report.evidence_pool });
+    res.json({ evidence: job.report.evidence_pool, count: job.report.evidence_pool.length });
   });
 
   // Get Claims
-  app.get('/api/v1/research/:id/claims', (req, res) => {
+  app.get('/api/v1/research/:id/claims', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
-    res.json({ claims: job.report.claims });
+    res.json({ claims: job.report.claims, count: job.report.claims.length });
   });
 
   // Get Structured Report
-  app.get('/api/v1/research/:id/report', (req, res) => {
+  app.get('/api/v1/research/:id/report', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
     }
     if (!job.report) {
-      return res.status(202).json({ status: job.status, current_stage: job.current_stage, progress: job.progress, message: 'Report is still being generated' });
+      return res.status(202).json({ 
+        status: job.status, 
+        current_stage: job.current_stage, 
+        progress: job.progress, 
+        message: 'Report is currently compiling' 
+      });
     }
     res.json(job.report);
   });
 
-  // Export JSON
-  app.get('/api/v1/research/:id/export/json', (req, res) => {
+  // Export Structured JSON
+  app.get('/api/v1/research/:id/export/json', (req: Request, res: Response) => {
     const job = ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }
-    res.setHeader('Content-Disposition', `attachment; filename="market-research-${job.id}.json"`);
+    res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${job.id}.json"`);
     res.setHeader('Content-Type', 'application/json');
     res.send(JSON.stringify(job.report, null, 2));
+  });
+
+  // Export Structured CSV (Claims + Evidence + Financials)
+  app.get('/api/v1/research/:id/export/csv', (req: Request, res: Response) => {
+    const job = ResearchPipelineManager.getJob(req.params.id);
+    if (!job || !job.report) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
+    }
+
+    const report = job.report;
+    const lines: string[] = [];
+
+    // Header metadata
+    lines.push(`"MARKET RESEARCH REPORT","${report.title.replace(/"/g, '""')}"`);
+    lines.push(`"Question","${report.question.replace(/"/g, '""')}"`);
+    lines.push(`"Industry","${report.industry}"`);
+    lines.push(`"Geography","${report.geography}"`);
+    lines.push(`"Time Horizon","${report.time_horizon}"`);
+    lines.push(`"Evidence Score","${report.evidence_score_breakdown.overall_score}/100"`);
+    lines.push('');
+
+    // Claims section
+    lines.push('"CLAIMS AND PROVENANCE"');
+    lines.push('"Citation #","Claim Type","Statement","Status","Confidence Score","Reasoning"');
+    report.claims.forEach(c => {
+      lines.push(`"[${c.citation_number}]","${c.claim_type}","${c.statement.replace(/"/g, '""')}","${c.verification_status}","${c.confidence}%","${c.reasoning.replace(/"/g, '""')}"`);
+    });
+    lines.push('');
+
+    // Sources section
+    lines.push('"SOURCES APPENDIX"');
+    lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score"');
+    report.sources.forEach(s => {
+      lines.push(`"${s.id}","${s.source_type}","${s.domain}","${s.publisher.replace(/"/g, '""')}","${s.url}","${s.reliability_score}%"`);
+    });
+
+    res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${job.id}.csv"`);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.send(lines.join('\n'));
   });
 
   // -------------------------------------------------------------
@@ -233,13 +315,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Market Research Agent V2 server running on http://0.0.0.0:${PORT}`);
+    console.log(`Market Intelligence Agent V2 running on http://0.0.0.0:${PORT}`);
   });
 }
 
