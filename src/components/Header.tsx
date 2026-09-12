@@ -23,6 +23,7 @@ interface HeaderProps {
   setActiveView: (view: 'workspace' | 'report' | 'evidence' | 'sources' | 'progress') => void;
   onExportJson: () => void;
   onPrintReport: () => void;
+  onOpenAudit: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,6 +35,7 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveView,
   onExportJson,
   onPrintReport,
+  onOpenAudit,
 }) => {
   const isJobRunning = currentJob && currentJob.status !== 'COMPLETED' && currentJob.status !== 'FAILED' && currentJob.status !== 'CANCELLED';
 
@@ -126,6 +128,15 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">
+          <button
+            onClick={onOpenAudit}
+            title="System Health, Diagnostics & Test Suites"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors"
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-cyan-400" />
+            <span className="hidden md:inline">Audit & Tests</span>
+          </button>
+
           {report && (
             <div className="hidden sm:flex items-center gap-1.5">
               <button

@@ -13,6 +13,7 @@ import { EvidenceExplorer } from './components/EvidenceExplorer.js';
 import { SourcesAppendix } from './components/SourcesAppendix.js';
 import { CitationModal } from './components/CitationModal.js';
 import { PrintReportView } from './components/PrintReportView.js';
+import { SystemAuditModal } from './components/SystemAuditModal.js';
 import type { 
   ResearchJob, 
   FullResearchReport, 
@@ -28,6 +29,7 @@ export default function App() {
   const [events, setEvents] = useState<ResearchEvent[]>([]);
   const [activeView, setActiveView] = useState<'workspace' | 'report' | 'evidence' | 'sources' | 'progress' | 'print'>('workspace');
   const [isNewModalOpen, setIsNewModalOpen] = useState<boolean>(false);
+  const [isAuditModalOpen, setIsAuditModalOpen] = useState<boolean>(false);
   const [inspectedClaim, setInspectedClaim] = useState<Claim | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -224,6 +226,7 @@ export default function App() {
         setActiveView={(v) => setActiveView(v)}
         onExportJson={handleExportJson}
         onPrintReport={() => setActiveView('print')}
+        onOpenAudit={() => setIsAuditModalOpen(true)}
       />
 
       {/* Main Body View */}
@@ -277,6 +280,12 @@ export default function App() {
       <CitationModal
         claim={inspectedClaim}
         onClose={() => setInspectedClaim(null)}
+      />
+
+      {/* System Health, Diagnostics & Test Suite Modal */}
+      <SystemAuditModal
+        isOpen={isAuditModalOpen}
+        onClose={() => setIsAuditModalOpen(false)}
       />
     </div>
   );
