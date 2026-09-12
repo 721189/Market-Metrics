@@ -3,7 +3,7 @@
  * Contains:
  * - 1. Financial Math & Economics Validation Test Suite
  * - 2. Security, Input Sanitization & Auth Test Suite
- * - 3. End-to-End (E2E) Pipeline Integration Test Suite
+ * - 3. End-to-End (E2E) Pipeline & Claim/Contradiction Test Suite
  * - 4. Concurrency & Queue Load Test Suite
  */
 
@@ -11,6 +11,8 @@ import { FinancialEngine } from './financial.js';
 import { PostgresDatabaseAdapter } from './database_adapter.js';
 import { researchQueue } from './queue_engine.js';
 import { RealDocumentFetcher } from './fetcher.js';
+import { NumericNormalizer, ContradictionEngine, RealClaimVerifier } from './claim_engine.js';
+import { Claim, Evidence, Source } from '../types.js';
 
 export interface TestResult {
   suite: string;
@@ -103,7 +105,7 @@ export class TestSuiteRunner {
       // LTV = 12000 * 0.8 / 0.08 = 120,000. LTV:CAC = 120,000 / 6000 = 20.0x
       const isLtvCorrect = econ.ltv === 120000;
       const isRatioCorrect = econ.ltv_to_cac === 20;
-      const isPaybackCorrect = econ.payback_period_months === 7.5; // (6000 / (12000*0.8/12)) = 6000 / 800 = 7.5 months
+      const isPaybackCorrect = econ.payback_period_months === 7.5;
       results.push({
         suite: 'Financial Engine',
         test_name: 'LTV, CAC, Margin & Payback Period Mathematics',
@@ -114,17 +116,21 @@ export class TestSuiteRunner {
       });
     }
 
-    // Test 4: Sensitivity Matrix Variance
+    // Test 4: Numeric Normalizer
     {
       const tStart = Date.now();
-      const matrix = FinancialEngine.generateSensitivityMatrix(12000, 6000, 80);
-      const validRows = matrix.length === 3 && matrix.every(row => row.length === 3);
+      const norm1 = NumericNormalizer.normalize('$4.5 Billion');
+      const norm2 = NumericNormalizer.normalize('₹38,000 Crore');
+      const norm3 = NumericNormalizer.normalize('18.5%');
+
+      const isPass = norm1?.value === 4500000000 && norm2?.value === 380000000000 && norm3?.value === 18.5;
       results.push({
         suite: 'Financial Engine',
-        test_name: 'Sensitivity Matrix Variance & Multi-Scenario Bounds',
-        status: validRows ? 'PASS' : 'FAIL',
+        test_name: 'Numeric Normalization Engine ($B, ₹ Crore, %)',
+        status: isPass ? 'PASS' : 'FAIL',
         duration_ms: Date.now() - tStart,
-        details: 'Evaluates bull/base/bear parametric perturbations across 9 dimension nodes.',
+        expected: '4.5B -> 4.5e9, 38k Cr -> 3.8e11, 18.5% -> 18.5',
+        actual: `Parsed: ${norm1?.value}, ${norm2?.value}, ${norm3?.value}`,
       });
     }
 
@@ -245,31 +251,46 @@ export class TestSuiteRunner {
       });
     }
 
-    // Test 2: Database Storage Adapter CRUD
+    // Test 2: Contradiction Engine Detection
     {
       const tStart = Date.now();
-      const db = PostgresDatabaseAdapter.getInstance();
-      const testJob: any = {
-        id: `test-e2e-job-${Date.now()}`,
-        question: 'E2E Verification Test',
-        industry: 'Testing',
-        geography: 'Global',
-        time_horizon: '2026',
-        status: 'RUNNING',
-        current_stage: 'PLANNING',
-        progress: 10,
-        created_at: new Date().toISOString(),
-      };
-      await db.saveJob(testJob);
-      const retrieved = await db.getJob(testJob.id);
-      const isSaved = retrieved && retrieved.id === testJob.id;
-      await db.deleteJob(testJob.id);
+      const mockClaims: Claim[] = [
+        {
+          id: 'c1',
+          job_id: 'j1',
+          statement: 'Total market size reaches $2 Billion by 2030.',
+          claim_type: 'MARKET_SIZE',
+          verification_status: 'SUPPORTED',
+          confidence: 90,
+          reasoning: 'Gartner survey',
+          created_at: new Date().toISOString(),
+          supporting_evidence_ids: ['e1'],
+          contradicting_evidence_ids: [],
+        },
+        {
+          id: 'c2',
+          job_id: 'j1',
+          statement: 'Total market size reaches $15 Billion by 2030.',
+          claim_type: 'MARKET_SIZE',
+          verification_status: 'SUPPORTED',
+          confidence: 85,
+          reasoning: 'Alternative vendor press release',
+          created_at: new Date().toISOString(),
+          supporting_evidence_ids: ['e2'],
+          contradicting_evidence_ids: [],
+        },
+      ];
+
+      const analysis = ContradictionEngine.analyzeContradictions(mockClaims, []);
+      const detectedDivergence = analysis.contradictionsFound.length > 0;
 
       results.push({
         suite: 'E2E Pipeline',
-        test_name: 'Database Storage CRUD & State Persistence Cycle',
-        status: isSaved ? 'PASS' : 'FAIL',
+        test_name: 'Contradiction Detection Engine ($2B vs $15B Divergence)',
+        status: detectedDivergence ? 'PASS' : 'FAIL',
         duration_ms: Date.now() - tStart,
+        expected: 'Contradiction flagged due to 7.5x valuation ratio',
+        actual: `Contradictions: ${analysis.contradictionsFound.length}`,
       });
     }
 

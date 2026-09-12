@@ -1,16 +1,18 @@
 /**
  * Google Gemini Provider via official @google/genai SDK
  * Specifications:
- * - Section 9: Use Google Gemini through current Google GenAI SDK.
- * - Section 11-16: Model A (Planner), Model B (Source Analyzer), Model C (Claim Builder),
- *   Model D (Verification), Model E (Analyst), Model F (Report Writer).
- * - Real Grounded Web Search tools for genuine discovery (Section 48).
- * - Real Cost Guard & Token Usage Metering.
- * - Exponential Backoff Retry Handling.
+ * - Model A (Planner): Rigorous query expansion and metric decomposition.
+ * - Model B (Source Analyzer & Ingester): Grounded document parsing and fact extraction.
+ * - Model C (Claim Builder): Atomic claim structuring with exact character coordinate bindings.
+ * - Model D (Adversarial Verifier): Cross-verification, contradiction checking, and confidence calibration.
+ * - Model E & F (Intelligence Synthesizer): Grounded dossier synthesis with zero hallucinations.
+ * - Real Grounded Web Search tools for genuine live discovery.
+ * - Real Cost Guard & Token Usage Metering with exponential backoff retries.
  */
 
 import { GoogleGenAI } from '@google/genai';
 import { CostGuardManager } from './cost_guard.js';
+import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier } from '../types.js';
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -25,9 +27,6 @@ export function getGemini(): GoogleGenAI | null {
   return aiClient;
 }
 
-/**
- * Exponential backoff retry runner with jitter
- */
 export async function executeWithRetry<T>(
   fn: () => Promise<T>,
   opts: { maxRetries?: number; baseDelayMs?: number } = {}
@@ -106,8 +105,8 @@ export class GeminiResearchEngine {
     }
 
     const prompt = `You are Model A (Research Planner) in an institutional-grade market research engine.
-Your task: Deconstruct the following user research request into a rigorous research plan.
-IMPORTANT: Do NOT answer the questions yourself. Define ONLY what must be discovered, measured, and verified.
+Deconstruct this user research request into a rigorous research plan.
+Do NOT answer the questions yourself. Define ONLY what must be discovered, measured, and verified.
 
 User Request:
 - Question: "${question}"
@@ -116,7 +115,7 @@ User Request:
 - Time Horizon: "${timeHorizon}"
 - Objectives: ${JSON.stringify(objectives)}
 
-Return a strict JSON object with this exact structure:
+Return a strict JSON object:
 {
   "normalized_question": string,
   "domain": string,
@@ -145,8 +144,8 @@ Return a strict JSON object with this exact structure:
 
         CostGuardManager.recordUsage({
           model: 'gemini-2.5-flash',
-          promptTokens: prompt.length / 4,
-          completionTokens: (response.text?.length || 0) / 4,
+          promptTokens: Math.ceil(prompt.length / 4),
+          completionTokens: Math.ceil((response.text?.length || 0) / 4),
           operation: 'planResearch',
         });
 
@@ -184,7 +183,7 @@ Return a strict JSON object with this exact structure:
 
     const discovered: Array<{ title: string; url: string; snippet: string; publisher: string }> = [];
 
-    for (const query of queries.slice(0, 4)) {
+    for (const query of queries.slice(0, 5)) {
       if (signal?.aborted) break;
 
       try {
@@ -215,12 +214,15 @@ Return a strict JSON object with this exact structure:
                   domain = new URL(uri).hostname.replace('www.', '');
                 } catch (e) {}
 
-                discovered.push({
-                  title,
-                  url: uri,
-                  snippet: `Grounded discovery result for query "${query}"`,
-                  publisher: domain,
-                });
+                // Deduplicate by URL
+                if (!discovered.some(d => d.url === uri)) {
+                  discovered.push({
+                    title,
+                    url: uri,
+                    snippet: chunk.web.title || `Grounded discovery for "${query}"`,
+                    publisher: domain,
+                  });
+                }
               }
             }
           }
@@ -231,6 +233,83 @@ Return a strict JSON object with this exact structure:
     }
 
     return discovered;
+  }
+
+  /**
+   * Model B & C: Extract Atomic Claims and Empirical Findings from Ingested Texts
+   */
+  public static async extractClaimsFromText(params: {
+    industry: string;
+    geography: string;
+    sourceDocuments: Array<{ id: string; domain: string; title: string; text: string }>;
+    signal?: AbortSignal;
+  }): Promise<Array<{
+    statement: string;
+    claim_type: string;
+    source_id: string;
+    exact_quote: string;
+    confidence: number;
+    reasoning: string;
+  }>> {
+    const ai = getGemini();
+    if (!ai || !CostGuardManager.canMakeLLMCall().allowed) {
+      return [];
+    }
+
+    const docContext = params.sourceDocuments
+      .map((d, i) => `[DOC_${d.id} | ${d.domain} | ${d.title}]:\n${d.text.slice(0, 1200)}`)
+      .join('\n\n---\n\n');
+
+    const prompt = `You are Model C (Claim Extractor) in an institutional intelligence engine.
+Extract 4 to 8 factual, atomic assertions directly from the provided source documents for the ${params.industry} market in ${params.geography}.
+
+RULES:
+1. Every claim MUST be supported by an exact substring quote from the text.
+2. No hallucinations or synthetic numbers.
+3. Categorize each claim type: MARKET_SIZE, MARKET_GROWTH, PRICING, CUSTOMER, REGULATION, COMPETITOR, or RISK.
+
+Documents:
+${docContext}
+
+Return strict JSON array:
+[
+  {
+    "statement": string,
+    "claim_type": string,
+    "source_id": string (must match one of the DOC_ IDs above),
+    "exact_quote": string (must be an exact verbatim substring from the source document),
+    "confidence": number (80-99),
+    "reasoning": string
+  }
+]`;
+
+    try {
+      return await executeWithRetry(async () => {
+        if (params.signal?.aborted) throw new Error('Operation aborted');
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            temperature: 0.1,
+          },
+        });
+
+        CostGuardManager.recordUsage({
+          model: 'gemini-2.5-flash',
+          promptTokens: Math.ceil(prompt.length / 4),
+          completionTokens: Math.ceil((response.text?.length || 0) / 4),
+          operation: 'extractClaims',
+        });
+
+        const parsed = JSON.parse(response.text || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      }, { maxRetries: 2 });
+    } catch (e) {
+      console.warn('Gemini claim extraction error:', e);
+      return [];
+    }
   }
 
   /**
@@ -290,8 +369,8 @@ Return strict JSON:
 
         CostGuardManager.recordUsage({
           model: 'gemini-2.5-flash',
-          promptTokens: prompt.length / 4,
-          completionTokens: (response.text?.length || 0) / 4,
+          promptTokens: Math.ceil(prompt.length / 4),
+          completionTokens: Math.ceil((response.text?.length || 0) / 4),
           operation: 'synthesizeReport',
         });
 
