@@ -1,0 +1,6 @@
+{
+  "name": "Market Research Agent V2",
+  "description": "Evidence-backed market intelligence system with source discovery, claim verification, deterministic financial modeling, and traceable citations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
