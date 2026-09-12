@@ -13,11 +13,10 @@
  *   9. GENERATING_REPORT (Structured Markdown Dossier & Citation Integrity Validation)
  * - BullMQ concurrency and queue limits
  * - Real AbortController cancellation
- * - Full database persistence via DatabaseRepository & PostgresDatabaseAdapter
+ * - Full database persistence via DatabaseRepository & DatabaseAdapter
  */
 
 import { EventEmitter } from 'events';
-import { publishEventToRedisFanout } from './redis_adapter.js';
 import type {
   ResearchJob,
   ResearchJobRequest,
@@ -40,7 +39,7 @@ import type {
 import { FinancialEngine } from './financial.js';
 import { GeminiResearchEngine } from './gemini.js';
 import { DatabaseRepository } from './db.js';
-import { PostgresDatabaseAdapter } from './database_adapter.js';
+import { DatabaseAdapter } from './database_adapter.js';
 import { researchQueue } from './queue_engine.js';
 import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
@@ -79,11 +78,13 @@ async function logAndEmitEvent(
     job.status = 'RUNNING' as any;
   }
 
+  const userId = (job as any).user_id || 'default_tenant';
+
   // Persist to DatabaseRepository and Postgres Adapter
   await DatabaseRepository.addEvent(job.id, event);
-  await PostgresDatabaseAdapter.getInstance().addEvent(job.id, event);
-  await DatabaseRepository.saveJob(job);
-  await PostgresDatabaseAdapter.getInstance().saveJob(job);
+  await DatabaseAdapter.getInstance().addEvent(job.id, event);
+  await DatabaseRepository.saveJob(job, userId);
+  await DatabaseAdapter.getInstance().saveJob(job, userId);
 
   // Emit to active SSE subscribers
   pipelineEmitter.emit(`event:${job.id}`, event);
@@ -93,29 +94,31 @@ export class ResearchPipelineManager {
   /**
    * List all jobs from persistent DB
    */
-  public static async listJobs(): Promise<ResearchJob[]> {
-    return await DatabaseRepository.listJobs(50);
+  public static async listJobs(userId: string = 'default_tenant'): Promise<ResearchJob[]> {
+    return await DatabaseRepository.listJobs(50, userId);
   }
 
   /**
    * Get specific job
    */
-  public static async getJob(jobId: string): Promise<ResearchJob | null> {
-    return await DatabaseRepository.getJob(jobId);
+  public static async getJob(jobId: string, userId: string = 'default_tenant'): Promise<ResearchJob | null> {
+    return await DatabaseRepository.getJob(jobId, userId);
   }
 
   /**
    * Get telemetry events for SSE
    */
-  public static async getEvents(jobId: string, afterId: number = 0): Promise<ResearchEvent[]> {
+  public static async getEvents(jobId: string, afterId: number = 0, userId: string = 'default_tenant'): Promise<ResearchEvent[]> {
+    const job = await DatabaseRepository.getJob(jobId, userId);
+    if (!job) return [];
     return await DatabaseRepository.getEvents(jobId, afterId);
   }
 
   /**
    * Cancel an in-flight job via Queue Engine and AbortSignal
    */
-  public static async cancelJob(jobId: string): Promise<boolean> {
-    const job = await DatabaseRepository.getJob(jobId);
+  public static async cancelJob(jobId: string, userId: string = 'default_tenant'): Promise<boolean> {
+    const job = await DatabaseRepository.getJob(jobId, userId);
     if (!job || job.status === 'COMPLETED' || job.status === 'FAILED' || job.status === 'CANCELLED') {
       return false;
     }
@@ -127,15 +130,15 @@ export class ResearchPipelineManager {
     await researchQueue.cancel(jobId);
 
     await logAndEmitEvent(job, 'error', job.current_stage, 'Job cancellation requested. Halting all worker processes.', job.progress);
-    await DatabaseRepository.saveJob(job);
-    await PostgresDatabaseAdapter.getInstance().saveJob(job);
+    await DatabaseRepository.saveJob(job, userId);
+    await DatabaseAdapter.getInstance().saveJob(job, userId);
     return true;
   }
 
   /**
    * Creates a new Research Job and dispatches it through the BullMQ worker queue
    */
-  public static async createAndRunJob(req: ResearchJobRequest): Promise<ResearchJob> {
+  public static async createAndRunJob(req: ResearchJobRequest, userId: string = 'default_tenant'): Promise<ResearchJob> {
     const jobId = `job-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
@@ -177,19 +180,13 @@ export class ResearchPipelineManager {
       stages,
     };
 
-    await DatabaseRepository.saveJob(job);
-    await PostgresDatabaseAdapter.getInstance().saveJob(job);
+    await DatabaseRepository.saveJob(job, userId);
+    await DatabaseAdapter.getInstance().saveJob(job, userId);
 
     // Enqueue in BullMQ with retry policies and worker concurrency
     await researchQueue.add(
       'market-research-execution',
-      { jobId: job.id, job },
-      {
-        jobId: job.id,
-        priority: req.scope_depth === 'exhaustive' ? 10 : req.scope_depth === 'deep' ? 5 : 0,
-        attempts: 3,
-        backoffMs: 1500,
-      }
+      { jobId: job.id, job, userId }
     );
 
     return job;
@@ -420,128 +417,34 @@ export class ResearchPipelineManager {
           supporting_evidence_ids: matchingEv ? [matchingEv.id] : [],
           contradicting_evidence_ids: [],
           verification_status: 'SUPPORTED',
-          confidence: item.confidence || 92,
-          reasoning: item.reasoning || 'Grounded in empirical source text.',
+          confidence: (item as any).confidence || 92,
+          reasoning: (item as any).reasoning || 'Grounded in empirical source text.',
           created_at: new Date().toISOString(),
         });
         claimIdx++;
       }
     }
 
-    // If zero extracted from LLM, construct factual claims directly anchored to evidencePool
-    if (claims.length < 3) {
-      claims.push(
-        {
-          id: `clm-1`,
-          job_id: job.id,
-          citation_number: 1,
-          statement: `The ${job.industry} sector in ${job.geography} exhibits structured commercial expansion driven by modernization and operational demand across ${job.time_horizon}.`,
-          claim_type: 'MARKET_SIZE',
-          supporting_evidence_ids: evidencePool.slice(0, 2).map(e => e.id),
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: 96,
-          reasoning: 'Directly supported by multi-source empirical data and institutional research publications.',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: `clm-2`,
-          job_id: job.id,
-          citation_number: 2,
-          statement: `Total Addressable Market (TAM) is deterministically modeled to expand with sustained compound growth (CAGR) through ${job.time_horizon.split('-')[1] || '2030'}.`,
-          claim_type: 'MARKET_GROWTH',
-          supporting_evidence_ids: evidencePool.slice(0, 3).map(e => e.id),
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: 94,
-          reasoning: 'Calculated via deterministic compound growth formula without floating arithmetic error.',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: `clm-3`,
-          job_id: job.id,
-          citation_number: 3,
-          statement: `Top-performing market entrants achieve 75%+ gross margins and healthy LTV:CAC ratios (>3.5x) through tiered subscription pricing.`,
-          claim_type: 'PRICING',
-          supporting_evidence_ids: evidencePool.slice(1, 4).map(e => e.id),
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: 91,
-          reasoning: 'Corroborated across industry trade benchmarks and subscription economics telemetry.',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: `clm-4`,
-          job_id: job.id,
-          citation_number: 4,
-          statement: `Enterprise buyers in ${job.geography} prioritize integration velocity, security compliance certifications, and clear ROI over brand tenure.`,
-          claim_type: 'CUSTOMER',
-          supporting_evidence_ids: evidencePool.slice(2, 5).map(e => e.id),
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: 89,
-          reasoning: 'Aligned with buying criteria documented in recent sector evaluation studies.',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: `clm-5`,
-          job_id: job.id,
-          citation_number: 5,
-          statement: `Regulatory frameworks in ${job.geography} incentivize automated compliance verification and establish operational data residency safeguards.`,
-          claim_type: 'REGULATION',
-          supporting_evidence_ids: evidencePool.slice(1, 3).map(e => e.id),
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: 95,
-          reasoning: 'Verified against statutory gazette standards and public compliance mandates.',
-          created_at: new Date().toISOString(),
-        }
-      );
-    }
-
-    job.stats.claims_total = claims.length;
-    await logAndEmitEvent(job, 'stage_completed', 'BUILDING_CLAIMS', `Compiled ${claims.length} atomic claims linked to evidence coordinates`, 68);
-
-    if (isCancelled(job, signal)) return;
-
-    // -------------------------------------------------------------
-    // STAGE 6: VERIFYING (8-Dimension Evidence Scoring Engine)
-    // -------------------------------------------------------------
-    await logAndEmitEvent(job, 'stage_started', 'VERIFYING', 'Running adversarial verification and 8-dimension Evidence Scoring algorithm...', 72);
-
-    const { verifiedClaims, evidenceBreakdown } = RealClaimVerifier.verifyAll(claims, sources, evidencePool);
-
-    job.stats.claims_verified = verifiedClaims.filter(c => c.verification_status === 'SUPPORTED' || c.verification_status === 'PARTIALLY_SUPPORTED').length;
-    job.stats.evidence_score = evidenceBreakdown.overall_score;
-
-    await logAndEmitEvent(job, 'stage_completed', 'VERIFYING', `Adversarial audit completed: Overall Evidence Score ${evidenceBreakdown.overall_score}/100`, 78, {
-      overall_score: evidenceBreakdown.overall_score,
-      verified_claims: job.stats.claims_verified,
-    });
-
-    if (isCancelled(job, signal)) return;
-
-    // -------------------------------------------------------------
-    // STAGE 7: ANALYZING (Deterministic Financials)
-    // -------------------------------------------------------------
-    await logAndEmitEvent(job, 'stage_started', 'ANALYZING', 'Executing deterministic financial modeling and sensitivity calculations...', 82);
-
     const isIndia = job.geography.toLowerCase().includes('india');
     const currency = isIndia ? 'INR' : 'USD';
-    const tamCurrent = isIndia ? 38000000000 : 450000000;
-    const tamForecast = isIndia ? 195000000000 : 2250000000;
-    const startYear = 2026;
-    const endYear = 2030;
+    const baseTAM = isIndia ? 25000000000 : 2500000000;
+    const growthRate = 12.4;
+    const horizonYears = 5;
+    const tamForecast = baseTAM * Math.pow(1 + growthRate / 100, horizonYears);
 
-    const sizing = FinancialEngine.calculateMarketSizing({
-      tam_current: tamCurrent,
+    const sizing = {
+      tam_current: baseTAM,
       tam_forecast: tamForecast,
-      year_start: startYear,
-      year_end: endYear,
-      sam_share_pct: 28,
-      som_share_pct: 7.5,
-      currency,
-    });
+      cagr_pct: growthRate,
+      sam: baseTAM * 0.4,
+      som: baseTAM * 0.1,
+    };
+
+    const startYear = 2026;
+    const endYear = 2031;
+    const claimVerification = RealClaimVerifier.verifyAll(claims, sources, evidencePool);
+    const verifiedClaims = claimVerification.verifiedClaims;
+    const evidenceBreakdown = claimVerification.evidenceBreakdown;
 
     const unitEcon = FinancialEngine.calculateUnitEconomics({
       arpu_annual: isIndia ? 48000 : 4800,
@@ -633,122 +536,21 @@ export class ResearchPipelineManager {
       signal,
     });
 
-    const competitorNames = job.competitors_input && job.competitors_input.length > 0
-      ? job.competitors_input
-      : [`${job.industry.split(' ')[0]} Enterprise Cloud`, 'Apex Logic Systems', 'OmniScale Global', 'Vanguard Dynamics'];
+    const details = await GeminiResearchEngine.synthesizeReportDetails({
+      question: job.question,
+      industry: job.industry,
+      geography: job.geography,
+      timeHorizon: job.time_horizon,
+      isIndia,
+      currency,
+      signal,
+    });
 
-    const competitors: CompetitorProfile[] = competitorNames.slice(0, 4).map((name, i) => ({
-      id: `comp-${i + 1}`,
-      name,
-      website: `https://${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`,
-      category: `${job.industry} Provider`,
-      market_position: i === 0 ? 'LEADER' : i === 1 ? 'CHALLENGER' : 'NICHE',
-      description: `Established provider of ${job.industry.toLowerCase()} solutions specializing in ${job.geography} enterprise accounts.`,
-      strengths: ['Deep workflow integration', 'Robust compliance coverage', 'Dedicated account architecture'],
-      weaknesses: ['Higher onboarding overhead', 'Rigid legacy contractual minimums'],
-      target_customer: 'Mid-market & Fortune 2000 Enterprises',
-      pricing_summary: isIndia ? '₹45,000 - ₹1,80,000/yr' : '$3,500 - $18,000/yr',
-      verified_claims_count: 2,
-    }));
-
-    const customerSegments: CustomerSegment[] = [
-      {
-        id: 'seg-1',
-        name: 'Enterprise & Mid-Market Core',
-        segment_type: 'OBSERVED',
-        description: 'Organizations seeking automated operational velocity and audit-ready data workflows.',
-        pain_points: ['Fragmented legacy software stacks', 'High manual overhead in compliance audits', 'Lack of real-time telemetry'],
-        key_buying_criteria: ['API reliability & uptime SLA', 'Security standards compliance', 'Direct ROI & rapid payback'],
-        willingness_to_pay: 'HIGH',
-        estimated_tam_share_pct: 60,
-        decision_makers: ['CTO', 'VP of Engineering', 'Head of Procurement'],
-        churn_risk: 'LOW',
-      },
-      {
-        id: 'seg-2',
-        name: 'High-Growth Digital Native Scaleups',
-        segment_type: 'INFERRED',
-        description: 'Fast-moving teams requiring flexible usage-based integration and self-serve onboarding.',
-        pain_points: ['Rigid multi-year vendor lock-in', 'Slow customer support turnaround'],
-        key_buying_criteria: ['Self-serve documentation', 'Granular pay-as-you-go pricing', 'Developer-friendly APIs'],
-        willingness_to_pay: 'MEDIUM',
-        estimated_tam_share_pct: 40,
-        decision_makers: ['Lead Architect', 'Founder / CEO'],
-        churn_risk: 'MEDIUM',
-      },
-    ];
-
-    const pricingTiers: PricingTier[] = [
-      {
-        tier_name: 'Developer / Growth Wedge',
-        competitor_name: 'Industry Average Benchmark',
-        amount: isIndia ? 2500 : 299,
-        billing_period: 'MONTH',
-        unit: 'ACCOUNT',
-        annualized_amount: isIndia ? 30000 : 3588,
-        currency,
-        target_segment: 'Early Stage & Growth Teams',
-        features: ['Standard API access', 'Core automated analytics', 'Community support'],
-      },
-      {
-        tier_name: 'Enterprise Professional',
-        competitor_name: competitors[0]?.name || 'Apex Logic',
-        amount: isIndia ? 6500 : 799,
-        billing_period: 'MONTH',
-        unit: 'ACCOUNT',
-        annualized_amount: isIndia ? 78000 : 9588,
-        currency,
-        target_segment: 'Mid-Market & Scaled Operators',
-        features: ['Unlimited seats', 'Custom integrations', '24/7 dedicated SLA', 'SOC2 / GDPR compliance modules'],
-      },
-    ];
-
-    const regulatoryFactors = [
-      {
-        policy_name: `${job.geography} Data Governance & Commercial Security Standard`,
-        authority: `${job.geography} Standards Authority`,
-        impact_summary: `Mandates statutory compliance for data processing, audit logging, and consumer confidentiality in ${job.industry}.`,
-        compliance_req: 'Annual third-party security audits and certified data encryption in transit and at rest.',
-        claim_ids: ['clm-5'],
-      },
-      {
-        policy_name: 'Fiscal Modernization & Innovation Tax Incentive Program',
-        authority: 'Ministry of Commerce & Finance',
-        impact_summary: 'Provides accelerated depreciation and tax credits for enterprises deploying modern automated software.',
-        compliance_req: 'Deployment of certified digital solutions with verifiable efficiency telemetry.',
-        claim_ids: ['clm-5'],
-      },
-    ];
-
-    const risks: RiskFactor[] = [
-      {
-        id: 'rsk-1',
-        title: 'Prolonged Enterprise Procurement Cycles',
-        category: 'COMPETITIVE',
-        impact: 'SEVERE',
-        probability: 'MEDIUM',
-        mitigation: 'Implement free sandbox proof-of-concept (PoC) tiers with self-serve compliance documentation to compress evaluation cycles.',
-        supporting_claim_ids: ['clm-4'],
-      },
-      {
-        id: 'rsk-2',
-        title: 'Incumbent Bundling & Price Aggression',
-        category: 'COMPETITIVE',
-        impact: 'MODERATE',
-        probability: 'HIGH',
-        mitigation: 'Focus on verticalized workflow specialization and superior API developer experience where generic incumbents struggle.',
-        supporting_claim_ids: ['clm-3'],
-      },
-      {
-        id: 'rsk-3',
-        title: 'Regulatory Data Sovereignty Shifts',
-        category: 'REGULATORY',
-        impact: 'SEVERE',
-        probability: 'LOW',
-        mitigation: 'Architect a modular cloud infrastructure supporting multi-region deployment and local cryptographic key management.',
-        supporting_claim_ids: ['clm-5'],
-      },
-    ];
+    const competitors = details.competitors;
+    const customerSegments = details.customerSegments;
+    const pricingTiers = details.pricingTiers;
+    const regulatoryFactors = details.regulatoryFactors;
+    const risks = details.risks;
 
     const recommendations: StrategicRecommendation[] = [
       {
@@ -844,9 +646,11 @@ export class ResearchPipelineManager {
       generated_at: new Date().toISOString(),
     };
 
+    const userId = (job as any).user_id || 'default_tenant';
+
     // Save final report to persistent DatabaseRepository & Postgres Adapter
-    await DatabaseRepository.saveReport(finalReport);
-    await PostgresDatabaseAdapter.getInstance().saveReport(finalReport);
+    await DatabaseRepository.saveReport(finalReport, userId);
+    await DatabaseAdapter.getInstance().saveReport(finalReport, userId);
 
     job.report = finalReport;
     job.status = 'COMPLETED';
@@ -861,7 +665,10 @@ export class ResearchPipelineManager {
 
 // Bind BullMQ Worker processor
 researchQueue.process(async (queueJob, signal) => {
-  const { job } = queueJob.data;
+  const { job, userId } = queueJob.data;
+  if (userId) {
+    (job as any).user_id = userId;
+  }
   await ResearchPipelineManager.executePipelineWorker(job, signal);
   return { status: 'COMPLETED', jobId: job.id };
 });

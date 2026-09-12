@@ -23,7 +23,7 @@ interface HeaderProps {
   setActiveView: (view: 'workspace' | 'report' | 'evidence' | 'sources' | 'progress') => void;
   onExportJson: () => void;
   onPrintReport: () => void;
-  onOpenAudit: () => void;
+  
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -35,7 +35,7 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveView,
   onExportJson,
   onPrintReport,
-  onOpenAudit,
+  
 }) => {
   const isJobRunning = currentJob && currentJob.status !== 'COMPLETED' && currentJob.status !== 'FAILED' && currentJob.status !== 'CANCELLED';
 
@@ -61,81 +61,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Navigation View Switcher */}
         <div className="flex items-center rounded-lg bg-slate-900/90 p-1 border border-slate-800 text-xs">
-          <button
-            onClick={() => setActiveView('workspace')}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-              activeView === 'workspace'
-                ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Home className="h-3.5 w-3.5" />
-            Workspace
-          </button>
-
-          {report && (
-            <>
-              <button
-                onClick={() => setActiveView('report')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                  activeView === 'report'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <FileText className="h-3.5 w-3.5" />
-                Report
-              </button>
-              <button
-                onClick={() => setActiveView('evidence')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                  activeView === 'evidence'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <ShieldCheck className="h-3.5 w-3.5" />
-                Evidence ({report.claims.length})
-              </button>
-              <button
-                onClick={() => setActiveView('sources')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                  activeView === 'sources'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Database className="h-3.5 w-3.5" />
-                Sources ({report.sources.length})
-              </button>
-            </>
-          )}
-
-          {isJobRunning && (
-            <button
-              onClick={() => setActiveView('progress')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all ${
-                activeView === 'progress'
-                  ? 'bg-cyan-500 text-slate-950 shadow-sm font-semibold'
-                  : 'text-amber-400 hover:text-amber-300 animate-pulse'
-              }`}
-            >
-              <Layers className="h-3.5 w-3.5" />
-              Live Pipeline
-            </button>
-          )}
-        </div>
-
-        {/* Action Controls */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onOpenAudit}
-            title="System Health, Diagnostics & Test Suites"
-            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors"
-          >
-            <ShieldCheck className="h-3.5 w-3.5 text-cyan-400" />
-            <span className="hidden md:inline">Audit & Tests</span>
-          </button>
+          
 
           {report && (
             <div className="hidden sm:flex items-center gap-1.5">

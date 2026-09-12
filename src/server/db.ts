@@ -1,13 +1,5 @@
 /**
- * Production Enterprise Persistent Repository Layer
- * Manages schema-backed entities:
- * - Users
- * - ResearchJobs
- * - JobEvents
- * - Sources & Documents
- * - Evidence (with exact character offsets)
- * - Claims & Provenance
- * - Reports
+ * Production Enterprise Persistent Repository Layer with User and Tenant Isolation
  */
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
@@ -54,22 +46,23 @@ const db = (app && firebaseConfig)
   ? getFirestore(app, firebaseConfig.firestoreDatabaseId || undefined) 
   : null;
 
-// High-speed fallback persistent local store in case of offline/transient cloud disconnect
-const localJobs = new Map<string, ResearchJob>();
+// Persistent local stores
+const localJobs = new Map<string, ResearchJob & { user_id?: string }>();
 const localEvents = new Map<string, ResearchEvent[]>();
-const localReports = new Map<string, FullResearchReport>();
+const localReports = new Map<string, FullResearchReport & { user_id?: string }>();
 
 export class DatabaseRepository {
   /**
-   * Save or Update a Research Job
+   * Save or Update a Research Job with strict owner ID
    */
-  public static async saveJob(job: ResearchJob): Promise<void> {
-    localJobs.set(job.id, { ...job });
+  public static async saveJob(job: ResearchJob, userId: string = 'default_tenant'): Promise<void> {
+    localJobs.set(job.id, { ...job, user_id: userId });
     if (db) {
       try {
         const jobRef = doc(db, 'jobs', job.id);
         await setDoc(jobRef, {
           id: job.id,
+          user_id: userId,
           question: job.question,
           industry: job.industry,
           geography: job.geography,
@@ -92,11 +85,13 @@ export class DatabaseRepository {
   }
 
   /**
-   * Get a Research Job by ID
+   * Get a Research Job by ID with strict owner validation
    */
-  public static async getJob(jobId: string): Promise<ResearchJob | null> {
-    if (localJobs.has(jobId)) {
-      return localJobs.get(jobId)!;
+  public static async getJob(jobId: string, userId: string = 'default_tenant'): Promise<ResearchJob | null> {
+    const job = localJobs.get(jobId);
+    if (job) {
+      if (job.user_id !== userId) return null;
+      return job;
     }
 
     if (db) {
@@ -104,7 +99,10 @@ export class DatabaseRepository {
         const jobRef = doc(db, 'jobs', jobId);
         const snap = await getDoc(jobRef);
         if (snap.exists()) {
-          const data = snap.data() as ResearchJob;
+          const data = snap.data() as ResearchJob & { user_id?: string };
+          if (data.user_id && data.user_id !== userId) {
+            return null;
+          }
           localJobs.set(jobId, data);
           return data;
         }
@@ -117,21 +115,26 @@ export class DatabaseRepository {
   }
 
   /**
-   * List recent research jobs
+   * List recent research jobs for a specific user/tenant
    */
-  public static async listJobs(maxLimit: number = 50): Promise<ResearchJob[]> {
-    const list = Array.from(localJobs.values());
+  public static async listJobs(maxLimit: number = 50, userId: string = 'default_tenant'): Promise<ResearchJob[]> {
+    const list = Array.from(localJobs.values()).filter(j => j.user_id === userId);
     if (list.length > 0) {
       return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, maxLimit);
     }
 
     if (db) {
       try {
-        const jobsQuery = query(collection(db, 'jobs'), orderBy('created_at', 'desc'), limit(maxLimit));
+        const jobsQuery = query(
+          collection(db, 'jobs'), 
+          where('user_id', '==', userId),
+          orderBy('created_at', 'desc'), 
+          limit(maxLimit)
+        );
         const snap = await getDocs(jobsQuery);
         const fetched: ResearchJob[] = [];
         snap.forEach(d => {
-          const item = d.data() as ResearchJob;
+          const item = d.data() as ResearchJob & { user_id?: string };
           localJobs.set(item.id, item);
           fetched.push(item);
         });
@@ -209,10 +212,10 @@ export class DatabaseRepository {
   }
 
   /**
-   * Save a complete compiled report
+   * Save a complete compiled report with ownership mapping
    */
-  public static async saveReport(report: FullResearchReport): Promise<void> {
-    localReports.set(report.job_id, report);
+  public static async saveReport(report: FullResearchReport, userId: string = 'default_tenant'): Promise<void> {
+    localReports.set(report.job_id, { ...report, user_id: userId });
     
     // Also update in job representation
     const job = localJobs.get(report.job_id);
@@ -221,7 +224,7 @@ export class DatabaseRepository {
       job.status = 'COMPLETED';
       job.progress = 100;
       job.completed_at = new Date().toISOString();
-      await this.saveJob(job);
+      await this.saveJob(job, userId);
     }
 
     if (db) {
@@ -229,6 +232,7 @@ export class DatabaseRepository {
         const reportRef = doc(db, 'reports', report.job_id);
         await setDoc(reportRef, {
           ...report,
+          user_id: userId,
           saved_at: new Date().toISOString(),
         });
       } catch (err) {
@@ -238,16 +242,19 @@ export class DatabaseRepository {
   }
 
   /**
-   * Get a report by Job ID
+   * Get a report by Job ID with ownership checks
    */
-  public static async getReport(jobId: string): Promise<FullResearchReport | null> {
-    if (localReports.has(jobId)) {
-      return localReports.get(jobId)!;
+  public static async getReport(jobId: string, userId: string = 'default_tenant'): Promise<FullResearchReport | null> {
+    const report = localReports.get(jobId);
+    if (report) {
+      if (report.user_id !== userId) return null;
+      return report;
     }
 
     const job = localJobs.get(jobId);
-    if (job?.report) {
-      localReports.set(jobId, job.report);
+    if (job && job.report) {
+      if (job.user_id !== userId) return null;
+      localReports.set(jobId, { ...job.report, user_id: userId });
       return job.report;
     }
 
@@ -256,7 +263,10 @@ export class DatabaseRepository {
         const reportRef = doc(db, 'reports', jobId);
         const snap = await getDoc(reportRef);
         if (snap.exists()) {
-          const data = snap.data() as FullResearchReport;
+          const data = snap.data() as FullResearchReport & { user_id?: string };
+          if (data.user_id && data.user_id !== userId) {
+            return null;
+          }
           localReports.set(jobId, data);
           return data;
         }
@@ -268,3 +278,5 @@ export class DatabaseRepository {
     return null;
   }
 }
+export const dbInstance = db;
+export const appInstance = app;

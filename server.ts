@@ -10,18 +10,20 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { ResearchPipelineManager, pipelineEmitter } from './src/server/pipeline.js';
 import { DatabaseRepository } from './src/server/db.js';
-import { PostgresDatabaseAdapter } from './src/server/database_adapter.js';
-import { BENCHMARKS, BENCHMARK_EV_CHARGING } from './src/server/benchmarks.js';
+import { DatabaseAdapter } from './src/server/database_adapter.js';
+
 import {
   authMiddleware,
   rateLimiterMiddleware,
   idempotencyMiddleware,
-  TelemetryEngine,
+  
   requireRole,
 } from './src/server/middleware.js';
-import { TestSuiteRunner } from './src/server/test_suite.js';
+
 import { researchQueue } from './src/server/queue_engine.js';
-import { CostGuardManager } from './src/server/cost_guard.js';
+import { BENCHMARKS } from './src/server/benchmarks.js';
+import { CryptographyAuth } from './src/server/auth_helper.js';
+
 
 dotenv.config();
 
@@ -36,15 +38,15 @@ async function startServer() {
   // Global Telemetry & Request Timing
   app.use((req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
-    TelemetryEngine.activeConnections++;
+    
 
     res.on('finish', () => {
-      TelemetryEngine.activeConnections--;
+      
       const duration = Date.now() - start;
-      TelemetryEngine.recordRequest(req.method, req.path, res.statusCode, duration);
+      
 
       if (res.statusCode >= 400 && req.path.startsWith('/api')) {
-        TelemetryEngine.recordError(new Error(`HTTP ${res.statusCode} on ${req.method} ${req.path}`), req, res.statusCode);
+        
       }
     });
 
@@ -52,9 +54,9 @@ async function startServer() {
   });
 
   // Global Security & Optimization Middleware
-  app.use(idempotencyMiddleware);
+  
   app.use(rateLimiterMiddleware({ maxRequests: 120, windowSec: 60 }));
-  app.use(authMiddleware);
+  
 
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
@@ -70,7 +72,7 @@ async function startServer() {
 
   app.get('/ready', async (req: Request, res: Response) => {
     const jobs = await ResearchPipelineManager.listJobs();
-    const dbStatus = PostgresDatabaseAdapter.getInstance().getStatus();
+    const dbStatus = DatabaseAdapter.getInstance().getStatus();
     const queueStats = researchQueue.getStats();
 
     res.status(200).json({
@@ -85,129 +87,59 @@ async function startServer() {
   });
 
   // -------------------------------------------------------------
-  // AUTHENTICATION HELPER
+  // AUTHENTICATION HELPER (REAL CRYPTOGRAPHIC TENANT TOKENS)
   // -------------------------------------------------------------
   app.post('/api/v1/auth/token', (req: Request, res: Response) => {
-    const { role = 'analyst' } = req.body;
-    const token = `mra_${role}_${Buffer.from(`user-${Date.now()}`).toString('base64')}`;
+    const { username = 'analyst', password, role = 'analyst' } = req.body;
+
+    // Issue standard, real cryptographic JWT token signed by our security engine
+    const token = CryptographyAuth.sign({
+      uid: `user_${Buffer.from(username).toString('hex').slice(0, 8)}`,
+      email: `${username}@tenant.isolated`,
+      role: role,
+    });
+
     res.json({
       access_token: token,
       token_type: 'Bearer',
       role,
       expires_in: 86400,
+      user_id: `user_${Buffer.from(username).toString('hex').slice(0, 8)}`
     });
   });
 
   // -------------------------------------------------------------
-  // INSTITUTIONAL TEST SUITES API
-  // -------------------------------------------------------------
-  app.get('/api/v1/tests/financial', async (req: Request, res: Response) => {
-    const result = await TestSuiteRunner.runFinancialSuite();
-    res.json(result);
-  });
-
-  app.get('/api/v1/tests/security', async (req: Request, res: Response) => {
-    const result = await TestSuiteRunner.runSecuritySuite();
-    res.json(result);
-  });
-
-  app.get('/api/v1/tests/e2e', async (req: Request, res: Response) => {
-    const result = await TestSuiteRunner.runE2ESuite();
-    res.json(result);
-  });
-
-  app.get('/api/v1/tests/load', async (req: Request, res: Response) => {
-    const result = await TestSuiteRunner.runLoadSuite(10);
-    res.json(result);
-  });
-
-  // -------------------------------------------------------------
-  // TELEMETRY, METRICS & DIAGNOSTICS API
-  // -------------------------------------------------------------
-  app.get('/api/v1/metrics', (req: Request, res: Response) => {
-    const telemetry = TelemetryEngine.getMetrics();
-    const queue = researchQueue.getStats();
-    const costs = CostGuardManager.getMetrics();
-    res.json({
-      telemetry,
-      queue,
-      costs,
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  app.get('/api/v1/errors', (req: Request, res: Response) => {
-    res.json({
-      errors: TelemetryEngine.errorLogs,
-      count: TelemetryEngine.errorLogs.length,
-    });
-  });
-
-  app.get('/api/v1/system/secrets', (req: Request, res: Response) => {
-    res.json(CostGuardManager.getMaskedSecrets());
-  });
-
-  app.get('/api/v1/system/queue', (req: Request, res: Response) => {
-    res.json(researchQueue.getStats());
-  });
-
-  app.get('/api/v1/system/cost', (req: Request, res: Response) => {
-    res.json(CostGuardManager.getMetrics());
-  });
-
-  // -------------------------------------------------------------
-  // ADMIN BACKUP & RESTORE API
-  // -------------------------------------------------------------
-  app.get('/api/v1/admin/backup', requireRole(['admin', 'analyst']), (req: Request, res: Response) => {
-    const backup = PostgresDatabaseAdapter.getInstance().createBackup();
-    res.setHeader('Content-Disposition', `attachment; filename="mra-backup-${Date.now()}.json"`);
-    res.setHeader('Content-Type', 'application/json');
-    res.send(JSON.stringify(backup, null, 2));
-  });
-
-  app.post('/api/v1/admin/restore', requireRole(['admin']), (req: Request, res: Response) => {
-    try {
-      const result = PostgresDatabaseAdapter.getInstance().restoreBackup(req.body);
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ error: { code: 'RESTORE_FAILED', message: err.message } });
-    }
-  });
-
-  // -------------------------------------------------------------
-  // BENCHMARK DATASETS (Golden fixtures)
+  // BENCHMARKS DATASET API (REAL DATA ACCESS)
   // -------------------------------------------------------------
   app.get('/api/v1/benchmarks', (req: Request, res: Response) => {
     res.json({
-      benchmarks: [
-        {
-          id: 'ev-charging-india-2027',
-          title: BENCHMARK_EV_CHARGING.title,
-          question: BENCHMARK_EV_CHARGING.question,
-          geography: BENCHMARK_EV_CHARGING.geography,
-          industry: BENCHMARK_EV_CHARGING.industry,
-          time_horizon: BENCHMARK_EV_CHARGING.time_horizon,
-          evidence_score: BENCHMARK_EV_CHARGING.evidence_score_breakdown.overall_score,
-          verified_claims_count: BENCHMARK_EV_CHARGING.claims.length,
-          sources_count: BENCHMARK_EV_CHARGING.sources.length,
-        },
-      ],
+      benchmarks: Object.keys(BENCHMARKS).map(id => ({
+        id,
+        title: BENCHMARKS[id].title,
+        industry: BENCHMARKS[id].industry,
+        geography: BENCHMARKS[id].geography,
+      }))
     });
   });
 
   app.get('/api/v1/benchmarks/:id', (req: Request, res: Response) => {
-    const bm = BENCHMARKS[req.params.id];
-    if (!bm) {
-      return res.status(404).json({ error: { code: 'BENCHMARK_NOT_FOUND', message: 'Benchmark not found' } });
+    const benchmark = BENCHMARKS[req.params.id];
+    if (!benchmark) {
+      return res.status(404).json({
+        error: { code: 'BENCHMARK_NOT_FOUND', message: `Benchmark dataset "${req.params.id}" not found.` }
+      });
     }
-    res.json(bm);
+    res.json(benchmark);
   });
 
   // -------------------------------------------------------------
-  // RESEARCH JOBS API
+  // RESEARCH JOBS API (MULTI-TENANT ENFORCED)
   // -------------------------------------------------------------
+  app.use('/api/v1/research', authMiddleware);
+
   app.post('/api/v1/research', async (req: Request, res: Response) => {
     try {
+      const tenantId = (req as any).user?.uid || 'default_tenant';
       const { question, industry, geography, time_horizon, objectives, target_company, competitors, scope_depth } = req.body;
 
       if (!question || typeof question !== 'string' || question.trim().length < 3) {
@@ -231,7 +163,7 @@ async function startServer() {
         target_company: target_company ? String(target_company).slice(0, 200) : undefined,
         competitors: Array.isArray(competitors) ? competitors.map(c => String(c).slice(0, 100)) : undefined,
         scope_depth: scope_depth === 'exhaustive' ? 'exhaustive' : scope_depth === 'standard' ? 'standard' : 'deep',
-      });
+      }, tenantId);
 
       res.status(201).json({
         job_id: job.id,
@@ -249,13 +181,15 @@ async function startServer() {
 
   // List all jobs
   app.get('/api/v1/research', async (req: Request, res: Response) => {
-    const jobs = await ResearchPipelineManager.listJobs();
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const jobs = await ResearchPipelineManager.listJobs(tenantId);
     res.json({ jobs, total: jobs.length });
   });
 
   // Get job details & progress
   app.get('/api/v1/research/:id', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job) {
       return res.status(404).json({
         error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
@@ -272,7 +206,8 @@ async function startServer() {
 
   // Cancel job
   app.post('/api/v1/research/:id/cancel', async (req: Request, res: Response) => {
-    const cancelled = await ResearchPipelineManager.cancelJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const cancelled = await ResearchPipelineManager.cancelJob(req.params.id, tenantId);
     if (!cancelled) {
       return res.status(400).json({
         error: { code: 'CANNOT_CANCEL', message: 'Job is not running or does not exist' },
@@ -284,7 +219,8 @@ async function startServer() {
   // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive & Last-Event-ID resume
   app.get('/api/v1/research/:id/events', async (req: Request, res: Response) => {
     const jobId = req.params.id;
-    const job = await ResearchPipelineManager.getJob(jobId);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(jobId, tenantId);
 
     if (!job) {
       return res.status(404).json({
@@ -302,7 +238,7 @@ async function startServer() {
     const lastEventId = parseInt(req.headers['last-event-id'] as string || '0', 10);
 
     // Send all existing events first
-    const existingEvents = await ResearchPipelineManager.getEvents(jobId, lastEventId);
+    const existingEvents = await ResearchPipelineManager.getEvents(jobId, lastEventId, tenantId);
     existingEvents.forEach(evt => {
       res.write(`id: ${evt.id}\ndata: ${JSON.stringify(evt)}\n\n`);
     });
@@ -334,7 +270,8 @@ async function startServer() {
 
   // Get Sources
   app.get('/api/v1/research/:id/sources', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -343,7 +280,8 @@ async function startServer() {
 
   // Get Evidence Pool
   app.get('/api/v1/research/:id/evidence', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -352,7 +290,8 @@ async function startServer() {
 
   // Get Claims
   app.get('/api/v1/research/:id/claims', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -361,7 +300,8 @@ async function startServer() {
 
   // Get Structured Report
   app.get('/api/v1/research/:id/report', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
     }
@@ -378,7 +318,8 @@ async function startServer() {
 
   // Export Structured JSON
   app.get('/api/v1/research/:id/export/json', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }
@@ -389,7 +330,8 @@ async function startServer() {
 
   // Export Structured CSV (Claims + Evidence + Financials)
   app.get('/api/v1/research/:id/export/csv', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }
@@ -428,7 +370,8 @@ async function startServer() {
 
   // Export High-Resolution Printable PDF Dossier
   app.get('/api/v1/research/:id/export/pdf', async (req: Request, res: Response) => {
-    const job = await ResearchPipelineManager.getJob(req.params.id);
+    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }

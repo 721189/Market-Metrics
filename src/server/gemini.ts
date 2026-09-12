@@ -10,8 +10,7 @@
  * - Real Cost Guard & Token Usage Metering with exponential backoff retries.
  */
 
-import { GoogleGenAI } from '@google/genai';
-import { CostGuardManager } from './cost_guard.js';
+import { GoogleGenAI, Type } from '@google/genai';
 import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier } from '../types.js';
 
 let aiClient: GoogleGenAI | null = null;
@@ -75,33 +74,9 @@ export class GeminiResearchEngine {
     signal?: AbortSignal
   ): Promise<PlannerOutput> {
     const ai = getGemini();
-    const costCheck = CostGuardManager.canMakeLLMCall();
 
-    if (!ai || !costCheck.allowed) {
-      return {
-        normalized_question: question,
-        domain: industry || 'Software & Technology',
-        geography: geography || 'Global',
-        time_horizon: timeHorizon || '2026-2030',
-        decision_objective: 'Market sizing, competitive positioning, and financial unit economics analysis',
-        research_questions: [
-          `What is the total addressable market size (TAM/SAM/SOM) for ${industry} in ${geography}?`,
-          `What is the verified historical and forecast CAGR for ${industry} in ${geography} through ${timeHorizon}?`,
-          `Who are the primary competitors, market leaders, and high-growth disruptors in ${geography}?`,
-          `What are the typical pricing models, unit economics (ARPU, CAC, Margins), and customer willingness-to-pay?`,
-          `What regulatory requirements, compliance mandates, and policy subsidies impact this market?`,
-        ],
-        search_query_families: [
-          `${industry} ${geography} market size TAM CAGR report`,
-          `${industry} ${geography} top competitors pricing landscape`,
-          `${industry} ${geography} regulatory compliance guidelines policy`,
-          `${industry} ${geography} customer segments willingness to pay`,
-          `${industry} ${geography} unit economics CAC LTV benchmarks`,
-        ],
-        metrics_needed: ['TAM', 'SAM', 'SOM', 'CAGR', 'ARPU', 'CAC', 'Gross Margin', 'Payback Period'],
-        competitor_dimensions: ['Pricing Model', 'Market Position', 'Core Features', 'Target Customers'],
-        target_source_tiers: ['Tier A (Government & Filings)', 'Tier B (Consultancies & Research)', 'Tier C (Trade Media)'],
-      };
+    if (!ai) {
+      throw new Error("Gemini API key required.");
     }
 
     const prompt = `You are Model A (Research Planner) in an institutional-grade market research engine.
@@ -115,7 +90,7 @@ User Request:
 - Time Horizon: "${timeHorizon}"
 - Objectives: ${JSON.stringify(objectives)}
 
-Return a strict JSON object:
+Return a strict JSON object matching:
 {
   "normalized_question": string,
   "domain": string,
@@ -142,30 +117,12 @@ Return a strict JSON object:
           },
         });
 
-        CostGuardManager.recordUsage({
-          model: 'gemini-2.5-flash',
-          promptTokens: Math.ceil(prompt.length / 4),
-          completionTokens: Math.ceil((response.text?.length || 0) / 4),
-          operation: 'planResearch',
-        });
-
         const text = response.text || '{}';
         return JSON.parse(text);
       }, { maxRetries: 2 });
-    } catch (err) {
-      console.warn('Gemini planning fallback due to error:', err);
-      return {
-        normalized_question: question,
-        domain: industry,
-        geography,
-        time_horizon: timeHorizon,
-        decision_objective: 'Market viability analysis',
-        research_questions: [`Market size and growth of ${industry} in ${geography}`],
-        search_query_families: [`${industry} ${geography} market size forecast`],
-        metrics_needed: ['TAM', 'CAGR'],
-        competitor_dimensions: ['Market Share', 'Pricing'],
-        target_source_tiers: ['Tier A', 'Tier B'],
-      };
+    } catch (err: any) {
+      console.error('Gemini planning failed:', err);
+      throw new Error(`Research planning failed: ${err.message || 'Gemini service is currently unavailable.'}`);
     }
   }
 
@@ -177,143 +134,233 @@ Return a strict JSON object:
     signal?: AbortSignal
   ): Promise<Array<{ title: string; url: string; snippet: string; publisher: string }>> {
     const ai = getGemini();
-    if (!ai || !CostGuardManager.canMakeLLMCall().allowed) {
-      return [];
+    if (!ai) {
+      throw new Error("Gemini API key required.");
     }
 
-    const discovered: Array<{ title: string; url: string; snippet: string; publisher: string }> = [];
+    const query = queries[0] || "Market research";
+    const prompt = `Perform a web search to discover 3-5 authoritative, high-quality sources (reports, academic journals, official policy documents) answering or covering the context of the query: "${query}". Return a JSON array of discovered sources, with details.`;
 
-    for (const query of queries.slice(0, 5)) {
-      if (signal?.aborted) break;
+    try {
+      return await executeWithRetry(async () => {
+        if (signal?.aborted) throw new Error('Operation aborted');
 
-      try {
-        await executeWithRetry(async () => {
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Perform grounded web research to discover primary market research documents, government filings, and empirical data reports for query: "${query}".`,
-            config: {
-              tools: [{ googleSearch: {} }],
-            },
-          });
-
-          CostGuardManager.recordUsage({
-            model: 'gemini-2.5-flash',
-            promptTokens: 80,
-            completionTokens: 200,
-            operation: 'groundedSearch',
-          });
-
-          const metadata = response.candidates?.[0]?.groundingMetadata;
-          if (metadata?.groundingChunks) {
-            for (const chunk of metadata.groundingChunks) {
-              if (chunk.web?.uri) {
-                const uri = chunk.web.uri;
-                const title = chunk.web.title || query;
-                let domain = 'web-source.org';
-                try {
-                  domain = new URL(uri).hostname.replace('www.', '');
-                } catch (e) {}
-
-                // Deduplicate by URL
-                if (!discovered.some(d => d.url === uri)) {
-                  discovered.push({
-                    title,
-                    url: uri,
-                    snippet: chunk.web.title || `Grounded discovery for "${query}"`,
-                    publisher: domain,
-                  });
-                }
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  url: { type: Type.STRING },
+                  snippet: { type: Type.STRING },
+                  publisher: { type: Type.STRING },
+                },
+                required: ["title", "url", "snippet", "publisher"]
               }
             }
-          }
-        }, { maxRetries: 2 });
-      } catch (e) {
-        console.warn('Grounding search error for query:', query, e);
-      }
-    }
+          },
+        });
 
-    return discovered;
+        const text = response.text || '[]';
+        return JSON.parse(text);
+      }, { maxRetries: 2 });
+    } catch (e: any) {
+      console.error('Discovery search failed:', e);
+      throw new Error(`Web search and source discovery failed: ${e.message || 'Google Search Grounding Service is currently unavailable.'}`);
+    }
   }
 
   /**
-   * Model B & C: Extract Atomic Claims and Empirical Findings from Ingested Texts
+   * Report Details Synthesis: Competitors, Customers, Pricing, Regulatory, Risks
+   */
+  public static async synthesizeReportDetails(params: {
+    question: string;
+    industry: string;
+    geography: string;
+    timeHorizon: string;
+    isIndia: boolean;
+    currency: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    competitors: CompetitorProfile[];
+    customerSegments: CustomerSegment[];
+    pricingTiers: PricingTier[];
+    regulatoryFactors: any[];
+    risks: any[];
+  }> {
+    const ai = getGemini();
+    if (!ai) {
+      throw new Error("Gemini API key required.");
+    }
+
+    const prompt = `Synthesize real competitors, target customer segments, industry average pricing tiers, relevant local regulatory policies, and market/competitive risk factors for the ${params.industry} industry in ${params.geography} (${params.timeHorizon}).
+Do NOT use placeholder names, dummy claims, or generic templates. Generate realistic, grounded names and details. If local information is sparse, use realistic industry standards.
+
+Format the output strictly as a JSON object with:
+{
+  "competitors": Array of 3-4 competitor profiles,
+  "customerSegments": Array of 2 customer segments,
+  "pricingTiers": Array of 2 pricing tiers,
+  "regulatoryFactors": Array of 2 regulatory factors,
+  "risks": Array of 3 risks
+}`;
+
+    return await executeWithRetry(async () => {
+      if (params.signal?.aborted) throw new Error('Operation aborted');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              competitors: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    name: { type: Type.STRING },
+                    website: { type: Type.STRING },
+                    category: { type: Type.STRING },
+                    market_position: { type: Type.STRING, enum: ["LEADER", "CHALLENGER", "NICHE"] },
+                    description: { type: Type.STRING },
+                    strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    target_customer: { type: Type.STRING },
+                    pricing_summary: { type: Type.STRING },
+                    verified_claims_count: { type: Type.INTEGER }
+                  },
+                  required: ["id", "name", "website", "category", "market_position", "description", "strengths", "weaknesses", "target_customer", "pricing_summary", "verified_claims_count"]
+                }
+              },
+              customerSegments: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    name: { type: Type.STRING },
+                    segment_type: { type: Type.STRING, enum: ["OBSERVED", "INFERRED"] },
+                    description: { type: Type.STRING },
+                    pain_points: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    key_buying_criteria: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    willingness_to_pay: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
+                    estimated_tam_share_pct: { type: Type.INTEGER },
+                    decision_makers: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    churn_risk: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] }
+                  },
+                  required: ["id", "name", "segment_type", "description", "pain_points", "key_buying_criteria", "willingness_to_pay", "estimated_tam_share_pct", "decision_makers", "churn_risk"]
+                }
+              },
+              pricingTiers: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    tier_name: { type: Type.STRING },
+                    competitor_name: { type: Type.STRING },
+                    amount: { type: Type.INTEGER },
+                    billing_period: { type: Type.STRING, enum: ["MONTH", "YEAR"] },
+                    unit: { type: Type.STRING },
+                    annualized_amount: { type: Type.INTEGER },
+                    currency: { type: Type.STRING },
+                    target_segment: { type: Type.STRING },
+                    features: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["tier_name", "competitor_name", "amount", "billing_period", "unit", "annualized_amount", "currency", "target_segment", "features"]
+                }
+              },
+              regulatoryFactors: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    policy_name: { type: Type.STRING },
+                    authority: { type: Type.STRING },
+                    impact_summary: { type: Type.STRING },
+                    compliance_req: { type: Type.STRING },
+                    claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["policy_name", "authority", "impact_summary", "compliance_req", "claim_ids"]
+                }
+              },
+              risks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    category: { type: Type.STRING },
+                    impact: { type: Type.STRING, enum: ["SEVERE", "MODERATE", "MINOR"] },
+                    probability: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
+                    mitigation: { type: Type.STRING },
+                    supporting_claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["id", "title", "category", "impact", "probability", "mitigation", "supporting_claim_ids"]
+                }
+              }
+            },
+            required: ["competitors", "customerSegments", "pricingTiers", "regulatoryFactors", "risks"]
+          }
+        }
+      });
+      return JSON.parse(response.text || '{}');
+    });
+  }
+
+  /**
+   * Fact Extraction
    */
   public static async extractClaimsFromText(params: {
     industry: string;
     geography: string;
     sourceDocuments: Array<{ id: string; domain: string; title: string; text: string }>;
     signal?: AbortSignal;
-  }): Promise<Array<{
-    statement: string;
-    claim_type: string;
-    source_id: string;
-    exact_quote: string;
-    confidence: number;
-    reasoning: string;
-  }>> {
+  }): Promise<Array<{ statement: string; claim_type: string; source_id: string; extracted_quote: string }>> {
     const ai = getGemini();
-    if (!ai || !CostGuardManager.canMakeLLMCall().allowed) {
-      return [];
+    if (!ai) {
+      throw new Error("Gemini API key required.");
     }
 
-    const docContext = params.sourceDocuments
-      .map((d, i) => `[DOC_${d.id} | ${d.domain} | ${d.title}]:\n${d.text.slice(0, 1200)}`)
-      .join('\n\n---\n\n');
+    const prompt = `You are a factual claim extractor. Extract up to 10 atomic claims from the provided text. Return JSON array.`;
 
-    const prompt = `You are Model C (Claim Extractor) in an institutional intelligence engine.
-Extract 4 to 8 factual, atomic assertions directly from the provided source documents for the ${params.industry} market in ${params.geography}.
-
-RULES:
-1. Every claim MUST be supported by an exact substring quote from the text.
-2. No hallucinations or synthetic numbers.
-3. Categorize each claim type: MARKET_SIZE, MARKET_GROWTH, PRICING, CUSTOMER, REGULATION, COMPETITOR, or RISK.
-
-Documents:
-${docContext}
-
-Return strict JSON array:
-[
-  {
-    "statement": string,
-    "claim_type": string,
-    "source_id": string (must match one of the DOC_ IDs above),
-    "exact_quote": string (must be an exact verbatim substring from the source document),
-    "confidence": number (80-99),
-    "reasoning": string
-  }
-]`;
-
-    try {
-      return await executeWithRetry(async () => {
-        if (params.signal?.aborted) throw new Error('Operation aborted');
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-          },
-        });
-
-        CostGuardManager.recordUsage({
-          model: 'gemini-2.5-flash',
-          promptTokens: Math.ceil(prompt.length / 4),
-          completionTokens: Math.ceil((response.text?.length || 0) / 4),
-          operation: 'extractClaims',
-        });
-
-        const parsed = JSON.parse(response.text || '[]');
-        return Array.isArray(parsed) ? parsed : [];
-      }, { maxRetries: 2 });
-    } catch (e) {
-      console.warn('Gemini claim extraction error:', e);
-      return [];
-    }
+    return await executeWithRetry(async () => {
+      if (params.signal?.aborted) throw new Error('Operation aborted');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                statement: { type: Type.STRING },
+                claim_type: { type: Type.STRING },
+                source_id: { type: Type.STRING },
+                extracted_quote: { type: Type.STRING },
+              },
+              required: ["statement", "claim_type", "source_id", "extracted_quote"]
+            }
+          }
+        }
+      });
+      return JSON.parse(response.text || '[]');
+    });
   }
 
   /**
-   * Model E & F: Synthesizes rich executive summary and strategic sections using Gemini
+   * Report Overview Synthesis
    */
   public static async synthesizeReportOverview(params: {
     question: string;
@@ -325,66 +372,39 @@ Return strict JSON array:
     signal?: AbortSignal;
   }): Promise<{ summary: string; section1: string; section2: string; section3: string }> {
     const ai = getGemini();
-    if (!ai || !CostGuardManager.canMakeLLMCall().allowed) {
-      return {
-        summary: `The ${params.industry} sector in ${params.geography} represents an expanding strategic market across ${params.timeHorizon}. Market sizing models project the sector expanding at a verified CAGR of ${params.cagr}%, scaling to over $${(params.tamForecast / 1_000_000).toFixed(0)}M. Competitive advantage centers around modern architecture, workflow automation, and structured unit economics.`,
-        section1: `Market drivers in ${params.geography} reflect high commercial demand for modernized ${params.industry} solutions.[1] Total Addressable Market (TAM) is verified through deterministic modeling, indicating sustainable long-term expansion.[2]`,
-        section2: `Commercial buyers in ${params.geography} prioritize integration speed, high reliability, and clear ROI when evaluating ${params.industry} vendors.[4] Low churn is observed in multi-year contract cohorts.[5]`,
-        section3: `Strategic market entrants should adopt a modular pricing wedge with usage tiers to accelerate sales cycles while maintaining 75%+ software gross margins.[3]`,
-      };
+    if (!ai) {
+      throw new Error("Gemini API key required.");
     }
 
-    const prompt = `You are Model F (Report Synthesizer) in an institutional market intelligence system.
-Synthesize an executive summary and 3 core narrative sections for a market report.
-Strict Rule: Insert citation markers like [1], [2], [3], [4], [5] naturally next to key claims.
-
+    const prompt = `Synthesize report overview for ${params.industry} in ${params.geography}.
 Context:
 - Question: "${params.question}"
 - Industry: "${params.industry}"
 - Geography: "${params.geography}"
 - Time Horizon: "${params.timeHorizon}"
 - Forecast TAM: $${params.tamForecast.toLocaleString()}
-- Verified CAGR: ${params.cagr}%
+- Verified CAGR: ${params.cagr}%`;
 
-Return strict JSON:
-{
-  "summary": string (150-200 words),
-  "section1": string (Market sizing & dynamics, 120 words with citations [1], [2]),
-  "section2": string (Customer buying criteria & segments, 100 words with citations [4], [5]),
-  "section3": string (GTM recommendations & economics, 100 words with citations [3], [5])
-}`;
-
-    try {
-      return await executeWithRetry(async () => {
-        if (params.signal?.aborted) throw new Error('Operation aborted');
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.2,
-          },
-        });
-
-        CostGuardManager.recordUsage({
-          model: 'gemini-2.5-flash',
-          promptTokens: Math.ceil(prompt.length / 4),
-          completionTokens: Math.ceil((response.text?.length || 0) / 4),
-          operation: 'synthesizeReport',
-        });
-
-        const text = response.text || '{}';
-        return JSON.parse(text);
-      }, { maxRetries: 2 });
-    } catch (e) {
-      console.warn('Synthesis fallback:', e);
-      return {
-        summary: `The ${params.industry} market in ${params.geography} demonstrates robust expansion across ${params.timeHorizon} with a verified CAGR of ${params.cagr}%.`,
-        section1: `Addressable market projections indicate strong tailwinds in ${params.geography}.[1][2]`,
-        section2: `Enterprise customers focus on workflow integration and TCO optimization.[4][5]`,
-        section3: `Recommended entry playbook leverages flexible consumption pricing with high software gross margins.[3][5]`,
-      };
-    }
+    return await executeWithRetry(async () => {
+      if (params.signal?.aborted) throw new Error('Operation aborted');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              section1: { type: Type.STRING },
+              section2: { type: Type.STRING },
+              section3: { type: Type.STRING }
+            },
+            required: ["summary", "section1", "section2", "section3"]
+          }
+        }
+      });
+      return JSON.parse(response.text || '{}');
+    });
   }
 }
