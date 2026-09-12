@@ -1,0 +1,164 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and usage limits",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "tier": { "type": "string", "enum": ["free", "pro", "enterprise"] },
+        "quota_remaining": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "tier", "quota_remaining", "created_at"]
+    },
+    "ResearchJob": {
+      "title": "ResearchJob",
+      "description": "Enterprise market research job state and telemetry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "question": { "type": "string" },
+        "industry": { "type": "string" },
+        "geography": { "type": "string" },
+        "time_horizon": { "type": "string" },
+        "scope_depth": { "type": "string", "enum": ["standard", "deep", "exhaustive"] },
+        "status": { "type": "string", "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] },
+        "current_stage": { "type": "string" },
+        "progress": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "error_message": { "type": "string" },
+        "stats": { "type": "object" }
+      },
+      "required": ["id", "question", "industry", "geography", "time_horizon", "status", "current_stage", "progress", "created_at"]
+    },
+    "JobEvent": {
+      "title": "JobEvent",
+      "description": "State transition log event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "job_id": { "type": "string" },
+        "stage": { "type": "string" },
+        "event_type": { "type": "string" },
+        "message": { "type": "string" },
+        "progress": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "metadata": { "type": "object" }
+      },
+      "required": ["id", "job_id", "stage", "event_type", "message", "progress", "created_at"]
+    },
+    "Source": {
+      "title": "Source",
+      "description": "Discovered source document metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "job_id": { "type": "string" },
+        "url": { "type": "string" },
+        "domain": { "type": "string" },
+        "publisher": { "type": "string" },
+        "source_type": { "type": "string", "enum": ["TIER_1_GOV_REGULATORY", "TIER_2_INSTITUTIONAL", "TIER_3_TRADE_INDUSTRY", "TIER_4_NEWS_GENERAL"] },
+        "reliability_score": { "type": "number" },
+        "title": { "type": "string" },
+        "raw_text": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "job_id", "url", "domain", "publisher", "source_type", "reliability_score"]
+    },
+    "Evidence": {
+      "title": "Evidence",
+      "description": "Extracted factual excerpt with exact character offsets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "job_id": { "type": "string" },
+        "source_id": { "type": "string" },
+        "quote": { "type": "string" },
+        "start_char": { "type": "number" },
+        "end_char": { "type": "number" },
+        "category": { "type": "string" },
+        "confidence": { "type": "number" },
+        "numeric_value": { "type": "number" },
+        "unit": { "type": "string" }
+      },
+      "required": ["id", "job_id", "source_id", "quote", "start_char", "end_char", "category", "confidence"]
+    },
+    "Claim": {
+      "title": "Claim",
+      "description": "Synthesized verifiable claim with provenance links",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "job_id": { "type": "string" },
+        "citation_number": { "type": "number" },
+        "statement": { "type": "string" },
+        "claim_type": { "type": "string" },
+        "evidence_ids": { "type": "array" },
+        "source_ids": { "type": "array" },
+        "verification_status": { "type": "string", "enum": ["VERIFIED", "CORROBORATED", "DISPUTED", "UNVERIFIED"] },
+        "confidence": { "type": "number" },
+        "reasoning": { "type": "string" }
+      },
+      "required": ["id", "job_id", "citation_number", "statement", "claim_type", "evidence_ids", "source_ids", "verification_status", "confidence"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "Complete verified market research intelligence report",
+      "type": "object",
+      "properties": {
+        "job_id": { "type": "string" },
+        "title": { "type": "string" },
+        "question": { "type": "string" },
+        "industry": { "type": "string" },
+        "geography": { "type": "string" },
+        "time_horizon": { "type": "string" },
+        "executive_summary": { "type": "string" },
+        "sections": { "type": "array" },
+        "competitors": { "type": "array" },
+        "customer_segments": { "type": "array" },
+        "pricing_tiers": { "type": "array" },
+        "regulatory_factors": { "type": "array" },
+        "risks": { "type": "array" },
+        "recommendations": { "type": "array" },
+        "financial_models": { "type": "object" },
+        "evidence_score_breakdown": { "type": "object" },
+        "generated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["job_id", "title", "question", "industry", "geography", "time_horizon", "executive_summary", "financial_models", "evidence_score_breakdown", "generated_at"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and limits"
+    },
+    "/jobs/{jobId}": {
+      "schema": "ResearchJob",
+      "description": "Research jobs registry"
+    },
+    "/jobs/{jobId}/events/{eventId}": {
+      "schema": "JobEvent",
+      "description": "Job timeline telemetry events"
+    },
+    "/jobs/{jobId}/sources/{sourceId}": {
+      "schema": "Source",
+      "description": "Discovered research sources"
+    },
+    "/jobs/{jobId}/evidence/{evidenceId}": {
+      "schema": "Evidence",
+      "description": "Extracted evidence excerpts"
+    },
+    "/jobs/{jobId}/claims/{claimId}": {
+      "schema": "Claim",
+      "description": "Verified claims and citation provenance"
+    },
+    "/reports/{jobId}": {
+      "schema": "Report",
+      "description": "Final compiled intelligence reports"
+    }
+  }
+}

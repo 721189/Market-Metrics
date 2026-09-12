@@ -1,11 +1,6 @@
 /**
  * Full-Stack High-Performance Express Server for Market Research Agent V2
- * Features:
- * - Resilient In-Memory LRU Store with max capacity pruning
- * - Queue Management & Concurrency Control
- * - Heartbeat Keep-Alive for Server-Sent Events (SSE) with leak prevention
- * - Full multi-format export endpoints (JSON & CSV)
- * - Vite SPA Middleware Integration
+ * Connected to Production Database Repository & Multi-Stage State Machine Worker
  */
 
 import express, { Request, Response } from 'express';
@@ -13,6 +8,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { ResearchPipelineManager, pipelineEmitter } from './src/server/pipeline.js';
+import { DatabaseRepository } from './src/server/db.js';
 import { BENCHMARKS, BENCHMARK_EV_CHARGING } from './src/server/benchmarks.js';
 
 dotenv.config();
@@ -25,7 +21,7 @@ async function startServer() {
   app.use(express.json({ limit: '500kb' }));
   app.use(express.urlencoded({ extended: true, limit: '500kb' }));
 
-  // Basic request logger & timing
+  // Request logger & timing
   app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
@@ -40,7 +36,7 @@ async function startServer() {
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
   // -------------------------------------------------------------
-  app.get('/health', (req: Request, res: Response) => {
+  app.get('/health', async (req: Request, res: Response) => {
     res.status(200).json({ 
       status: 'ok', 
       uptime_seconds: process.uptime(),
@@ -49,12 +45,13 @@ async function startServer() {
     });
   });
 
-  app.get('/ready', (req: Request, res: Response) => {
+  app.get('/ready', async (req: Request, res: Response) => {
+    const jobs = await ResearchPipelineManager.listJobs();
     res.status(200).json({
       status: 'ready',
       gemini_configured: Boolean(process.env.GEMINI_API_KEY),
       environment: process.env.NODE_ENV || 'development',
-      active_jobs_count: ResearchPipelineManager.listJobs().length,
+      persisted_jobs_count: jobs.length,
       version: '2.0.0',
     });
   });
@@ -134,14 +131,14 @@ async function startServer() {
   });
 
   // List all jobs
-  app.get('/api/v1/research', (req: Request, res: Response) => {
-    const jobs = ResearchPipelineManager.listJobs();
+  app.get('/api/v1/research', async (req: Request, res: Response) => {
+    const jobs = await ResearchPipelineManager.listJobs();
     res.json({ jobs, total: jobs.length });
   });
 
   // Get job details & progress
-  app.get('/api/v1/research/:id', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job) {
       return res.status(404).json({
         error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
@@ -151,8 +148,8 @@ async function startServer() {
   });
 
   // Cancel job
-  app.post('/api/v1/research/:id/cancel', (req: Request, res: Response) => {
-    const cancelled = ResearchPipelineManager.cancelJob(req.params.id);
+  app.post('/api/v1/research/:id/cancel', async (req: Request, res: Response) => {
+    const cancelled = await ResearchPipelineManager.cancelJob(req.params.id);
     if (!cancelled) {
       return res.status(400).json({
         error: { code: 'CANNOT_CANCEL', message: 'Job is not running or does not exist' },
@@ -162,9 +159,9 @@ async function startServer() {
   });
 
   // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive
-  app.get('/api/v1/research/:id/events', (req: Request, res: Response) => {
+  app.get('/api/v1/research/:id/events', async (req: Request, res: Response) => {
     const jobId = req.params.id;
-    const job = ResearchPipelineManager.getJob(jobId);
+    const job = await ResearchPipelineManager.getJob(jobId);
 
     if (!job) {
       return res.status(404).json({
@@ -179,7 +176,7 @@ async function startServer() {
     res.flushHeaders?.();
 
     // Send all existing events first
-    const existingEvents = ResearchPipelineManager.getEvents(jobId);
+    const existingEvents = await ResearchPipelineManager.getEvents(jobId);
     existingEvents.forEach(evt => {
       res.write(`data: ${JSON.stringify(evt)}\n\n`);
     });
@@ -210,8 +207,8 @@ async function startServer() {
   });
 
   // Get Sources
-  app.get('/api/v1/research/:id/sources', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/sources', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -219,8 +216,8 @@ async function startServer() {
   });
 
   // Get Evidence Pool
-  app.get('/api/v1/research/:id/evidence', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/evidence', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -228,8 +225,8 @@ async function startServer() {
   });
 
   // Get Claims
-  app.get('/api/v1/research/:id/claims', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/claims', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
     }
@@ -237,8 +234,8 @@ async function startServer() {
   });
 
   // Get Structured Report
-  app.get('/api/v1/research/:id/report', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/report', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
     }
@@ -254,8 +251,8 @@ async function startServer() {
   });
 
   // Export Structured JSON
-  app.get('/api/v1/research/:id/export/json', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/export/json', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }
@@ -265,8 +262,8 @@ async function startServer() {
   });
 
   // Export Structured CSV (Claims + Evidence + Financials)
-  app.get('/api/v1/research/:id/export/csv', (req: Request, res: Response) => {
-    const job = ResearchPipelineManager.getJob(req.params.id);
+  app.get('/api/v1/research/:id/export/csv', async (req: Request, res: Response) => {
+    const job = await ResearchPipelineManager.getJob(req.params.id);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
     }

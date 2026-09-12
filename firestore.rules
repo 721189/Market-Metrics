@@ -1,0 +1,27 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Read and write permissions for research workspace
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+    match /jobs/{jobId} {
+      allow read, write: if true;
+      match /events/{eventId} {
+        allow read, write: if true;
+      }
+      match /sources/{sourceId} {
+        allow read, write: if true;
+      }
+      match /evidence/{evidenceId} {
+        allow read, write: if true;
+      }
+      match /claims/{claimId} {
+        allow read, write: if true;
+      }
+    }
+    match /reports/{jobId} {
+      allow read, write: if true;
+    }
+  }
+}
