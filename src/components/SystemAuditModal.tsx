@@ -340,9 +340,10 @@ export const SystemAuditModal: React.FC<SystemAuditModalProps> = ({ isOpen, onCl
 
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-2">
                 <h4 className="font-semibold text-slate-200">BullMQ Queue Telemetry</h4>
-                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                   <div className="p-2 rounded bg-slate-900 border border-slate-800">Waiting: <span className="font-mono text-cyan-300">{metrics.queue.waiting}</span></div>
                   <div className="p-2 rounded bg-slate-900 border border-slate-800">Completed: <span className="font-mono text-emerald-300">{metrics.queue.completed}</span></div>
+                  <div className="p-2 rounded bg-slate-900 border border-slate-800">Failed (DLQ): <span className="font-mono text-rose-300">{metrics.queue.dlq || metrics.queue.failed}</span></div>
                   <div className="p-2 rounded bg-slate-900 border border-slate-800">Avg Duration: <span className="font-mono text-slate-300">{metrics.queue.avg_process_time_ms}ms</span></div>
                 </div>
               </div>

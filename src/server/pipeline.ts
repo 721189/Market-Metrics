@@ -17,6 +17,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { publishEventToRedisFanout } from './redis_adapter.js';
 import type {
   ResearchJob,
   ResearchJobRequest,

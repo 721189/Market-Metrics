@@ -9,6 +9,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { OpenTelemetryEngine } from './telemetry.js';
 
 export interface QueueJob<TData = any, TResult = any> {
   id: string;
@@ -53,6 +54,7 @@ export class BullMQEngine<TData = any, TResult = any> extends EventEmitter {
   private activeJobs = new Map<string, QueueJob<TData, TResult>>();
   private completedJobs = new Map<string, QueueJob<TData, TResult>>();
   private failedJobs = new Map<string, QueueJob<TData, TResult>>();
+  private deadLetterQueue = new Map<string, QueueJob<TData, TResult>>();
   private cancelledJobs = new Map<string, QueueJob<TData, TResult>>();
   private processor: JobProcessor<TData, TResult> | null = null;
   private isProcessing = false;
@@ -179,11 +181,15 @@ export class BullMQEngine<TData = any, TResult = any> extends EventEmitter {
     if (!this.processor) return;
 
     const signal = job.abortController?.signal || new AbortController().signal;
+    const span = OpenTelemetryEngine.startSpan(`bullmq.process.${job.name}`, { jobId: job.id, attempts: job.attemptsMade });
 
     try {
       const result = await this.processor(job, signal);
 
-      if (job.state === 'cancelled') return;
+      if (job.state === 'cancelled') {
+        span.end('OK');
+        return;
+      }
 
       job.state = 'completed';
       job.result = result;
@@ -197,16 +203,22 @@ export class BullMQEngine<TData = any, TResult = any> extends EventEmitter {
       this.activeJobs.delete(job.id);
       this.completedJobs.set(job.id, job);
 
+      OpenTelemetryEngine.incrementCounter('jobs_completed_total');
+      OpenTelemetryEngine.recordHistogram('job_duration_ms', duration);
+
       this.emit('job:completed', { jobId: job.id, durationMs: duration });
+      span.end('OK');
     } catch (err: any) {
       if (signal.aborted || job.state === 'cancelled') {
         job.state = 'cancelled';
         this.activeJobs.delete(job.id);
         this.cancelledJobs.set(job.id, job);
+        span.end('OK');
         return;
       }
 
       console.warn(`[QueueWorker] Job ${job.id} failed on attempt ${job.attemptsMade}:`, err?.message);
+      OpenTelemetryEngine.incrementCounter('jobs_failed_total');
 
       const maxAttempts = job.opts.attempts || 3;
       if (job.attemptsMade < maxAttempts) {
@@ -226,15 +238,42 @@ export class BullMQEngine<TData = any, TResult = any> extends EventEmitter {
         job.error = err?.message || 'Maximum retries exhausted';
         job.completedAt = Date.now();
         this.activeJobs.delete(job.id);
-        this.failedJobs.set(job.id, job);
+        
+        // Move to Dead-Letter Queue
+        this.deadLetterQueue.set(job.id, job);
+        OpenTelemetryEngine.incrementCounter('dlq_jobs_total');
+        
         this.emit('job:failed', { jobId: job.id, error: job.error });
       }
+      span.end('ERROR');
     } finally {
       this.tick();
     }
   }
 
-  public getStats(): QueueStats {
+  public getDeadLetterQueue(): QueueJob<TData, TResult>[] {
+    return Array.from(this.deadLetterQueue.values());
+  }
+
+  public async retryDlqJob(jobId: string): Promise<boolean> {
+    const dlqJob = this.deadLetterQueue.get(jobId);
+    if (!dlqJob) return false;
+    
+    this.deadLetterQueue.delete(jobId);
+    dlqJob.state = 'waiting';
+    dlqJob.attemptsMade = 0; // Reset attempts
+    dlqJob.error = undefined;
+    this.queue.push(dlqJob);
+    this.tick();
+    return true;
+  }
+
+  public getJobPosition(jobId: string): number | null {
+    const idx = this.queue.findIndex(j => j.id === jobId);
+    return idx !== -1 ? idx + 1 : null;
+  }
+
+  public getStats(): QueueStats & { dlq: number } {
     const avg = this.totalCompletedCount > 0 ? Math.round(this.totalProcessingTimeMs / this.totalCompletedCount) : 0;
     return {
       waiting: this.queue.length,
@@ -242,6 +281,7 @@ export class BullMQEngine<TData = any, TResult = any> extends EventEmitter {
       completed: this.completedJobs.size,
       failed: this.failedJobs.size,
       cancelled: this.cancelledJobs.size,
+      dlq: this.deadLetterQueue.size,
       total_processed: this.totalCompletedCount,
       concurrency_limit: this.concurrency,
       max_queue_size: this.maxQueueSize,

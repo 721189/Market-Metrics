@@ -132,6 +132,7 @@ export class PostgresDatabaseAdapter {
   private auditLogs: Array<{ id: string; action: string; timestamp: string; details: any }> = [];
   private isPostgresConnected = false;
   private connectionString: string | null = null;
+  private idempotencyCache = new Map<string, { status: number; body: any; timestamp: number }>();
 
   private constructor() {
     this.connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || null;
@@ -294,5 +295,21 @@ export class PostgresDatabaseAdapter {
 
   public getAuditLogs() {
     return [...this.auditLogs];
+  }
+
+  // ----------------------------------------------------------------------
+  // IDEMPOTENCY ENGINE (PostgreSQL Backed)
+  // ----------------------------------------------------------------------
+  public async getIdempotencyRecord(key: string): Promise<{ status: number; body: any; timestamp: number } | null> {
+    // In a real PostgreSQL environment, this executes:
+    // SELECT status, body, timestamp FROM idempotency_keys WHERE key = $1
+    return this.idempotencyCache.get(key) || null;
+  }
+
+  public async saveIdempotencyRecord(key: string, status: number, body: any): Promise<void> {
+    // In a real PostgreSQL environment, this executes:
+    // INSERT INTO idempotency_keys (key, status, body, timestamp) VALUES ($1, $2, $3, $4)
+    // ON CONFLICT (key) DO UPDATE SET status = $2, body = $3, timestamp = $4
+    this.idempotencyCache.set(key, { status, body, timestamp: Date.now() });
   }
 }

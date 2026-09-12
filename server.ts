@@ -261,7 +261,13 @@ async function startServer() {
         error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
       });
     }
-    res.json(job);
+    
+    let queuePosition = null;
+    if (job.status === 'QUEUED') {
+      queuePosition = researchQueue.getJobPosition(job.id);
+    }
+    
+    res.json({ ...job, queue_position: queuePosition });
   });
 
   // Cancel job

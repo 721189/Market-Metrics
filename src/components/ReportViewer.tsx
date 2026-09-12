@@ -22,7 +22,8 @@ import {
   Search,
   Copy,
   Check,
-  Download
+  Download,
+  Share2
 } from 'lucide-react';
 import type { FullResearchReport, Claim } from '../types.js';
 import { FinancialCalculator } from './FinancialCalculator.js';
@@ -42,6 +43,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
   const [activeSection, setActiveSection] = useState<string>('summary');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
+  const [shared, setShared] = useState<boolean>(false);
 
   // Helper to parse text and make citation pills interactive e.g. [1], [14]
   const renderInteractiveText = (text: string) => {
@@ -74,6 +76,13 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
     navigator.clipboard.writeText(content);
     setCopiedSummary(true);
     setTimeout(() => setCopiedSummary(false), 2000);
+  };
+
+  const handleShare = () => {
+    const url = `${window.location.origin}/?job=${report.job_id}`;
+    navigator.clipboard.writeText(url);
+    setShared(true);
+    setTimeout(() => setShared(false), 2000);
   };
 
   // Filter competitors based on search
@@ -162,6 +171,13 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <button
+            onClick={handleShare}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"
+          >
+            {shared ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Share2 className="h-3.5 w-3.5 text-cyan-400" />}
+            <span>{shared ? 'Link Copied' : 'Share'}</span>
+          </button>
           <button
             onClick={handleCopySummary}
             className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"

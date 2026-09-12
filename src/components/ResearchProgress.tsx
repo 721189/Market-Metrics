@@ -76,6 +76,11 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
                   </>
                 )}
               </span>
+              {(job as any).queue_position && !isFinished && !isFailed && (
+                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-400 border border-amber-500/20">
+                  Queue Position: {(job as any).queue_position}
+                </span>
+              )}
               <span className="text-xs text-slate-400 font-mono">Job ID: {job.id}</span>
             </div>
             <h1 className="text-xl font-bold text-white tracking-tight sm:text-2xl">

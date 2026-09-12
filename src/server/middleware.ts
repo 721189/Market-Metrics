@@ -8,6 +8,8 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { PostgresDatabaseAdapter } from './database_adapter.js';
+import { redisClient } from './redis_adapter.js';
 
 export interface UserSession {
   userId: string;
@@ -79,11 +81,9 @@ export class TelemetryEngine {
 }
 
 // ----------------------------------------------------------------------
-// IDEMPOTENCY STORE
+// IDEMPOTENCY STORE (PostgreSQL Backed)
 // ----------------------------------------------------------------------
-const idempotencyStore = new Map<string, { status: number; body: any; timestamp: number }>();
-
-export function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
   if (req.method !== 'POST') return next();
 
   const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'];
@@ -91,7 +91,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     return next();
   }
 
-  const existing = idempotencyStore.get(idempotencyKey);
+  const existing = await PostgresDatabaseAdapter.getInstance().getIdempotencyRecord(idempotencyKey);
   const now = Date.now();
 
   // If cached within past 10 minutes, replay directly
@@ -104,11 +104,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   const originalJson = res.json.bind(res);
   res.json = (body: any) => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      idempotencyStore.set(idempotencyKey, {
-        status: res.statusCode,
-        body,
-        timestamp: Date.now(),
-      });
+      PostgresDatabaseAdapter.getInstance().saveIdempotencyRecord(idempotencyKey as string, res.statusCode, body).catch(e => console.error('Idempotency save error:', e));
     }
     return originalJson(body);
   };
@@ -117,50 +113,42 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
 }
 
 // ----------------------------------------------------------------------
-// RATE LIMITER (Token Bucket / Sliding Window)
+// RATE LIMITER (Redis Backed Token Bucket)
 // ----------------------------------------------------------------------
-interface RateLimitBucket {
-  tokens: number;
-  lastRefill: number;
-}
-
-const rateLimitBuckets = new Map<string, RateLimitBucket>();
-
 export function rateLimiterMiddleware(opts: { maxRequests?: number; windowSec?: number } = {}) {
   const max = opts.maxRequests || 120; // 120 requests per minute
   const windowSec = opts.windowSec || 60;
-  const refillRatePerMs = max / (windowSec * 1000);
 
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip || req.headers['x-forwarded-for'] || '127.0.0.1';
-    const clientKey = `${ip}-${req.path.startsWith('/api/v1/research') && req.method === 'POST' ? 'research-heavy' : 'general'}`;
-    const now = Date.now();
+    const clientKey = `ratelimit:${ip}-${req.path.startsWith('/api/v1/research') && req.method === 'POST' ? 'research-heavy' : 'general'}`;
 
-    let bucket = rateLimitBuckets.get(clientKey);
-    if (!bucket) {
-      bucket = { tokens: max, lastRefill: now };
-      rateLimitBuckets.set(clientKey, bucket);
-    } else {
-      const elapsed = now - bucket.lastRefill;
-      bucket.tokens = Math.min(max, bucket.tokens + elapsed * refillRatePerMs);
-      bucket.lastRefill = now;
+    try {
+      // Execute atomic Redis operations
+      const multi = await redisClient.multi();
+      multi.incr(clientKey);
+      multi.expire(clientKey, windowSec);
+      const results = await multi.exec();
+      
+      const count = results[0][1];
+
+      res.setHeader('X-RateLimit-Limit', max);
+      res.setHeader('X-RateLimit-Remaining', Math.max(0, max - count));
+
+      if (count > max) {
+        return res.status(429).json({
+          error: {
+            code: 'RATE_LIMIT_EXCEEDED',
+            message: `Too many requests. Limit is ${max} requests per ${windowSec}s. Please retry shortly.`,
+          },
+        });
+      }
+      next();
+    } catch (e) {
+      // Failsafe open
+      console.warn('Rate limiter failed, failing open:', e);
+      next();
     }
-
-    res.setHeader('X-RateLimit-Limit', max);
-    res.setHeader('X-RateLimit-Remaining', Math.floor(bucket.tokens));
-    res.setHeader('X-RateLimit-Reset', Math.ceil((max - bucket.tokens) / (refillRatePerMs * 1000)));
-
-    if (bucket.tokens < 1) {
-      return res.status(429).json({
-        error: {
-          code: 'RATE_LIMIT_EXCEEDED',
-          message: `Too many requests. Limit is ${max} requests per ${windowSec}s. Please retry shortly.`,
-        },
-      });
-    }
-
-    bucket.tokens -= 1;
-    next();
   };
 }
 
