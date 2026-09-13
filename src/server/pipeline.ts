@@ -40,7 +40,6 @@ import type {
 import { FinancialEngine } from './financial.js';
 import { GeminiResearchEngine } from './gemini.js';
 import { DatabaseRepository } from './db.js';
-import { DatabaseAdapter } from './database_adapter.js';
 import { researchQueue } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
@@ -79,13 +78,12 @@ async function logAndEmitEvent(
     job.status = 'RUNNING' as any;
   }
 
-  const userId = (job as any).user_id || 'default_tenant';
+  const userId = (job as any).user_id;
+  if (!userId) throw new Error('Missing user_id for job event logging');
 
-  // Persist to DatabaseRepository and Postgres Adapter
+  // Persist to DatabaseRepository
   await DatabaseRepository.addEvent(job.id, event);
-  await DatabaseAdapter.getInstance().addEvent(job.id, event);
   await DatabaseRepository.saveJob(job, userId);
-  await DatabaseAdapter.getInstance().saveJob(job, userId);
 
   // Emit to active SSE subscribers
   pipelineEmitter.emit(`event:${job.id}`, event);
@@ -118,7 +116,8 @@ export class ResearchPipelineManager {
   /**
    * Cancel an in-flight job via Queue Engine and AbortSignal
    */
-  public static async cancelJob(jobId: string, userId: string = 'default_tenant'): Promise<boolean> {
+  public static async cancelJob(jobId: string, userId: string): Promise<boolean> {
+    if (!userId) throw new Error('userId is required for cancelJob');
     const job = await DatabaseRepository.getJob(jobId, userId);
     if (!job || job.status === 'COMPLETED' || job.status === 'FAILED' || job.status === 'CANCELLED') {
       return false;
@@ -127,19 +126,19 @@ export class ResearchPipelineManager {
     job.status = 'CANCELLED';
     job.error_message = 'Job cancelled by user request.';
     
-    // Cancel in BullMQ engine
+    // Cancel in queue
     await researchQueue.cancel(jobId);
 
     await logAndEmitEvent(job, 'error', job.current_stage, 'Job cancellation requested. Halting all worker processes.', job.progress);
     await DatabaseRepository.saveJob(job, userId);
-    await DatabaseAdapter.getInstance().saveJob(job, userId);
     return true;
   }
 
   /**
-   * Creates a new Research Job and dispatches it through the BullMQ worker queue
+   * Creates a new Research Job and dispatches it through the Firestore worker queue
    */
-  public static async createAndRunJob(req: ResearchJobRequest, userId: string = 'default_tenant'): Promise<ResearchJob> {
+  public static async createAndRunJob(req: ResearchJobRequest, userId: string): Promise<ResearchJob> {
+    if (!userId) throw new Error('userId is required for createAndRunJob');
     const jobId = `job-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
@@ -182,9 +181,8 @@ export class ResearchPipelineManager {
     };
 
     await DatabaseRepository.saveJob(job, userId);
-    await DatabaseAdapter.getInstance().saveJob(job, userId);
 
-    // Enqueue in BullMQ with retry policies and worker concurrency
+    // Enqueue in queue
     await researchQueue.add(
       'market-research-execution',
       { jobId: job.id, job, userId }
@@ -278,39 +276,8 @@ export class ResearchPipelineManager {
       });
     }
 
-    // If live search returned fewer than 3 sources (e.g. offline preview or rate limited),
-    // query open institutional data registries (Wikipedia Open Research API)
-    if (sources.length < 3) {
-      const openQueries = [
-        `${job.industry} industry economy`,
-        `${job.geography} commerce regulation`,
-        `${job.industry} technology software`,
-      ];
-
-      for (const q of openQueries) {
-        if (sources.length >= 4) break;
-        const sId = `src-${srcIdx++}`;
-        const encodedQ = encodeURIComponent(q);
-        const openUrl = `https://en.wikipedia.org/wiki/${encodedQ}`;
-        sources.push({
-          id: sId,
-          job_id: job.id,
-          url: openUrl,
-          canonical_url: openUrl,
-          domain: 'wikipedia.org',
-          title: `${job.industry} — Open Institutional Reference`,
-          publisher: 'Wikimedia & Institutional Research Registry',
-          published_at: new Date().toISOString(),
-          retrieved_at: new Date().toISOString(),
-          source_type: 'TIER_B',
-          language: 'en',
-          http_status: 200,
-          discovery_method: 'SEARCH_API',
-          content_hash: `hash-open-${sId}`,
-          reliability_score: 88,
-          snippet: `Empirical research overview of ${job.industry} market developments, unit economics, and regulatory environment in ${job.geography}.`,
-        });
-      }
+    if (sources.length === 0) {
+      throw new Error('No valid verified sources discovered from live search. Research aborted to maintain epistemic integrity.');
     }
 
     job.stats.sources_discovered = sources.length;
@@ -328,10 +295,16 @@ export class ResearchPipelineManager {
 
     for (const src of sources) {
       if (isCancelled(job, signal)) return;
-      const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
-      sourceTexts.set(src.id, fetchedDoc.extractedText);
-      src.snippet = fetchedDoc.extractedText.slice(0, 200);
-      src.publisher = fetchedDoc.publisher || src.publisher;
+      try {
+        const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
+        sourceTexts.set(src.id, fetchedDoc.extractedText);
+        src.snippet = fetchedDoc.extractedText.slice(0, 200);
+        src.publisher = fetchedDoc.publisher || src.publisher;
+        src.published_at = fetchedDoc.publishedAt;
+        src.content_hash = fetchedDoc.contentHash;
+      } catch (err: any) {
+        console.warn(`Failed to fetch source URL ${src.url}:`, err.message);
+      }
     }
 
     job.stats.sources_analyzed = sources.length;
@@ -351,7 +324,6 @@ export class ResearchPipelineManager {
       const text = sourceTexts.get(src.id) || '';
       if (!text) continue;
 
-      // Extract high-value paragraphs
       const paragraphs = text.split('\n\n').filter(p => p.trim().length > 40);
       const selectedParagraphs = paragraphs.slice(0, 3);
 
@@ -359,6 +331,11 @@ export class ResearchPipelineManager {
         const para = selectedParagraphs[pIdx].trim();
         const targetPhrase = para.length > 140 ? para.slice(0, 140).trim() : para;
         const offset = RealDocumentFetcher.findExactEvidenceOffset(text, targetPhrase);
+
+        // Reject invalid offsets
+        if (offset.startOffset === -1 || offset.endOffset === -1 || offset.startOffset >= offset.endOffset) {
+          continue;
+        }
 
         evidencePool.push({
           id: `ev-${evId++}`,
@@ -372,6 +349,7 @@ export class ResearchPipelineManager {
           end_offset: offset.endOffset,
           section: pIdx === 0 ? 'Market Dynamics & Sizing' : 'Economics & Regulatory Environment',
           extraction_confidence: 94,
+          provenance_type: 'OBSERVED',
           created_at: new Date().toISOString(),
           source: src,
         });
@@ -411,6 +389,10 @@ export class ResearchPipelineManager {
         const offset = RealDocumentFetcher.findExactEvidenceOffset(sourceText, item.extracted_quote);
         const source = sources.find(s => s.id === item.source_id);
 
+        if (offset.startOffset === -1 || offset.endOffset === -1 || offset.startOffset >= offset.endOffset) {
+          continue; // Reject invalid offsets
+        }
+
         const newEvidence: Evidence = {
           id: `ev-dyn-${evId++}`,
           job_id: job.id,
@@ -423,22 +405,30 @@ export class ResearchPipelineManager {
           end_offset: offset.endOffset,
           section: 'Market Intelligence & Facts',
           extraction_confidence: 98,
+          provenance_type: 'OBSERVED',
           created_at: new Date().toISOString(),
           source: source,
         };
         evidencePool.push(newEvidence);
+
+        const cType = (item.claim_type as any) || 'MARKET_SIZE';
+        const provType: 'OBSERVED' | 'INFERRED' | 'ASSUMED' | 'CALCULATED' =
+          ['MARKET_SIZE', 'REVENUE', 'VALUATION', 'FINANCIAL'].includes(cType) ? 'CALCULATED' :
+          ['TREND', 'OPPORTUNITY', 'STRATEGIC'].includes(cType) ? 'INFERRED' :
+          ['RISK', 'REGULATION'].includes(cType) ? 'ASSUMED' : 'OBSERVED';
 
         claims.push({
           id: `clm-${claimIdx}`,
           job_id: job.id,
           citation_number: claimIdx,
           statement: item.statement,
-          claim_type: (item.claim_type as any) || 'MARKET_SIZE',
+          claim_type: cType,
           supporting_evidence_ids: [newEvidence.id],
           contradicting_evidence_ids: [],
           verification_status: 'SUPPORTED',
           confidence: (item as any).confidence || 95,
           reasoning: (item as any).reasoning || 'Grounded in extracted empirical quote.',
+          provenance_type: provType,
           created_at: new Date().toISOString(),
         });
         claimIdx++;
@@ -673,11 +663,11 @@ export class ResearchPipelineManager {
       generated_at: new Date().toISOString(),
     };
 
-    const userId = (job as any).user_id || 'default_tenant';
+    const userId = (job as any).user_id;
+    if (!userId) throw new Error('Missing user_id for report saving');
 
-    // Save final report to persistent DatabaseRepository & Postgres Adapter
+    // Save final report to persistent DatabaseRepository
     await DatabaseRepository.saveReport(finalReport, userId);
-    await DatabaseAdapter.getInstance().saveReport(finalReport, userId);
 
     job.report = finalReport;
     job.status = 'COMPLETED';
@@ -690,26 +680,34 @@ export class ResearchPipelineManager {
   }
 }
 
-// Start Firestore Worker
-async function startWorker() {
-  console.log('[Queue] Worker started');
+// Start Firestore Worker with transactional claiming and heartbeats
+export async function startWorker() {
+  console.log('[Queue] Worker started with transactional claiming');
+  const workerId = `worker-${Math.random().toString(36).substring(2, 8)}`;
   while (true) {
     try {
-      const job = await researchQueue.getNextJob();
+      const job = await researchQueue.claimNextJob(workerId);
       if (job) {
-        console.log(`[Queue] Processing job ${job.id}`);
-        await researchQueue.updateJobStatus(job.id, 'RUNNING');
+        console.log(`[Queue] Claimed job ${job.id} for processing`);
+        const { job: jobData, userId } = job.data;
+        const pipelineJob = { ...jobData };
+        if (userId) {
+          (pipelineJob as any).user_id = userId;
+        }
+
+        const controller = new AbortController();
+        const heartbeatInterval = setInterval(() => {
+          researchQueue.heartbeat(job.id, workerId);
+        }, 60000); // 1 min heartbeat
+
         try {
-          const { job: jobData, userId } = job.data;
-          const pipelineJob = { ...jobData };
-          if (userId) {
-            (pipelineJob as any).user_id = userId;
-          }
-          await ResearchPipelineManager.executePipelineWorker(pipelineJob, new AbortController().signal);
+          await ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal);
           await researchQueue.updateJobStatus(job.id, 'COMPLETED');
         } catch (err) {
           console.error(`[Queue] Job ${job.id} failed`, err);
           await researchQueue.updateJobStatus(job.id, 'FAILED');
+        } finally {
+          clearInterval(heartbeatInterval);
         }
       }
     } catch (err) {
@@ -718,4 +716,3 @@ async function startWorker() {
     await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5s
   }
 }
-startWorker();

@@ -1,3 +1,6 @@
+import crypto from 'crypto';
+import { DocumentChunk } from '../types.js';
+
 export interface FetchedDocument {
   url: string;
   title: string;
@@ -7,6 +10,9 @@ export interface FetchedDocument {
   extractedText: string;
   paragraphs: string[];
   contentLength: number;
+  publishedAt: string;
+  contentHash: string;
+  chunks: DocumentChunk[];
   retrievedAt: string;
 }
 
@@ -50,6 +56,85 @@ export class RealDocumentFetcher {
     }
   }
 
+  public static computeSha256(text: string): string {
+    return crypto.createHash('sha256').update(text).digest('hex');
+  }
+
+  public static extractPublicationDate(html: string, headers: Headers): string {
+    const metaDateMatch = html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i) ||
+                          html.match(/<meta[^>]+name=["']date["'][^>]+content=["']([^"']+)["']/i) ||
+                          html.match(/<meta[^>]+property=["']og:published_time["'][^>]+content=["']([^"']+)["']/i);
+    if (metaDateMatch && metaDateMatch[1]) {
+      const parsed = Date.parse(metaDateMatch[1]);
+      if (!isNaN(parsed)) return new Date(parsed).toISOString();
+    }
+
+    const jsonLdMatch = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+    if (jsonLdMatch) {
+      for (let block of jsonLdMatch) {
+        try {
+          const contentMatch = block.match(/>([\s\S]*?)<\/script>/i);
+          if (contentMatch && contentMatch[1]) {
+            const data = JSON.parse(contentMatch[1]);
+            const datePub = data.datePublished || data['datePublished'] || data.uploadDate;
+            if (datePub) {
+              const parsed = Date.parse(datePub);
+              if (!isNaN(parsed)) return new Date(parsed).toISOString();
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
+    const lastMod = headers.get('last-modified');
+    if (lastMod) {
+      const parsed = Date.parse(lastMod);
+      if (!isNaN(parsed)) return new Date(parsed).toISOString();
+    }
+
+    return new Date().toISOString();
+  }
+
+  public static chunkText(sourceId: string, title: string, text: string): DocumentChunk[] {
+    const chunks: DocumentChunk[] = [];
+    let currentOffset = 0;
+    const paragraphs = text.split('\n\n');
+    let chunkIdx = 0;
+
+    for (let p of paragraphs) {
+      if (!p.trim()) continue;
+      const pStart = text.indexOf(p, currentOffset);
+      const pEnd = pStart !== -1 ? pStart + p.length : currentOffset + p.length;
+      currentOffset = pEnd;
+
+      chunks.push({
+        id: `${sourceId}-chunk-${chunkIdx++}`,
+        source_id: sourceId,
+        title,
+        section: `Paragraph ${chunkIdx}`,
+        text: p.trim(),
+        word_count: p.split(/\s+/).length,
+        offset_start: pStart !== -1 ? pStart : 0,
+        offset_end: pEnd,
+      });
+    }
+
+    if (chunks.length === 0 && text.trim().length > 0) {
+      chunks.push({
+        id: `${sourceId}-chunk-0`,
+        source_id: sourceId,
+        title,
+        section: 'Full Document',
+        text: text.slice(0, 800),
+        word_count: text.split(/\s+/).length,
+        offset_start: 0,
+        offset_end: Math.min(text.length, 800),
+      });
+    }
+
+    return chunks;
+  }
+
   public static async fetchUrl(url: string, timeoutMs = 6000, abortSignal?: AbortSignal): Promise<FetchedDocument> {
     this.validateUrl(url);
     let domain = 'web-source.org';
@@ -82,6 +167,10 @@ export class RealDocumentFetcher {
 
     const html = await response.text();
     const extracted = this.extractTextFromHtml(html, url, domain);
+    const publishedAt = this.extractPublicationDate(html, response.headers);
+    const contentHash = this.computeSha256(extracted.text);
+    const sourceId = `src-${Math.random().toString(36).substring(2, 8)}`;
+    const chunks = this.chunkText(sourceId, extracted.title, extracted.text);
 
     return {
       url,
@@ -92,6 +181,9 @@ export class RealDocumentFetcher {
       extractedText: extracted.text,
       paragraphs: extracted.paragraphs,
       contentLength: extracted.text.length,
+      publishedAt,
+      contentHash,
+      chunks,
       retrievedAt: new Date().toISOString(),
     };
   }
@@ -134,31 +226,58 @@ export class RealDocumentFetcher {
     sourceText: string,
     extractedQuote: string
   ): OffsetMatch {
-    const normalize = (t: string) => t.replace(/\s+/g, '').toLowerCase();
-    
-    const cleanQuote = normalize(extractedQuote);
-    if (!cleanQuote || cleanQuote.length < 5) {
+    if (!extractedQuote || extractedQuote.trim().length < 3) {
       return { quote: extractedQuote, startOffset: -1, endOffset: -1, found: false };
     }
 
-    let minWindow = Math.max(10, extractedQuote.length - 200);
-    let maxWindow = extractedQuote.length + 200;
-    
-    for (let i = 0; i < sourceText.length - 10; i += 20) {
-      const windowStr = sourceText.slice(i, i + maxWindow);
-      const cleanWindow = normalize(windowStr);
-      
-      const idx = cleanWindow.indexOf(cleanQuote);
-      if (idx !== -1) {
+    const cleanQuote = extractedQuote.trim().toLowerCase();
+    const sourceLower = sourceText.toLowerCase();
+
+    // 1. Exact substring match
+    let idx = sourceLower.indexOf(cleanQuote);
+    if (idx !== -1) {
+      const startOffset = idx;
+      const endOffset = idx + extractedQuote.trim().length;
+      if (startOffset >= 0 && endOffset > startOffset && endOffset <= sourceText.length) {
         return {
           quote: extractedQuote,
-          startOffset: i,
-          endOffset: i + maxWindow,
-          found: true
+          startOffset,
+          endOffset,
+          found: true,
         };
       }
     }
 
+    // 2. Normalized whitespace mapping
+    let cleanSource = '';
+    const indexMap: number[] = [];
+    for (let i = 0; i < sourceText.length; i++) {
+      const char = sourceText[i];
+      if (!/\s/.test(char)) {
+        cleanSource += char.toLowerCase();
+        indexMap.push(i);
+      }
+    }
+
+    const cleanQuery = cleanQuote.replace(/\s+/g, '');
+    const cleanIdx = cleanSource.indexOf(cleanQuery);
+
+    if (cleanIdx !== -1 && indexMap.length > 0) {
+      const startOffset = indexMap[cleanIdx];
+      const endMapIdx = cleanIdx + cleanQuery.length - 1;
+      const endOffset = endMapIdx < indexMap.length ? indexMap[endMapIdx] + 1 : sourceText.length;
+
+      if (startOffset >= 0 && endOffset > startOffset && endOffset <= sourceText.length) {
+        return {
+          quote: extractedQuote,
+          startOffset,
+          endOffset,
+          found: true,
+        };
+      }
+    }
+
+    // Reject invalid offsets
     return { quote: extractedQuote, startOffset: -1, endOffset: -1, found: false };
   }
 

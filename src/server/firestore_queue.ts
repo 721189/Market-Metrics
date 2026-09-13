@@ -1,48 +1,117 @@
 import { adminDb } from '../lib/firebase-admin.js';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 export type QueueJob = {
     id: string;
     data: any;
-    status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+    status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
     created_at: any;
     updated_at: any;
+    leased_until?: any;
+    worker_id?: string;
 };
 
 export class FirestoreQueue {
     private collectionName = 'job_queue';
 
     async add(name: string, data: any) {
-        return await adminDb.collection(this.collectionName).add({
+        const docRef = adminDb.collection(this.collectionName).doc();
+        await docRef.set({
             name,
             data,
             status: 'QUEUED',
             created_at: FieldValue.serverTimestamp(),
             updated_at: FieldValue.serverTimestamp(),
         });
+        return docRef;
     }
 
-    async getNextJob() {
+    async claimNextJob(workerId: string = 'worker-1'): Promise<QueueJob | null> {
         try {
-            const snap = await adminDb.collection(this.collectionName)
-                .where('status', '==', 'QUEUED')
-                .limit(20)
-                .get();
-            if (snap.empty) return null;
-            const docs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as QueueJob }));
-            docs.sort((a, b) => {
-                const ta = a.created_at?.toMillis ? a.created_at.toMillis() : 0;
-                const tb = b.created_at?.toMillis ? b.created_at.toMillis() : 0;
-                return ta - tb;
+            // First recover stale running jobs whose lease expired
+            await this.recoverStaleJobs();
+
+            return await adminDb.runTransaction(async (transaction) => {
+                const snap = await adminDb.collection(this.collectionName)
+                    .where('status', '==', 'QUEUED')
+                    .limit(10)
+                    .get();
+
+                if (snap.empty) return null;
+
+                const docs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as QueueJob }));
+                docs.sort((a, b) => {
+                    const ta = a.created_at?.toMillis ? a.created_at.toMillis() : 0;
+                    const tb = b.created_at?.toMillis ? b.created_at.toMillis() : 0;
+                    return ta - tb;
+                });
+
+                const target = docs[0];
+                const jobRef = adminDb.collection(this.collectionName).doc(target.id);
+                const freshDoc = await transaction.get(jobRef);
+
+                if (!freshDoc.exists || freshDoc.data()?.status !== 'QUEUED') {
+                    return null;
+                }
+
+                const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000); // 3 mins lease
+                transaction.update(jobRef, {
+                    status: 'RUNNING',
+                    worker_id: workerId,
+                    leased_until: leasedUntil,
+                    updated_at: FieldValue.serverTimestamp(),
+                });
+
+                return {
+                    ...freshDoc.data() as QueueJob,
+                    id: target.id,
+                    status: 'RUNNING',
+                    worker_id: workerId,
+                    leased_until: leasedUntil,
+                };
             });
-            return docs[0];
         } catch (err: any) {
-            if (err?.code === 5 || err?.message?.includes('NOT_FOUND') || err?.details?.includes('NOT_FOUND')) {
-                // Collection or database not yet initialized/populated
-                return null;
-            }
-            console.error('[Queue] Error in getNextJob:', err);
+            console.error('[Queue] Error claiming next job:', err);
             return null;
+        }
+    }
+
+    async heartbeat(jobId: string, workerId: string) {
+        try {
+            const jobRef = adminDb.collection(this.collectionName).doc(jobId);
+            const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000);
+            await jobRef.update({
+                leased_until: leasedUntil,
+                updated_at: FieldValue.serverTimestamp(),
+            });
+        } catch (err) {
+            console.error(`[Queue] Failed to heartbeat job ${jobId}:`, err);
+        }
+    }
+
+    async recoverStaleJobs() {
+        try {
+            const now = Timestamp.now();
+            const snap = await adminDb.collection(this.collectionName)
+                .where('status', '==', 'RUNNING')
+                .where('leased_until', '<', now)
+                .get();
+
+            if (!snap.empty) {
+                const batch = adminDb.batch();
+                snap.docs.forEach(doc => {
+                    batch.update(doc.ref, {
+                        status: 'QUEUED',
+                        worker_id: null,
+                        leased_until: null,
+                        updated_at: FieldValue.serverTimestamp(),
+                    });
+                });
+                await batch.commit();
+                console.log(`[Queue] Recovered ${snap.size} stale running jobs back to QUEUED.`);
+            }
+        } catch (err) {
+            console.error('[Queue] Error recovering stale jobs:', err);
         }
     }
 

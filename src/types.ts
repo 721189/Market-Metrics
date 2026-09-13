@@ -134,6 +134,7 @@ export interface Evidence {
   page_number?: number;
   section: string;
   extraction_confidence: number; // 0 - 100
+  provenance_type: 'OBSERVED' | 'INFERRED' | 'ASSUMED' | 'CALCULATED';
   created_at: string;
   // Hydrated references
   source?: Source;
@@ -151,6 +152,7 @@ export interface Claim {
   verification_status: VerificationStatus;
   confidence: number; // 0 - 100
   reasoning: string;
+  provenance_type: 'OBSERVED' | 'INFERRED' | 'ASSUMED' | 'CALCULATED';
   created_at: string;
   supporting_evidence_ids: string[];
   contradicting_evidence_ids: string[];

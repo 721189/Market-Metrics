@@ -11,9 +11,8 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { getAdminApp } from './src/server/firebase_admin.js';
-import { ResearchPipelineManager, pipelineEmitter } from './src/server/pipeline.js';
+import { ResearchPipelineManager, pipelineEmitter, startWorker } from './src/server/pipeline.js';
 import { DatabaseRepository } from './src/server/db.js';
-import { DatabaseAdapter } from './src/server/database_adapter.js';
 
 import {
   authMiddleware,
@@ -25,8 +24,15 @@ import {
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
 
-
 dotenv.config();
+
+function getUserId(req: Request): string {
+  const userId = (req as any).user?.uid || (req.headers['x-user-id'] as string);
+  if (!userId) {
+    throw new Error('Unauthorized: Missing authenticated user ID');
+  }
+  return userId;
+}
 
 async function startServer() {
   const app = express();
@@ -71,16 +77,14 @@ async function startServer() {
   });
 
   app.get('/ready', async (req: Request, res: Response) => {
-    const jobs = await ResearchPipelineManager.listJobs();
-    const dbStatus = DatabaseAdapter.getInstance().getStatus();
-    const queueStats = researchQueue.getStats();
+    const jobs = await ResearchPipelineManager.listJobs('system-health');
+    const queueStats = await researchQueue.getStats();
 
     res.status(200).json({
       status: 'ready',
       gemini_configured: Boolean(process.env.GEMINI_API_KEY),
       environment: process.env.NODE_ENV || 'development',
       persisted_jobs_count: jobs.length,
-      database: dbStatus,
       queue: queueStats,
       version: '2.0.0',
     });
@@ -117,7 +121,7 @@ async function startServer() {
 
   app.post('/api/v1/research', async (req: Request, res: Response) => {
     try {
-      const tenantId = (req as any).user?.uid || 'default_tenant';
+      const tenantId = getUserId(req);
       const { question, industry, geography, time_horizon, objectives, target_company, competitors, scope_depth } = req.body;
 
       if (!question || typeof question !== 'string' || question.trim().length < 3) {
@@ -159,39 +163,51 @@ async function startServer() {
 
   // List all jobs
   app.get('/api/v1/research', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const jobs = await ResearchPipelineManager.listJobs(tenantId);
-    res.json({ jobs, total: jobs.length });
+    try {
+      const tenantId = getUserId(req);
+      const jobs = await ResearchPipelineManager.listJobs(tenantId);
+      res.json({ jobs, total: jobs.length });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+    }
   });
 
   // Get job details & progress
   app.get('/api/v1/research/:id', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job) {
-      return res.status(404).json({
-        error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
-      });
+    try {
+      const tenantId = getUserId(req);
+      const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
+      if (!job) {
+        return res.status(404).json({
+          error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
+        });
+      }
+      
+      let queuePosition = null;
+      if (job.status === 'QUEUED') {
+        queuePosition = await researchQueue.getJobPosition(job.id);
+      }
+      
+      res.json({ ...job, queue_position: queuePosition });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    
-    let queuePosition = null;
-    if (job.status === 'QUEUED') {
-      queuePosition = researchQueue.getJobPosition(job.id);
-    }
-    
-    res.json({ ...job, queue_position: queuePosition });
   });
 
   // Cancel job
   app.post('/api/v1/research/:id/cancel', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const cancelled = await ResearchPipelineManager.cancelJob(req.params.id, tenantId);
-    if (!cancelled) {
-      return res.status(400).json({
-        error: { code: 'CANNOT_CANCEL', message: 'Job is not running or does not exist' },
-      });
+    try {
+      const tenantId = getUserId(req);
+      const cancelled = await ResearchPipelineManager.cancelJob(req.params.id, tenantId);
+      if (!cancelled) {
+        return res.status(400).json({
+          error: { code: 'CANNOT_CANCEL', message: 'Job is not running or does not exist' },
+        });
+      }
+      res.json({ status: 'CANCELLED', job_id: req.params.id });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    res.json({ status: 'CANCELLED', job_id: req.params.id });
   });
 
   // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive & Last-Event-ID resume
@@ -271,117 +287,125 @@ async function startServer() {
 
   // Get Evidence Pool
   app.get('/api/v1/research/:id/evidence', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+    try {
+      const tenantId = getUserId(req);
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+      }
+      res.json({ evidence: report.evidence_pool, count: report.evidence_pool.length });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    res.json({ evidence: job.report.evidence_pool, count: job.report.evidence_pool.length });
   });
 
   // Get Claims
   app.get('/api/v1/research/:id/claims', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+    try {
+      const tenantId = getUserId(req);
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+      }
+      res.json({ claims: report.claims, count: report.claims.length });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    res.json({ claims: job.report.claims, count: job.report.claims.length });
   });
 
   // Get Structured Report
   app.get('/api/v1/research/:id/report', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
+    try {
+      const tenantId = getUserId(req);
+      const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
+      if (!job) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
+      }
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(202).json({
+          status: job.status,
+          current_stage: job.current_stage,
+          progress: job.progress,
+          message: 'Report is currently compiling',
+        });
+      }
+      res.json(report);
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    if (!job.report) {
-      return res.status(202).json({
-        status: job.status,
-        current_stage: job.current_stage,
-        progress: job.progress,
-        message: 'Report is currently compiling',
-      });
-    }
-    res.json(job.report);
   });
 
   // Export Structured JSON
   app.get('/api/v1/research/:id/export/json', async (req: Request, res: Response) => {
-    const token = req.query.token as string;
-    let tenantId = 'default_tenant';
-
     try {
-      if (token) {
-        const decoded = await getAdminApp().auth().verifyIdToken(token);
-        tenantId = decoded.uid;
-      } else {
-        tenantId = (req as any).user?.uid || 'default_tenant';
+      const tenantId = getUserId(req);
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
       }
-    } catch (e) {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
+      res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${req.params.id}.json"`);
+      res.setHeader('Content-Type', 'application/json');
+      res.send(JSON.stringify(report, null, 2));
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
-    }
-    res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${job.id}.json"`);
-    res.setHeader('Content-Type', 'application/json');
-    res.send(JSON.stringify(job.report, null, 2));
   });
 
   // Export Structured CSV (Claims + Evidence + Financials)
   app.get('/api/v1/research/:id/export/csv', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
+    try {
+      const tenantId = getUserId(req);
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
+      }
+
+      const lines: string[] = [];
+
+      // Header metadata
+      lines.push(`"MARKET RESEARCH REPORT","${report.title.replace(/"/g, '""')}"`);
+      lines.push(`"Question","${report.question.replace(/"/g, '""')}"`);
+      lines.push(`"Industry","${report.industry}"`);
+      lines.push(`"Geography","${report.geography}"`);
+      lines.push(`"Time Horizon","${report.time_horizon}"`);
+      lines.push(`"Evidence Score","${report.evidence_score_breakdown.overall_score}/100"`);
+      lines.push('');
+
+      // Claims section
+      lines.push('"CLAIMS AND PROVENANCE"');
+      lines.push('"Citation #","Claim Type","Statement","Status","Confidence Score","Reasoning"');
+      report.claims.forEach(c => {
+        lines.push(`"[${c.citation_number}]","${c.claim_type}","${c.statement.replace(/"/g, '""')}","${c.verification_status}","${c.confidence}%","${c.reasoning.replace(/"/g, '""')}"`);
+      });
+      lines.push('');
+
+      // Sources section
+      lines.push('"SOURCES APPENDIX"');
+      lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score"');
+      report.sources.forEach(s => {
+        lines.push(`"${s.id}","${s.source_type}","${s.domain}","${s.publisher.replace(/"/g, '""')}","${s.url}","${s.reliability_score}%"`);
+      });
+
+      res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${req.params.id}.csv"`);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.send(lines.join('\n'));
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-
-    const report = job.report;
-    const lines: string[] = [];
-
-    // Header metadata
-    lines.push(`"MARKET RESEARCH REPORT","${report.title.replace(/"/g, '""')}"`);
-    lines.push(`"Question","${report.question.replace(/"/g, '""')}"`);
-    lines.push(`"Industry","${report.industry}"`);
-    lines.push(`"Geography","${report.geography}"`);
-    lines.push(`"Time Horizon","${report.time_horizon}"`);
-    lines.push(`"Evidence Score","${report.evidence_score_breakdown.overall_score}/100"`);
-    lines.push('');
-
-    // Claims section
-    lines.push('"CLAIMS AND PROVENANCE"');
-    lines.push('"Citation #","Claim Type","Statement","Status","Confidence Score","Reasoning"');
-    report.claims.forEach(c => {
-      lines.push(`"[${c.citation_number}]","${c.claim_type}","${c.statement.replace(/"/g, '""')}","${c.verification_status}","${c.confidence}%","${c.reasoning.replace(/"/g, '""')}"`);
-    });
-    lines.push('');
-
-    // Sources section
-    lines.push('"SOURCES APPENDIX"');
-    lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score"');
-    report.sources.forEach(s => {
-      lines.push(`"${s.id}","${s.source_type}","${s.domain}","${s.publisher.replace(/"/g, '""')}","${s.url}","${s.reliability_score}%"`);
-    });
-
-    res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${job.id}.csv"`);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.send(lines.join('\n'));
   });
 
   // Export High-Resolution Printable PDF Dossier
   app.get('/api/v1/research/:id/export/pdf', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
-    }
+    try {
+      const tenantId = getUserId(req);
+      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      if (!report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
+      }
 
-    const rep = job.report;
-    const printHtml = `<!DOCTYPE html>
+      const rep = report;
+      const printHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
@@ -450,6 +474,9 @@ async function startServer() {
 
     res.setHeader('Content-Type', 'text/html');
     res.send(printHtml);
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+    }
   });
 
   // -------------------------------------------------------------
@@ -468,6 +495,9 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Start background queue worker
+  startWorker().catch(err => console.error('[Queue Worker] Fatal error:', err));
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Market Intelligence Agent V2 running on http://0.0.0.0:${PORT}`);

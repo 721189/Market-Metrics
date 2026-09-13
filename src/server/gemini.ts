@@ -138,8 +138,8 @@ Return a strict JSON object matching:
       throw new Error("Gemini API key required.");
     }
 
-    const query = queries[0] || "Market research";
-    const prompt = `Perform a web search to discover 3-5 authoritative, high-quality sources (reports, academic journals, official policy documents) answering or covering the context of the query: "${query}". Return a JSON array of discovered sources, with details.`;
+    const combinedQuery = queries.slice(0, 4).join(' | ');
+    const prompt = `Perform a comprehensive web search across these query families: "${combinedQuery}". Discover 5-8 authoritative, high-quality sources (reports, academic journals, official policy documents, financial filings). Return a JSON array of discovered sources, with details.`;
 
     try {
       return await executeWithRetry(async () => {
