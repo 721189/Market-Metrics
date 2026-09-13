@@ -6,4 +6,6 @@ const app = !getApps().length
   ? initializeApp({ projectId: firebaseConfig.projectId }) 
   : getApps()[0];
 
-export const adminDb = getFirestore(app);
+export const adminDb = firebaseConfig.firestoreDatabaseId 
+  ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(app);

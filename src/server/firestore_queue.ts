@@ -46,29 +46,30 @@ export class FirestoreQueue {
                     return ta - tb;
                 });
 
-                const target = docs[0];
-                const jobRef = adminDb.collection(this.collectionName).doc(target.id);
-                const freshDoc = await transaction.get(jobRef);
+                for (const target of docs) {
+                    const jobRef = adminDb.collection(this.collectionName).doc(target.id);
+                    const freshDoc = await transaction.get(jobRef);
 
-                if (!freshDoc.exists || freshDoc.data()?.status !== 'QUEUED') {
-                    return null;
+                    if (freshDoc.exists && freshDoc.data()?.status === 'QUEUED') {
+                        const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000); // 3 mins lease
+                        transaction.update(jobRef, {
+                            status: 'RUNNING',
+                            worker_id: workerId,
+                            leased_until: leasedUntil,
+                            updated_at: FieldValue.serverTimestamp(),
+                        });
+
+                        return {
+                            ...freshDoc.data() as QueueJob,
+                            id: target.id,
+                            status: 'RUNNING',
+                            worker_id: workerId,
+                            leased_until: leasedUntil,
+                        };
+                    }
                 }
 
-                const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000); // 3 mins lease
-                transaction.update(jobRef, {
-                    status: 'RUNNING',
-                    worker_id: workerId,
-                    leased_until: leasedUntil,
-                    updated_at: FieldValue.serverTimestamp(),
-                });
-
-                return {
-                    ...freshDoc.data() as QueueJob,
-                    id: target.id,
-                    status: 'RUNNING',
-                    worker_id: workerId,
-                    leased_until: leasedUntil,
-                };
+                return null;
             });
         } catch (err: any) {
             console.error('[Queue] Error claiming next job:', err);
