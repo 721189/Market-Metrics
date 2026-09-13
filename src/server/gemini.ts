@@ -360,6 +360,61 @@ Format the output strictly as a JSON object with:
   }
 
   /**
+   * Market Sizing & Financial Metric Extraction
+   */
+  public static async extractFinancialMetrics(params: {
+    industry: string;
+    geography: string;
+    sourceDocuments: Array<{ id: string; domain: string; title: string; text: string }>;
+    signal?: AbortSignal;
+  }): Promise<{ tam: number; cagr: number; currency: string; year_start: number; year_end: number }> {
+    const ai = getGemini();
+    if (!ai) {
+      throw new Error("Gemini API key required.");
+    }
+
+    const prompt = `You are a financial data extractor. Analyze the provided market research documents and extract the following metrics:
+1. Total Addressable Market (TAM) for the current year.
+2. Verified Compound Annual Growth Rate (CAGR) for the forecast period.
+3. Reporting Currency.
+4. Forecast Start and End years.
+
+Documents: ${JSON.stringify(params.sourceDocuments).slice(0, 15000)}
+
+Return a strict JSON object:
+{
+  "tam": number (raw value, e.g. 25000000000),
+  "cagr": number (e.g. 12.4),
+  "currency": string (ISO code, e.g. "USD" or "INR"),
+  "year_start": number,
+  "year_end": number
+}`;
+
+    return await executeWithRetry(async () => {
+      if (params.signal?.aborted) throw new Error('Operation aborted');
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              tam: { type: Type.NUMBER },
+              cagr: { type: Type.NUMBER },
+              currency: { type: Type.STRING },
+              year_start: { type: Type.INTEGER },
+              year_end: { type: Type.INTEGER }
+            },
+            required: ["tam", "cagr", "currency", "year_start", "year_end"]
+          }
+        }
+      });
+      return JSON.parse(response.text || '{}');
+    });
+  }
+
+  /**
    * Report Overview Synthesis
    */
   public static async synthesizeReportOverview(params: {

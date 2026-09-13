@@ -16,6 +16,7 @@
  * - Full database persistence via DatabaseRepository & DatabaseAdapter
  */
 
+import { generateId } from '../lib/uuid.js';
 import { EventEmitter } from 'events';
 import type {
   ResearchJob,
@@ -406,30 +407,68 @@ export class ResearchPipelineManager {
 
     if (extractedLLMClaims.length > 0) {
       for (const item of extractedLLMClaims) {
-        // Find matching evidence ID in evidencePool
-        const matchingEv = evidencePool.find(e => e.source_id === item.source_id) || evidencePool[0];
+        const sourceText = sourceTexts.get(item.source_id) || '';
+        const offset = RealDocumentFetcher.findExactEvidenceOffset(sourceText, item.extracted_quote);
+        const source = sources.find(s => s.id === item.source_id);
+
+        const newEvidence: Evidence = {
+          id: `ev-dyn-${evId++}`,
+          job_id: job.id,
+          document_id: `doc-${item.source_id}`,
+          source_id: item.source_id,
+          evidence_type: 'PRIMARY_SOURCE',
+          text: offset.quote,
+          quote: offset.quote,
+          start_offset: offset.startOffset,
+          end_offset: offset.endOffset,
+          section: 'Market Intelligence & Facts',
+          extraction_confidence: 98,
+          created_at: new Date().toISOString(),
+          source: source,
+        };
+        evidencePool.push(newEvidence);
+
         claims.push({
           id: `clm-${claimIdx}`,
           job_id: job.id,
           citation_number: claimIdx,
           statement: item.statement,
           claim_type: (item.claim_type as any) || 'MARKET_SIZE',
-          supporting_evidence_ids: matchingEv ? [matchingEv.id] : [],
+          supporting_evidence_ids: [newEvidence.id],
           contradicting_evidence_ids: [],
           verification_status: 'SUPPORTED',
-          confidence: (item as any).confidence || 92,
-          reasoning: (item as any).reasoning || 'Grounded in empirical source text.',
+          confidence: (item as any).confidence || 95,
+          reasoning: (item as any).reasoning || 'Grounded in extracted empirical quote.',
           created_at: new Date().toISOString(),
         });
         claimIdx++;
       }
     }
 
-    const isIndia = job.geography.toLowerCase().includes('india');
-    const currency = isIndia ? 'INR' : 'USD';
-    const baseTAM = isIndia ? 25000000000 : 2500000000;
-    const growthRate = 12.4;
-    const horizonYears = 5;
+    // -------------------------------------------------------------
+    // STAGE 7: ANALYZING (Deterministic Financial Calculations)
+    // -------------------------------------------------------------
+    await logAndEmitEvent(job, 'stage_started', 'ANALYZING', 'Analyzing financial metrics and market sizing from verified source data...', 80);
+
+    const financials = await GeminiResearchEngine.extractFinancialMetrics({
+      industry: job.industry,
+      geography: job.geography,
+      sourceDocuments: sources.map(s => ({
+        id: s.id,
+        domain: s.domain,
+        title: s.title,
+        text: sourceTexts.get(s.id) || '',
+      })),
+      signal,
+    });
+
+    const isIndia = financials.currency === 'INR';
+    const currency = financials.currency;
+    const baseTAM = financials.tam;
+    const growthRate = financials.cagr;
+    const startYear = financials.year_start;
+    const endYear = financials.year_end;
+    const horizonYears = endYear - startYear;
     const tamForecast = baseTAM * Math.pow(1 + growthRate / 100, horizonYears);
 
     const sizing = {
@@ -439,9 +478,6 @@ export class ResearchPipelineManager {
       sam: baseTAM * 0.4,
       som: baseTAM * 0.1,
     };
-
-    const startYear = 2026;
-    const endYear = 2031;
     const claimVerification = RealClaimVerifier.verifyAll(claims, sources, evidencePool);
     const verifiedClaims = claimVerification.verifiedClaims;
     const evidenceBreakdown = claimVerification.evidenceBreakdown;
@@ -477,7 +513,7 @@ export class ResearchPipelineManager {
 
     const marketMetrics: MarketMetric[] = [
       {
-        id: 'met-1',
+        id: generateId(),
         job_id: job.id,
         metric_name: 'Total Addressable Market (Base)',
         value: sizing.tam_current,
@@ -490,7 +526,7 @@ export class ResearchPipelineManager {
         confidence: 96,
       },
       {
-        id: 'met-2',
+        id: generateId(),
         job_id: job.id,
         metric_name: 'Forecast TAM',
         value: sizing.tam_forecast,
@@ -503,7 +539,7 @@ export class ResearchPipelineManager {
         confidence: 94,
       },
       {
-        id: 'met-3',
+        id: generateId(),
         job_id: job.id,
         metric_name: 'Deterministic CAGR',
         value: sizing.cagr_pct,
@@ -552,26 +588,17 @@ export class ResearchPipelineManager {
     const regulatoryFactors = details.regulatoryFactors;
     const risks = details.risks;
 
-    const recommendations: StrategicRecommendation[] = [
+    const recommendations: StrategicRecommendation[] = details.risks.length > 0 ? [
       {
         id: 'rec-1',
-        title: `Execute High-Velocity Wedge GTM in ${job.geography}`,
+        title: `Execute GTM Strategy in ${job.geography}`,
         priority: 'CRITICAL',
         timeframe: 'IMMEDIATE',
-        rationale: `Capitalize on underserved mid-market segments by offering transparent pricing and rapid time-to-value.[3][4]`,
-        risk_factors: ['Channel partner ramp delay', 'Initial brand awareness deficit'],
-        supporting_claim_ids: ['clm-3', 'clm-4'],
-      },
-      {
-        id: 'rec-2',
-        title: 'Institutional Compliance Certification & Enterprise Hardening',
-        priority: 'HIGH',
-        timeframe: '6_MONTHS',
-        rationale: `Unlock Fortune 2000 enterprise procurement accounts by satisfying all local regulatory mandates.[5]`,
-        risk_factors: ['Audit accreditation timelines'],
-        supporting_claim_ids: ['clm-5'],
-      },
-    ];
+        rationale: `Strategic entry into the ${job.industry} sector leveraging verified market growth of ${sizing.cagr_pct}%.`,
+        risk_factors: [details.risks[0].title],
+        supporting_claim_ids: ['clm-1', 'clm-2'],
+      }
+    ] : [];
 
     const sections: ReportSection[] = [
       {

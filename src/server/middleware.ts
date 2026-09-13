@@ -2,21 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import admin from 'firebase-admin';
 import path from 'path';
 import fs from 'fs';
-import { CryptographyAuth } from './auth_helper.js';
-
-let adminApp: any = null;
-try {
-  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    adminApp = admin.initializeApp({
-      projectId: config.projectId,
-    });
-    console.log('[Auth Middleware] Real Firebase Admin initialized with project ID:', config.projectId);
-  }
-} catch (err) {
-  console.warn('[Auth Middleware] Warning: Firebase Admin could not load offline credentials:', err);
-}
+import { getAdminApp } from './firebase_admin.js';
 
 export function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
   next();
@@ -31,37 +17,21 @@ export function rateLimiterMiddleware(opts: any = {}) {
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    // Standard guest / local dev context fallback with full isolation enforcement
-    (req as any).user = { uid: 'default_tenant', email: 'guest@tenant.isolated' };
-    return next();
+    return res.status(401).json({
+      error: { code: 'UNAUTHORIZED', message: 'Authentication required. No Bearer token provided.' }
+    });
   }
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    // 1. Try our high-security cryptographic token engine
-    const localPayload = CryptographyAuth.verify(token);
-    if (localPayload) {
-      (req as any).user = { uid: localPayload.uid, email: localPayload.email, role: localPayload.role };
-      return next();
-    }
-
-    // 2. Fallback to Firebase Admin ID Token Verification
+    const adminApp = getAdminApp();
     if (adminApp) {
-      const decodedToken = await (admin as any).auth().verifyIdToken(token);
+      const decodedToken = await adminApp.auth().verifyIdToken(token);
       (req as any).user = decodedToken;
       return next();
+    } else {
+      throw new Error('Firebase Admin not initialized');
     }
-
-    // 3. Fallback to standard claims extraction
-    const parts = token.split('.');
-    if (parts.length === 3) {
-      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-      (req as any).user = { uid: payload.user_id || payload.sub || 'default_tenant', email: payload.email };
-      return next();
-    }
-
-    (req as any).user = { uid: 'default_tenant', email: 'guest@tenant.isolated' };
-    next();
   } catch (err: any) {
     console.error('[Auth Middleware] Verification failed:', err.message);
     res.status(401).json({

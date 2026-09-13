@@ -14,7 +14,11 @@ import {
 } from 'lucide-react';
 import type { FullResearchReport, ResearchJob } from '../types.js';
 
+import { auth, logout } from '../lib/firebase.js';
+import { User } from 'firebase/auth';
+
 interface HeaderProps {
+  user: User | null;
   currentJob: ResearchJob | null;
   report: FullResearchReport | null;
   onNewResearch: () => void;
@@ -23,10 +27,10 @@ interface HeaderProps {
   setActiveView: (view: 'workspace' | 'report' | 'evidence' | 'sources' | 'progress') => void;
   onExportJson: () => void;
   onPrintReport: () => void;
-  
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  user,
   currentJob,
   report,
   onNewResearch,
@@ -35,7 +39,6 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveView,
   onExportJson,
   onPrintReport,
-  
 }) => {
   const isJobRunning = currentJob && currentJob.status !== 'COMPLETED' && currentJob.status !== 'FAILED' && currentJob.status !== 'CANCELLED';
 
@@ -53,45 +56,60 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <span className="font-bold tracking-tight text-white sm:text-lg group-hover:text-cyan-300 transition-colors">Market Intelligence</span>
-              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-500/20">V2 Agent</span>
+              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-500/20">V2</span>
             </div>
-            <p className="hidden text-[11px] text-slate-400 sm:block">Universal Evidence-Backed Research Engine</p>
+            <p className="hidden text-[11px] text-slate-400 sm:block">Institutional-grade Research Engine</p>
           </div>
         </div>
 
-        {/* Navigation View Switcher */}
-        <div className="flex items-center rounded-lg bg-slate-900/90 p-1 border border-slate-800 text-xs">
-          
+        {/* Actions & User */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center rounded-lg bg-slate-900/90 p-1 border border-slate-800 text-xs">
+            {report && (
+              <div className="hidden sm:flex items-center gap-1.5 mr-1.5">
+                <button
+                  onClick={onPrintReport}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  PDF
+                </button>
+                <button
+                  onClick={onExportJson}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                >
+                  JSON
+                </button>
+              </div>
+            )}
 
-          {report && (
-            <div className="hidden sm:flex items-center gap-1.5">
-              <button
-                onClick={onPrintReport}
-                title="Print / Save as PDF"
-                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Export PDF
-              </button>
-              <button
-                onClick={onExportJson}
-                title="Download Structured Report JSON"
-                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-              >
-                JSON
-              </button>
+            <button
+              onClick={onNewResearch}
+              className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-3.5 py-1.5 text-xs font-semibold text-slate-950 shadow-md shadow-cyan-500/20 hover:brightness-110 active:scale-95 transition-all"
+            >
+              <Plus className="h-4 w-4" />
+              <span>New Research</span>
+            </button>
+          </div>
+
+          {user && (
+            <div className="flex items-center gap-3 border-l border-slate-800 pl-4">
+              <div className="hidden md:block text-right">
+                <p className="text-xs font-bold text-white truncate max-w-[120px]">{user.displayName || user.email}</p>
+                <button 
+                  onClick={() => logout()}
+                  className="text-[10px] text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest font-bold"
+                >
+                  Sign Out
+                </button>
+              </div>
+              <img 
+                src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}&background=0D9488&color=fff`} 
+                alt="Profile" 
+                className="h-8 w-8 rounded-full border border-slate-700 shadow-sm"
+              />
             </div>
           )}
-
-          {/* New Research Action */}
-          <button
-            onClick={onNewResearch}
-            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-3.5 py-1.5 text-xs font-semibold text-slate-950 shadow-md shadow-cyan-500/20 hover:brightness-110 active:scale-95 transition-all"
-          >
-            <Plus className="h-4 w-4" />
-            <span className="hidden sm:inline">New Research</span>
-            <span className="sm:hidden">New</span>
-          </button>
         </div>
       </div>
     </header>

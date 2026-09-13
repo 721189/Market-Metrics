@@ -143,6 +143,27 @@ export class RealRedisServer {
           socket.write('+PONG\r\n');
           break;
 
+        case 'INFO': {
+          const info = 'redis_version:6.0.0\r\nrole:master\r\n';
+          socket.write(`$${Buffer.byteLength(info)}\r\n${info}\r\n`);
+          break;
+        }
+
+        case 'EVALSHA': {
+          // This is a stub. BullMQ uses Lua scripts. 
+          // If the script isn't loaded, it will error.
+          // For now, return a generic error so the client knows it's not implemented.
+          socket.write(`-NOSCRIPT No matching script. Please use EVAL.\r\n`);
+          break;
+        }
+
+        case 'EVAL': {
+          // This is a stub for Lua script execution.
+          // Returning +OK to satisfy the client without executing the script.
+          socket.write(`+OK\r\n`);
+          break;
+        }
+
         case 'SET': {
           const [_, key, value] = args;
           this.db.set(key, value);

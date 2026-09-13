@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header.js';
+import { Cpu } from 'lucide-react';
 import { HomeWorkspace } from './components/HomeWorkspace.js';
 import { NewResearchModal } from './components/NewResearchModal.js';
 import { ResearchProgress } from './components/ResearchProgress.js';
@@ -22,7 +23,12 @@ import type {
   Claim 
 } from './types.js';
 
+import { auth, loginWithGoogle, logout } from './lib/firebase.js';
+import { onAuthStateChanged, User } from 'firebase/auth';
+
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
   const [currentJob, setCurrentJob] = useState<ResearchJob | null>(null);
   const [report, setReport] = useState<FullResearchReport | null>(null);
   const [recentJobs, setRecentJobs] = useState<ResearchJob[]>([]);
@@ -33,31 +39,55 @@ export default function App() {
   const [inspectedClaim, setInspectedClaim] = useState<Claim | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Initial Load: Fetch existing research jobs list (without forcing a mock report)
+  // Auth Listener
   useEffect(() => {
-    fetchJobsList();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Initial Load: Fetch existing research jobs list
+  useEffect(() => {
+    if (user) {
+      fetchJobsList();
+    } else {
+      setRecentJobs([]);
+      setCurrentJob(null);
+      setReport(null);
+    }
 
     return () => {
       eventSourceRef.current?.close();
     };
-  }, []);
+  }, [user]);
 
-  const fetchJobsList = () => {
-    fetch('/api/v1/research')
-      .then(res => res.json())
-      .then(data => {
-        if (data.jobs && data.jobs.length > 0) {
-          setRecentJobs(data.jobs);
-        }
-      })
-      .catch(err => {
-        console.warn('Could not fetch jobs list:', err);
-      });
+  const getHeaders = async () => {
+    const token = await user?.getIdToken();
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    };
+  };
+
+  const fetchJobsList = async () => {
+    try {
+      const headers = await getHeaders();
+      const res = await fetch('/api/v1/research', { headers });
+      const data = await res.json();
+      if (data.jobs) {
+        setRecentJobs(data.jobs);
+      }
+    } catch (err) {
+      console.warn('Could not fetch jobs list:', err);
+    }
   };
 
   const loadBenchmark = async (benchmarkId: string) => {
     try {
-      const res = await fetch(`/api/v1/benchmarks/${benchmarkId}`);
+      const headers = await getHeaders();
+      const res = await fetch(`/api/v1/benchmarks/${benchmarkId}`, { headers });
       if (res.ok) {
         const benchmarkReport: FullResearchReport = await res.json();
         setReport(benchmarkReport);
@@ -94,13 +124,14 @@ export default function App() {
     }
   };
 
-  const subscribeToEvents = (jobId: string) => {
+  const subscribeToEvents = async (jobId: string) => {
     eventSourceRef.current?.close();
 
-    const es = new EventSource(`/api/v1/research/${jobId}/events`);
+    const token = await user?.getIdToken();
+    const es = new EventSource(`/api/v1/research/${jobId}/events?token=${token}`);
     eventSourceRef.current = es;
 
-    es.onmessage = (e) => {
+    es.onmessage = async (e) => {
       try {
         const evt: ResearchEvent = JSON.parse(e.data);
         setEvents(prev => {
@@ -109,7 +140,8 @@ export default function App() {
         });
 
         // Refresh job state
-        fetch(`/api/v1/research/${jobId}`)
+        const headers = await getHeaders();
+        fetch(`/api/v1/research/${jobId}`, { headers })
           .then(r => r.json())
           .then((updatedJob: ResearchJob) => {
             setCurrentJob(updatedJob);
@@ -134,9 +166,10 @@ export default function App() {
       setReport(null);
       setActiveView('progress');
 
+      const headers = await getHeaders();
       const res = await fetch('/api/v1/research', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(requestData),
       });
 
@@ -193,17 +226,56 @@ export default function App() {
   const handleCancelJob = async () => {
     if (!currentJob) return;
     try {
-      await fetch(`/api/v1/research/${currentJob.id}/cancel`, { method: 'POST' });
+      const headers = await getHeaders();
+      await fetch(`/api/v1/research/${currentJob.id}/cancel`, { method: 'POST', headers });
       setCurrentJob(prev => prev ? { ...prev, status: 'CANCELLED' } : null);
     } catch (err) {
       console.error('Failed to cancel job:', err);
     }
   };
 
-  const handleExportJson = () => {
+  const handleExportJson = async () => {
     if (!currentJob) return;
-    window.open(`/api/v1/research/${currentJob.id}/export/json`, '_blank');
+    const token = await user?.getIdToken();
+    window.open(`/api/v1/research/${currentJob.id}/export/json?token=${token}`, '_blank');
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-12 w-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-slate-400 font-medium animate-pulse">Initializing Intelligence Core...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
+          <div className="flex flex-col items-center text-center gap-6">
+            <div className="h-16 w-16 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-cyan-500/20">
+              <Cpu className="h-8 w-8 text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-white tracking-tight">Market Intelligence V2</h1>
+              <p className="text-slate-400 mt-2">Institutional-grade research for strategic decision makers.</p>
+            </div>
+            <button
+              onClick={loginWithGoogle}
+              className="w-full flex items-center justify-center gap-3 bg-white text-slate-950 font-bold py-3.5 px-6 rounded-xl hover:bg-slate-100 transition-all active:scale-[0.98]"
+            >
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
+              Sign in with Google
+            </button>
+            <p className="text-[11px] text-slate-500 uppercase tracking-widest font-semibold">Protected by Firebase Auth</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (activeView === 'print' && report) {
     return (
@@ -218,6 +290,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
       {/* Top Navbar Header */}
       <Header
+        user={user}
         currentJob={currentJob}
         report={report}
         onNewResearch={() => setIsNewModalOpen(true)}
@@ -226,7 +299,6 @@ export default function App() {
         setActiveView={(v) => setActiveView(v)}
         onExportJson={handleExportJson}
         onPrintReport={() => setActiveView('print')}
-        
       />
 
       {/* Main Body View */}

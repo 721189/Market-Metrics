@@ -4,25 +4,27 @@
  * Telemetry Engine, Financial/Security/E2E Test Suites, and Real Export Modules.
  */
 
+import './src/server/telemetry.js';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
+import admin from 'firebase-admin';
+import { getAdminApp } from './src/server/firebase_admin.js';
 import { ResearchPipelineManager, pipelineEmitter } from './src/server/pipeline.js';
 import { DatabaseRepository } from './src/server/db.js';
 import { DatabaseAdapter } from './src/server/database_adapter.js';
+import { RealRedisServer } from './src/server/redis_server.js';
 
 import {
   authMiddleware,
   rateLimiterMiddleware,
   idempotencyMiddleware,
-  
   requireRole,
 } from './src/server/middleware.js';
 
 import { researchQueue } from './src/server/queue_engine.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
-import { CryptographyAuth } from './src/server/auth_helper.js';
 
 
 dotenv.config();
@@ -57,6 +59,8 @@ async function startServer() {
   
   app.use(rateLimiterMiddleware({ maxRequests: 120, windowSec: 60 }));
   
+  await RealRedisServer.getInstance().start();
+  
 
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
@@ -83,28 +87,6 @@ async function startServer() {
       database: dbStatus,
       queue: queueStats,
       version: '2.0.0',
-    });
-  });
-
-  // -------------------------------------------------------------
-  // AUTHENTICATION HELPER (REAL CRYPTOGRAPHIC TENANT TOKENS)
-  // -------------------------------------------------------------
-  app.post('/api/v1/auth/token', (req: Request, res: Response) => {
-    const { username = 'analyst', password, role = 'analyst' } = req.body;
-
-    // Issue standard, real cryptographic JWT token signed by our security engine
-    const token = CryptographyAuth.sign({
-      uid: `user_${Buffer.from(username).toString('hex').slice(0, 8)}`,
-      email: `${username}@tenant.isolated`,
-      role: role,
-    });
-
-    res.json({
-      access_token: token,
-      token_type: 'Bearer',
-      role,
-      expires_in: 86400,
-      user_id: `user_${Buffer.from(username).toString('hex').slice(0, 8)}`
     });
   });
 
@@ -219,7 +201,20 @@ async function startServer() {
   // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive & Last-Event-ID resume
   app.get('/api/v1/research/:id/events', async (req: Request, res: Response) => {
     const jobId = req.params.id;
-    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const token = req.query.token as string;
+    let tenantId = 'default_tenant';
+
+    try {
+      if (token) {
+        const decoded = await getAdminApp().auth().verifyIdToken(token);
+        tenantId = decoded.uid;
+      } else {
+        tenantId = (req as any).user?.uid || 'default_tenant';
+      }
+    } catch (e) {
+      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid token in query' } });
+    }
+
     const job = await ResearchPipelineManager.getJob(jobId, tenantId);
 
     if (!job) {
@@ -318,7 +313,20 @@ async function startServer() {
 
   // Export Structured JSON
   app.get('/api/v1/research/:id/export/json', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
+    const token = req.query.token as string;
+    let tenantId = 'default_tenant';
+
+    try {
+      if (token) {
+        const decoded = await getAdminApp().auth().verifyIdToken(token);
+        tenantId = decoded.uid;
+      } else {
+        tenantId = (req as any).user?.uid || 'default_tenant';
+      }
+    } catch (e) {
+      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
+    }
+
     const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
     if (!job || !job.report) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report not ready' } });
