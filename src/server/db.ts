@@ -47,16 +47,13 @@ const db = (app && firebaseConfig)
   : null;
 
 // Persistent local stores
-const localJobs = new Map<string, ResearchJob & { user_id?: string }>();
-const localEvents = new Map<string, ResearchEvent[]>();
-const localReports = new Map<string, FullResearchReport & { user_id?: string }>();
+// REMOVED: localJobs, localEvents, localReports for source of truth integrity
 
 export class DatabaseRepository {
   /**
    * Save or Update a Research Job with strict owner ID
    */
   public static async saveJob(job: ResearchJob, userId: string = 'default_tenant'): Promise<void> {
-    localJobs.set(job.id, { ...job, user_id: userId });
     if (db) {
       try {
         const jobRef = doc(db, 'jobs', job.id);
@@ -80,7 +77,10 @@ export class DatabaseRepository {
         }, { merge: true });
       } catch (err) {
         console.warn(`[DB] Error syncing job ${job.id} to Firestore:`, err);
+        throw err; // Fail hard to maintain consistency
       }
+    } else {
+        throw new Error("[DB] Firestore not initialized");
     }
   }
 
@@ -88,12 +88,6 @@ export class DatabaseRepository {
    * Get a Research Job by ID with strict owner validation
    */
   public static async getJob(jobId: string, userId: string = 'default_tenant'): Promise<ResearchJob | null> {
-    const job = localJobs.get(jobId);
-    if (job) {
-      if (job.user_id !== userId) return null;
-      return job;
-    }
-
     if (db) {
       try {
         const jobRef = doc(db, 'jobs', jobId);
@@ -103,7 +97,6 @@ export class DatabaseRepository {
           if (data.user_id && data.user_id !== userId) {
             return null;
           }
-          localJobs.set(jobId, data);
           return data;
         }
       } catch (err) {
@@ -118,11 +111,6 @@ export class DatabaseRepository {
    * List recent research jobs for a specific user/tenant
    */
   public static async listJobs(maxLimit: number = 50, userId: string = 'default_tenant'): Promise<ResearchJob[]> {
-    const list = Array.from(localJobs.values()).filter(j => j.user_id === userId);
-    if (list.length > 0) {
-      return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, maxLimit);
-    }
-
     if (db) {
       try {
         const jobsQuery = query(
@@ -135,7 +123,6 @@ export class DatabaseRepository {
         const fetched: ResearchJob[] = [];
         snap.forEach(d => {
           const item = d.data() as ResearchJob & { user_id?: string };
-          localJobs.set(item.id, item);
           fetched.push(item);
         });
         return fetched;
@@ -151,10 +138,6 @@ export class DatabaseRepository {
    * Append a telemetry event
    */
   public static async addEvent(jobId: string, event: ResearchEvent): Promise<void> {
-    const list = localEvents.get(jobId) || [];
-    list.push(event);
-    localEvents.set(jobId, list);
-
     if (db) {
       try {
         const eventRef = doc(db, `jobs/${jobId}/events`, `evt-${event.id}`);
@@ -169,8 +152,11 @@ export class DatabaseRepository {
           created_at: event.created_at,
         });
       } catch (err) {
-        // Log silently
+        console.warn(`[DB] Error adding event to Firestore:`, err);
+        throw err;
       }
+    } else {
+        throw new Error("[DB] Firestore not initialized");
     }
   }
 
@@ -178,11 +164,6 @@ export class DatabaseRepository {
    * Get all events for a job
    */
   public static async getEvents(jobId: string, afterId: number = 0): Promise<ResearchEvent[]> {
-    const local = localEvents.get(jobId) || [];
-    if (local.length > 0) {
-      return local.filter(e => e.id > afterId);
-    }
-
     if (db) {
       try {
         const snap = await getDocs(collection(db, `jobs/${jobId}/events`));
@@ -201,7 +182,6 @@ export class DatabaseRepository {
           });
         });
         fetched.sort((a, b) => a.id - b.id);
-        localEvents.set(jobId, fetched);
         return fetched.filter(e => e.id > afterId);
       } catch (err) {
         console.warn(`[DB] Error fetching events for job ${jobId}:`, err);
@@ -215,18 +195,6 @@ export class DatabaseRepository {
    * Save a complete compiled report with ownership mapping
    */
   public static async saveReport(report: FullResearchReport, userId: string = 'default_tenant'): Promise<void> {
-    localReports.set(report.job_id, { ...report, user_id: userId });
-    
-    // Also update in job representation
-    const job = localJobs.get(report.job_id);
-    if (job) {
-      job.report = report;
-      job.status = 'COMPLETED';
-      job.progress = 100;
-      job.completed_at = new Date().toISOString();
-      await this.saveJob(job, userId);
-    }
-
     if (db) {
       try {
         const reportRef = doc(db, 'reports', report.job_id);
@@ -237,7 +205,10 @@ export class DatabaseRepository {
         });
       } catch (err) {
         console.warn(`[DB] Error saving report ${report.job_id} to Firestore:`, err);
+        throw err;
       }
+    } else {
+        throw new Error("[DB] Firestore not initialized");
     }
   }
 
@@ -245,19 +216,6 @@ export class DatabaseRepository {
    * Get a report by Job ID with ownership checks
    */
   public static async getReport(jobId: string, userId: string = 'default_tenant'): Promise<FullResearchReport | null> {
-    const report = localReports.get(jobId);
-    if (report) {
-      if (report.user_id !== userId) return null;
-      return report;
-    }
-
-    const job = localJobs.get(jobId);
-    if (job && job.report) {
-      if (job.user_id !== userId) return null;
-      localReports.set(jobId, { ...job.report, user_id: userId });
-      return job.report;
-    }
-
     if (db) {
       try {
         const reportRef = doc(db, 'reports', jobId);
@@ -267,7 +225,6 @@ export class DatabaseRepository {
           if (data.user_id && data.user_id !== userId) {
             return null;
           }
-          localReports.set(jobId, data);
           return data;
         }
       } catch (err) {
@@ -278,5 +235,4 @@ export class DatabaseRepository {
     return null;
   }
 }
-export const dbInstance = db;
-export const appInstance = app;
+export { app, db };

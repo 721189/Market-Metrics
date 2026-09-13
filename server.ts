@@ -14,7 +14,6 @@ import { getAdminApp } from './src/server/firebase_admin.js';
 import { ResearchPipelineManager, pipelineEmitter } from './src/server/pipeline.js';
 import { DatabaseRepository } from './src/server/db.js';
 import { DatabaseAdapter } from './src/server/database_adapter.js';
-import { RealRedisServer } from './src/server/redis_server.js';
 
 import {
   authMiddleware,
@@ -23,7 +22,7 @@ import {
   requireRole,
 } from './src/server/middleware.js';
 
-import { researchQueue } from './src/server/queue_engine.js';
+import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
 
 
@@ -58,9 +57,6 @@ async function startServer() {
   // Global Security & Optimization Middleware
   
   app.use(rateLimiterMiddleware({ maxRequests: 120, windowSec: 60 }));
-  
-  await RealRedisServer.getInstance().start();
-  
 
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS

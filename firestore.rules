@@ -1,27 +1,45 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Read and write permissions for research workspace
-    match /users/{userId} {
-      allow read, write: if true;
+    // Helper to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
     }
+    
+    match /job_queue/{jobId} {
+      allow read, write: if false;
+    }
+
+    // Users can only read/write their own profile
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Jobs and related subcollections: User must own the job
     match /jobs/{jobId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      
       match /events/{eventId} {
-        allow read, write: if true;
+        allow read: if isAuthenticated() && get(/databases/$(database)/documents/jobs/$(jobId)).data.userId == request.auth.uid;
+        allow write: if false; // Events should be write-only by backend
       }
       match /sources/{sourceId} {
-        allow read, write: if true;
+        allow read: if isAuthenticated() && get(/databases/$(database)/documents/jobs/$(jobId)).data.userId == request.auth.uid;
+        allow write: if false; 
       }
       match /evidence/{evidenceId} {
-        allow read, write: if true;
+        allow read: if isAuthenticated() && get(/databases/$(database)/documents/jobs/$(jobId)).data.userId == request.auth.uid;
+        allow write: if false; 
       }
       match /claims/{claimId} {
-        allow read, write: if true;
+        allow read: if isAuthenticated() && get(/databases/$(database)/documents/jobs/$(jobId)).data.userId == request.auth.uid;
+        allow write: if false;
       }
     }
+    
     match /reports/{jobId} {
-      allow read, write: if true;
+      allow read: if isAuthenticated() && get(/databases/$(database)/documents/jobs/$(jobId)).data.userId == request.auth.uid;
+      allow write: if false;
     }
   }
 }

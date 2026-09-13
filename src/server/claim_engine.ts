@@ -212,12 +212,21 @@ export class RealClaimVerifier {
     }
     const corroborationScore = Math.min(15, Math.round((corroboratedClaims / Math.max(1, claims.length)) * 15));
 
-    // 5. Recency Score (0-10)
-    const recencyScore = 9;
+    // 5. Recency Score (0-10) calculated from actual source publication dates
+    const currentYear = new Date().getFullYear();
+    const avgSourceAgeYears = sources.length > 0
+      ? sources.reduce((sum, s) => {
+          const pubYear = s.published_at ? new Date(s.published_at).getFullYear() : currentYear - 1;
+          return sum + Math.max(0, currentYear - pubYear);
+        }, 0) / sources.length
+      : 1;
+    const recencyScore = Math.max(0, Math.min(10, Math.round(10 - (avgSourceAgeYears * 1.5))));
 
     // 6. Extraction Quality Score (0-10) - exact character coordinates validity
     const validOffsets = evidencePool.filter(e => e.start_offset >= 0 && e.end_offset > e.start_offset).length;
     const extractionQualityScore = Math.min(10, Math.round((validOffsets / Math.max(1, evidencePool.length)) * 10));
+
+    const citationsFullyIntact = evidencePool.length > 0 && evidencePool.every(e => e.start_offset >= 0 && e.end_offset > e.start_offset);
 
     // 7. Consistency Score (0-10) via Contradiction Engine
     const contradictionAnalysis = ContradictionEngine.analyzeContradictions(claims, evidencePool);
@@ -269,7 +278,7 @@ export class RealClaimVerifier {
         has_primary_evidence: primaryCount > 0,
         no_unresolved_contradictions: contradictionAnalysis.contradictionsFound.length === 0,
         high_tier_sources_present: sources.some(s => s.source_type === 'TIER_A' || s.source_type === 'TIER_B'),
-        citations_fully_intact: true,
+        citations_fully_intact: citationsFullyIntact,
       },
     };
 

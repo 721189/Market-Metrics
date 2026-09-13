@@ -41,7 +41,7 @@ import { FinancialEngine } from './financial.js';
 import { GeminiResearchEngine } from './gemini.js';
 import { DatabaseRepository } from './db.js';
 import { DatabaseAdapter } from './database_adapter.js';
-import { researchQueue } from './queue_engine.js';
+import { researchQueue } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
 
@@ -690,12 +690,32 @@ export class ResearchPipelineManager {
   }
 }
 
-// Bind BullMQ Worker processor
-researchQueue.process(async (queueJob, signal) => {
-  const { job, userId } = queueJob.data;
-  if (userId) {
-    (job as any).user_id = userId;
+// Start Firestore Worker
+async function startWorker() {
+  console.log('[Queue] Worker started');
+  while (true) {
+    try {
+      const job = await researchQueue.getNextJob();
+      if (job) {
+        console.log(`[Queue] Processing job ${job.id}`);
+        await researchQueue.updateJobStatus(job.id, 'RUNNING');
+        try {
+          const { job: jobData, userId } = job.data;
+          const pipelineJob = { ...jobData };
+          if (userId) {
+            (pipelineJob as any).user_id = userId;
+          }
+          await ResearchPipelineManager.executePipelineWorker(pipelineJob, new AbortController().signal);
+          await researchQueue.updateJobStatus(job.id, 'COMPLETED');
+        } catch (err) {
+          console.error(`[Queue] Job ${job.id} failed`, err);
+          await researchQueue.updateJobStatus(job.id, 'FAILED');
+        }
+      }
+    } catch (err) {
+      console.error('[Queue] Worker error', err);
+    }
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5s
   }
-  await ResearchPipelineManager.executePipelineWorker(job, signal);
-  return { status: 'COMPLETED', jobId: job.id };
-});
+}
+startWorker();
