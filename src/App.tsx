@@ -105,7 +105,9 @@ export default function App() {
           completed_at: benchmarkReport.generated_at,
           stats: {
             sources_discovered: benchmarkReport.sources.length,
-            sources_analyzed: benchmarkReport.sources.length,
+            sources_fetched: benchmarkReport.sources.filter(s => s.fetch_status === 'FETCHED').length,
+            sources_fetch_failed: benchmarkReport.sources.filter(s => s.fetch_status === 'FETCH_FAILED').length,
+            sources_analyzed: benchmarkReport.sources.filter(s => s.fetch_status === 'FETCHED').length,
             evidence_items: benchmarkReport.evidence_pool.length,
             claims_total: benchmarkReport.claims.length,
             claims_verified: benchmarkReport.claims.filter(c => c.verification_status === 'SUPPORTED').length,
@@ -193,6 +195,8 @@ export default function App() {
         created_at: created.created_at,
         stats: {
           sources_discovered: 0,
+          sources_fetched: 0,
+          sources_fetch_failed: 0,
           sources_analyzed: 0,
           evidence_items: 0,
           claims_total: 0,

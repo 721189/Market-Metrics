@@ -382,9 +382,9 @@ async function startServer() {
 
       // Sources section
       lines.push('"SOURCES APPENDIX"');
-      lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score"');
+      lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score","Fetch Status","Published"');
       report.sources.forEach(s => {
-        lines.push(`"${s.id}","${s.source_type}","${s.domain}","${s.publisher.replace(/"/g, '""')}","${s.url}","${s.reliability_score}%"`);
+        lines.push(`"${s.id}","${s.source_type}","${s.domain}","${(s.publisher || 'Unknown').replace(/"/g, '""')}","${s.url}","${s.reliability_score}%","${s.fetch_status || 'NOT_FETCHED'}","${s.published_at || 'Unknown'}"`);
       });
 
       res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${req.params.id}.csv"`);
@@ -450,16 +450,17 @@ async function startServer() {
   <h2>4. Authoritative Sources Appendix</h2>
   <table>
     <thead>
-      <tr><th>ID</th><th>Tier</th><th>Publisher</th><th>Domain</th><th>Reliability</th></tr>
+      <tr><th>ID</th><th>Tier</th><th>Publisher</th><th>Domain</th><th>Reliability</th><th>Fetch Status</th></tr>
     </thead>
     <tbody>
       ${rep.sources.map(s => `
         <tr>
           <td>${s.id}</td>
           <td>${s.source_type}</td>
-          <td>${s.publisher}</td>
+          <td>${s.publisher || 'Unknown'}</td>
           <td>${s.domain}</td>
           <td>${s.reliability_score}%</td>
+          <td>${s.fetch_status || 'NOT_FETCHED'}</td>
         </tr>
       `).join('')}
     </tbody>

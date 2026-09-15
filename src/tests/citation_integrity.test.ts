@@ -116,6 +116,31 @@ Key risks include escalating data center energy costs and supply chain constrain
   }
   console.log('✔ Provenance classification taxonomy verified for all epistemic tiers.');
 
+  // Test 6.8: Unknown publication date must be null (never fabricated as "now")
+  const noDateHtml = `<html><head><title>No metadata page</title></head><body><p>Plain content without any date metadata whatsoever.</p></body></html>`;
+  const noDateHeaders = new Headers();
+  const unknownDate = RealDocumentFetcher.extractPublicationDate(noDateHtml, noDateHeaders);
+  if (unknownDate !== null) {
+    return { passed: false, message: `Unknown publication date must be null, got fabricated: ${unknownDate}` };
+  }
+  console.log('✔ Unknown publication date returns null (no fabricated timestamps).');
+
+  // Test 6.9: Exact normalized -> original quote mapping
+  const noisyCorpus = 'Deployment   statistics:  India  has  deployed  approximately  24,500 public charging points. Grid capacity remains constrained.';
+  const noisyQuery = 'INDIA has deployed approximately 24,500 public charging points.';
+  const noisyOffset = RealDocumentFetcher.findExactEvidenceOffset(noisyCorpus, noisyQuery);
+  if (!noisyOffset.found) {
+    return { passed: false, message: 'Normalized mapping failed on case/whitespace-mutated quote' };
+  }
+  const verbatimSlice = noisyCorpus.slice(noisyOffset.startOffset, noisyOffset.endOffset);
+  if (noisyOffset.quote !== verbatimSlice) {
+    return { passed: false, message: `Quote must be the verbatim original slice, got "${noisyOffset.quote}" vs "${verbatimSlice}"` };
+  }
+  if (verbatimSlice !== 'India  has  deployed  approximately  24,500 public charging points.') {
+    return { passed: false, message: `Mapped quote not from original coordinates: "${verbatimSlice}"` };
+  }
+  console.log('✔ Exact normalized->original mapping returns the verbatim source slice at exact coordinates.');
+
   return { passed: true, message: 'Citation integrity tests passed successfully.' };
 }
 

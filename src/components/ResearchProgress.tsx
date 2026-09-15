@@ -149,12 +149,16 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
             <FileSearch className="h-3.5 w-3.5 text-blue-400" />
-            Analyzed
+            Fetched
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-white">
-            {job.stats.sources_analyzed}
+            {job.stats.sources_fetched ?? 0}
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Documents Parsed</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">
+            {job.stats.sources_fetch_failed > 0
+              ? `${job.stats.sources_fetch_failed} FETCH_FAILED`
+              : 'Documents Retrieved'}
+          </div>
         </div>
 
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5">

@@ -36,6 +36,8 @@ export async function runE2ETest(): Promise<{ passed: boolean; message: string }
     created_at: new Date().toISOString(),
     stats: {
       sources_discovered: 0,
+      sources_fetched: 0,
+      sources_fetch_failed: 0,
       sources_analyzed: 0,
       evidence_items: 0,
       claims_total: 0,
@@ -185,6 +187,8 @@ export async function runE2ETest(): Promise<{ passed: boolean; message: string }
         http_status: 200,
         discovery_method: 'SEARCH_API',
         content_hash: '3f78a2e4c890123456789abcdef0123456789abcdef0123456789abcdef01234',
+        fetch_status: 'FETCHED' as const,
+        fetch_error: null,
         reliability_score: 96,
         snippet: 'ProLogium demonstrates roll-to-roll manufacturing compatibility for solid electrolytes.',
       }

@@ -48,5 +48,13 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "allowScripts": {
+    "esbuild@0.18.20": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true,
+    "msgpackr-extract@3.0.4": true,
+    "@firebase/util@1.15.3": true
   }
 }

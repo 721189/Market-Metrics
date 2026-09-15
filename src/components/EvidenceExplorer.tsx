@@ -209,7 +209,7 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
                                 }`}>
                                   {source.source_type}
                                 </span>
-                                <span className="text-slate-300 truncate">{source.publisher}</span>
+                                <span className="text-slate-300 truncate">{source.publisher || 'Unknown publisher'}</span>
                               </div>
                               <a
                                 href={source.url}

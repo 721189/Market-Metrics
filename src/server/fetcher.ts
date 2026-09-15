@@ -10,7 +10,7 @@ export interface FetchedDocument {
   extractedText: string;
   paragraphs: string[];
   contentLength: number;
-  publishedAt: string;
+  publishedAt: string | null; // null = publication date could not be verified; NEVER fabricated
   contentHash: string;
   chunks: DocumentChunk[];
   retrievedAt: string;
@@ -60,7 +60,12 @@ export class RealDocumentFetcher {
     return crypto.createHash('sha256').update(text).digest('hex');
   }
 
-  public static extractPublicationDate(html: string, headers: Headers): string {
+  /**
+   * Extracts the publication date from meta tags, JSON-LD, or HTTP headers.
+   * Returns null when the date cannot be verified — an unknown publication
+   * date must remain unknown (null), never fabricated as "now".
+   */
+  public static extractPublicationDate(html: string, headers: Headers): string | null {
     const metaDateMatch = html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i) ||
                           html.match(/<meta[^>]+name=["']date["'][^>]+content=["']([^"']+)["']/i) ||
                           html.match(/<meta[^>]+property=["']og:published_time["'][^>]+content=["']([^"']+)["']/i);
@@ -92,7 +97,8 @@ export class RealDocumentFetcher {
       if (!isNaN(parsed)) return new Date(parsed).toISOString();
     }
 
-    return new Date().toISOString();
+    // Unknown publication date -> null. Do NOT fabricate a date.
+    return null;
   }
 
   public static chunkText(sourceId: string, title: string, text: string): DocumentChunk[] {
@@ -222,25 +228,57 @@ export class RealDocumentFetcher {
     };
   }
 
+  /**
+   * Canonical normalization used for citation matching: lowercases and unifies
+   * common Unicode punctuation variants (curly quotes, dashes, NBSP) so that
+   * semantically identical text matches regardless of encoding noise.
+   */
+  private static canonicalNormalize(text: string): string {
+    return text
+      .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+      .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+      .replace(/[\u2013\u2014\u2015]/g, '-')
+      .replace(/\u00A0/g, ' ')
+      .toLowerCase();
+  }
+
+  /**
+   * Builds the normalized-space string of `text` together with an index map
+   * from every normalized character position back to its ORIGINAL offset.
+   * This is the foundation of exact normalized -> original quote mapping.
+   */
+  private static buildNormalizedIndex(text: string): { normalized: string; indexMap: number[] } {
+    const canonical = RealDocumentFetcher.canonicalNormalize(text);
+    let normalized = '';
+    const indexMap: number[] = [];
+    for (let i = 0; i < text.length; i++) {
+      const ch = canonical[i];
+      if (/\s/.test(ch)) continue; // whitespace is collapsed in normalized space
+      normalized += ch;
+      indexMap.push(i);
+    }
+    return { normalized, indexMap };
+  }
+
   public static findExactCharacterOffsets(
     sourceText: string,
     extractedQuote: string
   ): OffsetMatch {
-    if (!extractedQuote || extractedQuote.trim().length < 3) {
-      return { quote: extractedQuote, startOffset: -1, endOffset: -1, found: false };
+    const failure: OffsetMatch = { quote: extractedQuote, startOffset: -1, endOffset: -1, found: false };
+
+    if (!sourceText || !extractedQuote || extractedQuote.trim().length < 3) {
+      return failure;
     }
 
-    const cleanQuote = extractedQuote.trim().toLowerCase();
-    const sourceLower = sourceText.toLowerCase();
-
-    // 1. Exact substring match
-    let idx = sourceLower.indexOf(cleanQuote);
-    if (idx !== -1) {
-      const startOffset = idx;
-      const endOffset = idx + extractedQuote.trim().length;
+    // 1. Exact verbatim substring match (fast path)
+    const trimmedQuery = extractedQuote.trim();
+    const exactIdx = sourceText.indexOf(trimmedQuery);
+    if (exactIdx !== -1) {
+      const startOffset = exactIdx;
+      const endOffset = exactIdx + trimmedQuery.length;
       if (startOffset >= 0 && endOffset > startOffset && endOffset <= sourceText.length) {
         return {
-          quote: extractedQuote,
+          quote: sourceText.slice(startOffset, endOffset),
           startOffset,
           endOffset,
           found: true,
@@ -248,37 +286,54 @@ export class RealDocumentFetcher {
       }
     }
 
-    // 2. Normalized whitespace mapping
-    let cleanSource = '';
-    const indexMap: number[] = [];
-    for (let i = 0; i < sourceText.length; i++) {
-      const char = sourceText[i];
-      if (!/\s/.test(char)) {
-        cleanSource += char.toLowerCase();
-        indexMap.push(i);
-      }
+    // 2. Exact normalized -> original mapping.
+    // Both source and query are projected into the same normalized space
+    // (canonical punctuation + whitespace collapse + lowercasing). A match in
+    // normalized space is then mapped back through indexMap to the EXACT
+    // original character coordinates, and the returned quote is the VERBATIM
+    // original source substring — never the LLM's re-typed variant.
+    const source = RealDocumentFetcher.buildNormalizedIndex(sourceText);
+    const queryNormalized = RealDocumentFetcher.canonicalNormalize(extractedQuote);
+    let queryCollapsed = '';
+    for (const ch of queryNormalized) {
+      if (!/\s/.test(ch)) queryCollapsed += ch;
+    }
+    if (queryCollapsed.length < 3) {
+      return failure;
     }
 
-    const cleanQuery = cleanQuote.replace(/\s+/g, '');
-    const cleanIdx = cleanSource.indexOf(cleanQuery);
-
-    if (cleanIdx !== -1 && indexMap.length > 0) {
-      const startOffset = indexMap[cleanIdx];
-      const endMapIdx = cleanIdx + cleanQuery.length - 1;
-      const endOffset = endMapIdx < indexMap.length ? indexMap[endMapIdx] + 1 : sourceText.length;
-
-      if (startOffset >= 0 && endOffset > startOffset && endOffset <= sourceText.length) {
-        return {
-          quote: extractedQuote,
-          startOffset,
-          endOffset,
-          found: true,
-        };
-      }
+    const cleanIdx = source.normalized.indexOf(queryCollapsed);
+    if (cleanIdx === -1 || source.indexMap.length === 0) {
+      // Reject: the quote cannot be verified against the source text.
+      return failure;
     }
 
-    // Reject invalid offsets
-    return { quote: extractedQuote, startOffset: -1, endOffset: -1, found: false };
+    const startOffset = source.indexMap[cleanIdx];
+    const endMapIdx = cleanIdx + queryCollapsed.length - 1;
+    const endOffset = endMapIdx < source.indexMap.length
+      ? source.indexMap[endMapIdx] + 1
+      : sourceText.length;
+
+    if (startOffset < 0 || endOffset <= startOffset || endOffset > sourceText.length) {
+      return failure;
+    }
+
+    // The quote is ALWAYS the exact original slice at [startOffset, endOffset).
+    const quote = sourceText.slice(startOffset, endOffset);
+
+    // Hard invariant: normalized(quote) === normalized(query). If this fails
+    // the mapping is not exact and the citation is rejected.
+    const normalizedQuote = RealDocumentFetcher.canonicalNormalize(quote).replace(/\s+/g, '');
+    if (normalizedQuote !== queryCollapsed) {
+      return failure;
+    }
+
+    return {
+      quote,
+      startOffset,
+      endOffset,
+      found: true,
+    };
   }
 
   public static findExactEvidenceOffset(sourceText: string, extractedQuote: string) {

@@ -212,15 +212,20 @@ export class RealClaimVerifier {
     }
     const corroborationScore = Math.min(15, Math.round((corroboratedClaims / Math.max(1, claims.length)) * 15));
 
-    // 5. Recency Score (0-10) calculated from actual source publication dates
+    // 5. Recency Score (0-10) calculated from VERIFIED publication dates only.
+    // Sources with unknown publication dates (null) are EXCLUDED from the
+    // average — no fabricated recency credit is granted for unknown metadata.
     const currentYear = new Date().getFullYear();
-    const avgSourceAgeYears = sources.length > 0
-      ? sources.reduce((sum, s) => {
-          const pubYear = s.published_at ? new Date(s.published_at).getFullYear() : currentYear - 1;
+    const datedSources = sources.filter(s => s.published_at);
+    const avgSourceAgeYears = datedSources.length > 0
+      ? datedSources.reduce((sum, s) => {
+          const pubYear = new Date(s.published_at!).getFullYear();
           return sum + Math.max(0, currentYear - pubYear);
-        }, 0) / sources.length
-      : 1;
-    const recencyScore = Math.max(0, Math.min(10, Math.round(10 - (avgSourceAgeYears * 1.5))));
+        }, 0) / datedSources.length
+      : Infinity; // no verifiable publication dates -> no recency credit
+    const recencyScore = Number.isFinite(avgSourceAgeYears)
+      ? Math.max(0, Math.min(10, Math.round(10 - (avgSourceAgeYears * 1.5))))
+      : 0;
 
     // 6. Extraction Quality Score (0-10) - exact character coordinates validity
     const validOffsets = evidencePool.filter(e => e.start_offset >= 0 && e.end_offset > e.start_offset).length;

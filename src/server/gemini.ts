@@ -11,7 +11,25 @@
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier } from '../types.js';
+import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier, RiskFactor } from '../types.js';
+
+/**
+ * Compact, serializable projection of a verified claim handed to every
+ * synthesizer. The synthesizer MUST reason only over these — never invent.
+ */
+export interface SynthesisClaimContext {
+  id: string;
+  citation_number: number;
+  statement: string;
+  claim_type: string;
+  confidence: number;
+}
+
+export interface SynthesisEvidenceContext {
+  id: string;
+  source_id: string;
+  quote: string;
+}
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -177,7 +195,10 @@ Return a strict JSON object matching:
   }
 
   /**
-   * Report Details Synthesis: Competitors, Customers, Pricing, Regulatory, Risks
+   * Report Details Synthesis: Competitors, Customers, Pricing, Regulatory, Risks,
+   * Trends, Opportunities — grounded STRICTLY in the verified claim registry.
+   * Fabrication, "realistic industry standards", placeholder data, and generic
+   * templates are explicitly forbidden: sparse evidence => empty arrays.
    */
   public static async synthesizeReportDetails(params: {
     question: string;
@@ -186,30 +207,37 @@ Return a strict JSON object matching:
     timeHorizon: string;
     isIndia: boolean;
     currency: string;
+    claims: SynthesisClaimContext[];
     signal?: AbortSignal;
   }): Promise<{
     competitors: CompetitorProfile[];
     customerSegments: CustomerSegment[];
     pricingTiers: PricingTier[];
-    regulatoryFactors: any[];
-    risks: any[];
+    regulatoryFactors: Array<{ policy_name: string; authority: string; impact_summary: string; compliance_req: string; claim_ids: string[] }>;
+    risks: RiskFactor[];
+    trends: Array<{ title: string; description: string; impact: string; claim_ids: string[] }>;
+    opportunities: Array<{ title: string; description: string; value_pool: string; claim_ids: string[] }>;
   }> {
     const ai = getGemini();
     if (!ai) {
       throw new Error("Gemini API key required.");
     }
 
-    const prompt = `Synthesize real competitors, target customer segments, industry average pricing tiers, relevant local regulatory policies, and market/competitive risk factors for the ${params.industry} industry in ${params.geography} (${params.timeHorizon}).
-Do NOT use placeholder names, dummy claims, or generic templates. Generate realistic, grounded names and details. If local information is sparse, use realistic industry standards.
+    const prompt = `You are the Strategic Synthesizer of an evidence-first research engine.
+Derive competitors, customer segments, pricing tiers, regulatory factors, risks, trends, and opportunities for ${params.industry} in ${params.geography} (${params.timeHorizon}) STRICTLY from the VERIFIED CLAIM REGISTRY below.
 
-Format the output strictly as a JSON object with:
-{
-  "competitors": Array of 3-4 competitor profiles,
-  "customerSegments": Array of 2 customer segments,
-  "pricingTiers": Array of 2 pricing tiers,
-  "regulatoryFactors": Array of 2 regulatory factors,
-  "risks": Array of 3 risks
-}`;
+HARD GROUNDING RULES:
+1. Every entity MUST be grounded in one or more verified claims. Each entity's claim reference array (supporting_claim_ids / claim_ids) MUST contain ONLY claim ids copied verbatim from the registry. Never reference a claim id that is not in the registry.
+2. Do NOT fabricate. Do NOT use "realistic industry standards", placeholder names, dummy data, or generic templates. If the verified claims do not contain the information needed for an entity, OMIT that entity entirely.
+3. Empty arrays are the CORRECT answer when the evidence base is sparse. A smaller, fully-grounded output is strictly better than a complete-looking fabricated one.
+4. Competitor names, pricing figures, policies, and risks must come from the claims themselves.
+
+CONTEXT:
+- Question: "${params.question}"
+- Currency: ${params.currency}
+
+VERIFIED CLAIM REGISTRY (the ONLY permissible factual basis):
+${JSON.stringify(params.claims, null, 1)}`;
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
@@ -236,9 +264,10 @@ Format the output strictly as a JSON object with:
                     weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
                     target_customer: { type: Type.STRING },
                     pricing_summary: { type: Type.STRING },
-                    verified_claims_count: { type: Type.INTEGER }
+                    verified_claims_count: { type: Type.INTEGER },
+                    supporting_claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
                   },
-                  required: ["id", "name", "website", "category", "market_position", "description", "strengths", "weaknesses", "target_customer", "pricing_summary", "verified_claims_count"]
+                  required: ["id", "name", "website", "category", "market_position", "description", "strengths", "weaknesses", "target_customer", "pricing_summary", "verified_claims_count", "supporting_claim_ids"]
                 }
               },
               customerSegments: {
@@ -255,9 +284,10 @@ Format the output strictly as a JSON object with:
                     willingness_to_pay: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
                     estimated_tam_share_pct: { type: Type.INTEGER },
                     decision_makers: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    churn_risk: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] }
+                    churn_risk: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
+                    supporting_claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
                   },
-                  required: ["id", "name", "segment_type", "description", "pain_points", "key_buying_criteria", "willingness_to_pay", "estimated_tam_share_pct", "decision_makers", "churn_risk"]
+                  required: ["id", "name", "segment_type", "description", "pain_points", "key_buying_criteria", "willingness_to_pay", "estimated_tam_share_pct", "decision_makers", "churn_risk", "supporting_claim_ids"]
                 }
               },
               pricingTiers: {
@@ -273,9 +303,10 @@ Format the output strictly as a JSON object with:
                     annualized_amount: { type: Type.INTEGER },
                     currency: { type: Type.STRING },
                     target_segment: { type: Type.STRING },
-                    features: { type: Type.ARRAY, items: { type: Type.STRING } }
+                    features: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    supporting_claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
                   },
-                  required: ["tier_name", "competitor_name", "amount", "billing_period", "unit", "annualized_amount", "currency", "target_segment", "features"]
+                  required: ["tier_name", "competitor_name", "amount", "billing_period", "unit", "annualized_amount", "currency", "target_segment", "features", "supporting_claim_ids"]
                 }
               },
               regulatoryFactors: {
@@ -298,18 +329,44 @@ Format the output strictly as a JSON object with:
                   type: Type.OBJECT,
                   properties: {
                     id: { type: Type.STRING },
+                    category: { type: Type.STRING, enum: ["REGULATORY", "COMPETITIVE", "FINANCIAL", "TECHNOLOGICAL", "EXECUTION"] },
                     title: { type: Type.STRING },
-                    category: { type: Type.STRING },
                     impact: { type: Type.STRING, enum: ["SEVERE", "MODERATE", "MINOR"] },
                     probability: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
                     mitigation: { type: Type.STRING },
                     supporting_claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
                   },
-                  required: ["id", "title", "category", "impact", "probability", "mitigation", "supporting_claim_ids"]
+                  required: ["id", "category", "title", "impact", "probability", "mitigation", "supporting_claim_ids"]
+                }
+              },
+              trends: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    impact: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
+                    claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["title", "description", "impact", "claim_ids"]
+                }
+              },
+              opportunities: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    value_pool: { type: Type.STRING },
+                    claim_ids: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["title", "description", "value_pool", "claim_ids"]
                 }
               }
             },
-            required: ["competitors", "customerSegments", "pricingTiers", "regulatoryFactors", "risks"]
+            required: ["competitors", "customerSegments", "pricingTiers", "regulatoryFactors", "risks", "trends", "opportunities"]
           }
         }
       });
@@ -331,7 +388,16 @@ Format the output strictly as a JSON object with:
       throw new Error("Gemini API key required.");
     }
 
-    const prompt = `You are a factual claim extractor. Extract up to 10 atomic claims from the provided text. Return JSON array.`;
+    const prompt = `You are a factual claim extractor operating inside an evidence-first research engine.
+Extract up to 10 atomic claims STRICTLY from the provided source documents.
+
+VERBATIM QUOTE CONTRACT (mandatory):
+- extracted_quote MUST be a contiguous substring copied CHARACTER-FOR-CHARACTER from the cited source document text: identical casing, punctuation, spacing, and unicode.
+- Never paraphrase, never join non-adjacent sentences with ellipses, never alter whitespace or quotes inside extracted_quote.
+- claim_type MUST be one of: MARKET_SIZE, MARKET_GROWTH, COMPETITOR, PRICING, CUSTOMER, REGULATION, TECHNOLOGY, FUNDING, REVENUE, VALUATION, TREND, RISK, OPPORTUNITY, FINANCIAL, STRATEGIC.
+- statement must be a single atomic, self-contained factual assertion fully supported by the extracted_quote.
+
+Documents: `;
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
@@ -415,7 +481,7 @@ Return a strict JSON object:
   }
 
   /**
-   * Report Overview Synthesis
+   * Report Overview Synthesis — grounded STRICTLY in the verified claim/evidence graph.
    */
   public static async synthesizeReportOverview(params: {
     question: string;
@@ -424,6 +490,8 @@ Return a strict JSON object:
     timeHorizon: string;
     tamForecast: number;
     cagr: number;
+    claims: SynthesisClaimContext[];
+    evidence: SynthesisEvidenceContext[];
     signal?: AbortSignal;
   }): Promise<{ summary: string; section1: string; section2: string; section3: string }> {
     const ai = getGemini();
@@ -431,14 +499,30 @@ Return a strict JSON object:
       throw new Error("Gemini API key required.");
     }
 
-    const prompt = `Synthesize report overview for ${params.industry} in ${params.geography}.
-Context:
+    const prompt = `You are the Intelligence Synthesizer of an evidence-first research engine.
+Write the report overview grounded STRICTLY in the VERIFIED CLAIM REGISTRY provided below.
+
+ABSOLUTE RULES:
+1. Use ONLY facts contained in the verified claims and evidence excerpts. You must NEVER introduce any statistic, market size, growth rate, date, company, or entity that is not present in them.
+2. When you rely on a claim, mark it in prose with its citation number in square brackets, e.g. [1], [2].
+3. The only numbers you may state beyond the claims are the deterministic engine outputs provided (Forecast TAM and Verified CAGR).
+4. If the verified claims are insufficient to cover a requested topic, state explicitly that the evidence base is insufficient for that topic. Do NOT fill gaps with general knowledge or plausible-sounding content.
+
+CONTEXT:
 - Question: "${params.question}"
 - Industry: "${params.industry}"
 - Geography: "${params.geography}"
 - Time Horizon: "${params.timeHorizon}"
-- Forecast TAM: $${params.tamForecast.toLocaleString()}
-- Verified CAGR: ${params.cagr}%`;
+- Deterministic Forecast TAM: ${params.tamForecast.toLocaleString()}
+- Deterministic Verified CAGR: ${params.cagr}%
+
+VERIFIED CLAIM REGISTRY (the ONLY permissible factual basis):
+${JSON.stringify(params.claims, null, 1)}
+
+SUPPORTING EVIDENCE EXCERPTS (verbatim source quotes backing the claims):
+${JSON.stringify(params.evidence, null, 1).slice(0, 6000)}
+
+Write: summary (executive summary), section1 (market dynamics), section2 (customer segmentation), section3 (go-to-market and unit economics). Ground every assertion in the registry.`;
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');

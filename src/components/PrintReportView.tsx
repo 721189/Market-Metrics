@@ -190,7 +190,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({ report, onBack
           <ul className="list-decimal list-inside text-xs text-slate-700 space-y-1">
             {report.sources.map(s => (
               <li key={s.id}>
-                <strong>[{s.source_type}]</strong> {s.title} &mdash; <em>{s.publisher}</em> ({s.url})
+                <strong>[{s.source_type}]</strong> {s.title || 'Untitled document'} &mdash; <em>{s.publisher || 'Unknown publisher'}</em> ({s.url})
               </li>
             ))}
           </ul>

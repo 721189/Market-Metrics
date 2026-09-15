@@ -1,5 +1,8 @@
 import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { canTransition } from './job_state.js';
+
+export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
 
 export type QueueJob = {
     id: string;
@@ -51,7 +54,7 @@ export class FirestoreQueue {
                     const freshDoc = await transaction.get(jobRef);
 
                     if (freshDoc.exists && freshDoc.data()?.status === 'QUEUED') {
-                        const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000); // 3 mins lease
+                        const leasedUntil = Timestamp.fromMillis(Date.now() + LEASE_DURATION_MS);
                         transaction.update(jobRef, {
                             status: 'RUNNING',
                             worker_id: workerId,
@@ -77,16 +80,51 @@ export class FirestoreQueue {
         }
     }
 
-    async heartbeat(jobId: string, workerId: string) {
+    /**
+     * Extends the lease for a job — ONLY if the calling worker still owns it.
+     * Ownership verification is transactional: a worker whose lease expired and
+     * whose job was recovered/re-claimed by another worker can NEVER stomp the
+     * new owner's lease.
+     *
+     * Returns:
+     * - { owned: true }                     -> lease extended, worker may continue
+     * - { owned: false, definitive: true }  -> worker has DEFINITELY lost
+     *        ownership (different owner / not RUNNING / job gone) and MUST stop
+     * - { owned: false, definitive: false } -> transient error; worker may
+     *        continue but all final state writes remain ownership-verified
+     */
+    async heartbeat(jobId: string, workerId: string): Promise<{ owned: boolean; definitive: boolean }> {
         try {
             const jobRef = adminDb.collection(this.collectionName).doc(jobId);
-            const leasedUntil = Timestamp.fromMillis(Date.now() + 3 * 60 * 1000);
-            await jobRef.update({
-                leased_until: leasedUntil,
-                updated_at: FieldValue.serverTimestamp(),
+            let owned = false;
+            let definitive = false;
+
+            await adminDb.runTransaction(async (transaction) => {
+                const doc = await transaction.get(jobRef);
+                if (!doc.exists) {
+                    definitive = true;
+                    return;
+                }
+                const data = doc.data();
+                if (data?.status === 'RUNNING' && data?.worker_id === workerId) {
+                    const leasedUntil = Timestamp.fromMillis(Date.now() + LEASE_DURATION_MS);
+                    transaction.update(jobRef, {
+                        leased_until: leasedUntil,
+                        updated_at: FieldValue.serverTimestamp(),
+                    });
+                    owned = true;
+                } else {
+                    definitive = true;
+                }
             });
+
+            if (!owned && definitive) {
+                console.warn(`[Queue] Heartbeat REJECTED for job ${jobId}: worker ${workerId} no longer owns the lease.`);
+            }
+            return { owned, definitive };
         } catch (err) {
             console.error(`[Queue] Failed to heartbeat job ${jobId}:`, err);
+            return { owned: false, definitive: false };
         }
     }
 
@@ -116,15 +154,40 @@ export class FirestoreQueue {
         }
     }
 
-    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED') {
+    /**
+     * Updates a queue job's status with MANDATORY state-machine validation and
+     * optional lease-ownership verification. Illegal transitions (e.g.
+     * CANCELLED -> COMPLETED after a user cancel) are refused, never applied.
+     * Returns true only if the transition was applied.
+     */
+    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED', workerId?: string): Promise<boolean> {
         try {
-            await adminDb.collection(this.collectionName).doc(jobId).update({
-                status,
-                updated_at: FieldValue.serverTimestamp()
+            const jobRef = adminDb.collection(this.collectionName).doc(jobId);
+            return await adminDb.runTransaction(async (transaction) => {
+                const doc = await transaction.get(jobRef);
+                if (!doc.exists) {
+                    console.warn(`[Queue] updateJobStatus: job ${jobId} does not exist.`);
+                    return false;
+                }
+                const data = doc.data();
+                if (workerId && data?.worker_id && data.worker_id !== workerId) {
+                    console.warn(`[Queue] updateJobStatus REFUSED for job ${jobId}: worker ${workerId} lost ownership to ${data.worker_id}.`);
+                    return false;
+                }
+                const current = data?.status ?? 'QUEUED';
+                if (!canTransition(current, status)) {
+                    console.warn(`[Queue] updateJobStatus REFUSED: illegal transition ${current} -> ${status} for job ${jobId}.`);
+                    return false;
+                }
+                transaction.update(jobRef, {
+                    status,
+                    updated_at: FieldValue.serverTimestamp()
+                });
+                return true;
             });
         } catch (err) {
             console.error(`[Queue] Error in updateJobStatus for ${jobId}:`, err);
-            throw err;
+            return false;
         }
     }
 
@@ -173,14 +236,31 @@ export class FirestoreQueue {
         }
     }
 
-    async cancel(jobId: string) {
+    /**
+     * Transactional cancellation: only QUEUED or RUNNING jobs may transition to
+     * CANCELLED (state-machine enforced). Returns true if cancelled here.
+     */
+    async cancel(jobId: string): Promise<boolean> {
         try {
-            await adminDb.collection(this.collectionName).doc(jobId).update({
-                status: 'CANCELLED',
-                updated_at: FieldValue.serverTimestamp()
+            const jobRef = adminDb.collection(this.collectionName).doc(jobId);
+            return await adminDb.runTransaction(async (transaction) => {
+                const doc = await transaction.get(jobRef);
+                if (!doc.exists) return false;
+                const current = doc.data()?.status ?? 'QUEUED';
+                if (!canTransition(current, 'CANCELLED')) {
+                    console.warn(`[Queue] cancel REFUSED: illegal transition ${current} -> CANCELLED for job ${jobId}.`);
+                    return false;
+                }
+                transaction.update(jobRef, {
+                    status: 'CANCELLED',
+                    cancelled_at: FieldValue.serverTimestamp(),
+                    updated_at: FieldValue.serverTimestamp()
+                });
+                return true;
             });
         } catch (err) {
             console.error(`[Queue] Error cancelling job ${jobId}:`, err);
+            return false;
         }
     }
 }

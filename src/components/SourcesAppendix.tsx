@@ -83,7 +83,14 @@ export const SourcesAppendix: React.FC<SourcesAppendixProps> = ({ report }) => {
                 }`}>
                   {src.source_type}
                 </span>
-                <h3 className="text-sm font-bold text-white">{src.title}</h3>
+                {src.fetch_status === 'FETCH_FAILED' && (
+                  <span className="rounded bg-red-500/20 text-red-400 border border-red-500/30 px-2 py-0.5 text-[10px] font-bold">
+                    FETCH_FAILED
+                  </span>
+                )}
+                <h3 className="text-sm font-bold text-white">
+                  {src.title || <span className="italic text-slate-500">Untitled document (title not verifiable)</span>}
+                </h3>
               </div>
 
               <div className="flex items-center gap-2 text-xs">
@@ -92,17 +99,22 @@ export const SourcesAppendix: React.FC<SourcesAppendixProps> = ({ report }) => {
               </div>
             </div>
 
-            <p className="text-xs text-slate-300">{src.snippet}</p>
+            <p className="text-xs text-slate-300">{src.snippet || <span className="italic text-slate-500">No retrievable content preview.</span>}</p>
 
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80 text-[11px] text-slate-400">
               <div className="flex flex-wrap items-center gap-4">
-                <span><strong>Publisher:</strong> {src.publisher}</span>
+                <span><strong>Publisher:</strong> {src.publisher || 'Unknown'}</span>
                 <span>&bull;</span>
                 <span><strong>Domain:</strong> {src.domain}</span>
                 <span>&bull;</span>
+                <span><strong>Published:</strong> {src.published_at ? new Date(src.published_at).toLocaleDateString() : 'Unknown'}</span>
+                <span>&bull;</span>
                 <span><strong>Retrieved:</strong> {new Date(src.retrieved_at).toLocaleDateString()}</span>
                 <span>&bull;</span>
-                <span className="font-mono">Hash: {src.content_hash.substring(0, 16)}...</span>
+                <span className="font-mono">Hash: {src.content_hash ? `${src.content_hash.substring(0, 16)}...` : 'Not computed'}</span>
+                {src.fetch_error && (
+                  <span className="text-red-400">&bull; Fetch error: {src.fetch_error}</span>
+                )}
               </div>
 
               <a

@@ -38,11 +38,13 @@ import type {
   FinancialOutputs,
 } from '../types.js';
 import { FinancialEngine } from './financial.js';
-import { GeminiResearchEngine } from './gemini.js';
+import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext } from './gemini.js';
 import { DatabaseRepository } from './db.js';
-import { researchQueue } from './firestore_queue.js';
+import { researchQueue, QueueJob } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
+import { canTransition, cancellationRegistry } from './job_state.js';
+import { CitationGraphValidator } from './citation_graph.js';
 
 export const pipelineEmitter = new EventEmitter();
 pipelineEmitter.setMaxListeners(500);
@@ -50,7 +52,28 @@ pipelineEmitter.setMaxListeners(500);
 let eventCounter = Date.now();
 
 function isCancelled(job: ResearchJob, signal?: AbortSignal): boolean {
-  return signal?.aborted === true || (job.status as string) === 'CANCELLED';
+  if (signal?.aborted === true) return true;
+  if ((job.status as string) === 'CANCELLED') return true;
+  // Real cancellation: check the process-wide AbortController registry so a
+  // user cancel produces an immediate stop at the next stage checkpoint.
+  return cancellationRegistry.isAbortRequested(job.id);
+}
+
+/**
+ * Deterministic publisher-credibility tiering by domain — a documented,
+ * reproducible scoring heuristic (never a fabricated metadata claim).
+ */
+function classifyDomainTier(domain: string): { tier: Source['source_type']; reliability: number } {
+  if (domain.includes('.gov') || domain.includes('.edu') || domain.includes('sec.gov') || domain.includes('worldbank.org') || domain.includes('imf.org')) {
+    return { tier: 'TIER_A', reliability: 96 };
+  }
+  if (domain.includes('gartner') || domain.includes('mckinsey') || domain.includes('bain') || domain.includes('bloomberg') || domain.includes('statista') || domain.includes('idc.com')) {
+    return { tier: 'TIER_B', reliability: 91 };
+  }
+  if (domain.includes('reuters') || domain.includes('techcrunch') || domain.includes('wsj') || domain.includes('forbes') || domain.includes('ft.com')) {
+    return { tier: 'TIER_C', reliability: 84 };
+  }
+  return { tier: 'TIER_D', reliability: 76 };
 }
 
 async function logAndEmitEvent(
@@ -74,7 +97,11 @@ async function logAndEmitEvent(
 
   job.current_stage = stage;
   job.progress = progress;
-  if (eventType === 'stage_started') {
+
+  // State-machine guard: never resurrect a cancelled/failed/completed job.
+  // The previous behavior overwrote CANCELLED with RUNNING on every
+  // stage_started event, silently defeating user cancellation.
+  if (eventType === 'stage_started' && canTransition(job.status, 'RUNNING')) {
     job.status = 'RUNNING' as any;
   }
 
@@ -114,19 +141,25 @@ export class ResearchPipelineManager {
   }
 
   /**
-   * Cancel an in-flight job via Queue Engine and AbortSignal
+   * Cancel an in-flight job: flips the REAL AbortSignal via the cancellation
+   * registry, transactionally cancels the queue lease, and persists the
+   * CANCELLED state through the explicit state machine.
    */
   public static async cancelJob(jobId: string, userId: string): Promise<boolean> {
     if (!userId) throw new Error('userId is required for cancelJob');
     const job = await DatabaseRepository.getJob(jobId, userId);
-    if (!job || job.status === 'COMPLETED' || job.status === 'FAILED' || job.status === 'CANCELLED') {
-      return false;
+    if (!job) return false;
+    if (!canTransition(job.status, 'CANCELLED')) {
+      return false; // terminal states cannot be cancelled
     }
 
     job.status = 'CANCELLED';
     job.error_message = 'Job cancelled by user request.';
-    
-    // Cancel in queue
+
+    // 1. Abort the in-flight pipeline worker through the registry (real AbortController).
+    cancellationRegistry.abort(jobId, 'USER_CANCEL');
+
+    // 2. Cancel in queue (transactional, state-machine enforced).
     await researchQueue.cancel(jobId);
 
     await logAndEmitEvent(job, 'error', job.current_stage, 'Job cancellation requested. Halting all worker processes.', job.progress);
@@ -169,6 +202,8 @@ export class ResearchPipelineManager {
       created_at: now,
       stats: {
         sources_discovered: 0,
+        sources_fetched: 0,
+        sources_fetch_failed: 0,
         sources_analyzed: 0,
         evidence_items: 0,
         claims_total: 0,
@@ -194,8 +229,11 @@ export class ResearchPipelineManager {
   /**
    * The True 9-Stage Execution Worker
    */
-  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal): Promise<void> {
+  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string): Promise<void> {
     if (isCancelled(job, signal)) return;
+    if (workerId) {
+      console.log(`[Pipeline] Stage worker executing job ${job.id} as ${workerId}`);
+    }
 
     // -------------------------------------------------------------
     // STAGE 1: PLANNING (Model A)
@@ -229,32 +267,26 @@ export class ResearchPipelineManager {
     const sourceTexts: Map<string, string> = new Map();
     let srcIdx = 1;
 
-    // Ingest discovered sources
+    // Ingest discovered sources — metadata ONLY from verified origins.
+    // No fabricated domains, titles, publishers, dates, hashes, or HTTP codes:
+    // every unknown field stays null until the document itself proves it.
     for (const item of liveDiscovered) {
       if (isCancelled(job, signal)) return;
 
-      let domain = item.publisher || 'market-research.org';
+      let domain: string;
       try {
-        domain = new URL(item.url).hostname.replace(/^www\./, '');
-      } catch (e) {}
-
-      let tier: Source['source_type'] = 'TIER_C';
-      let reliability = 78;
-
-      if (domain.includes('.gov') || domain.includes('.edu') || domain.includes('sec.gov') || domain.includes('worldbank.org') || domain.includes('imf.org')) {
-        tier = 'TIER_A';
-        reliability = 96;
-      } else if (domain.includes('gartner') || domain.includes('mckinsey') || domain.includes('bain') || domain.includes('bloomberg') || domain.includes('statista') || domain.includes('idc.com')) {
-        tier = 'TIER_B';
-        reliability = 91;
-      } else if (domain.includes('reuters') || domain.includes('techcrunch') || domain.includes('wsj') || domain.includes('forbes') || domain.includes('ft.com')) {
-        tier = 'TIER_C';
-        reliability = 84;
-      } else {
-        tier = 'TIER_D';
-        reliability = 76;
+        domain = new URL(item.url).hostname.replace(/^www\./, '').toLowerCase();
+      } catch (e) {
+        // An invalid URL can never become a citable source — skip it honestly.
+        console.warn(`[DISCOVERING] Skipping discovered item with invalid URL: ${item.url}`);
+        continue;
+      }
+      if (!domain || !domain.includes('.')) {
+        console.warn(`[DISCOVERING] Skipping discovered item with unusable domain: ${item.url}`);
+        continue;
       }
 
+      const { tier, reliability } = classifyDomainTier(domain);
       const sId = `src-${srcIdx++}`;
       sources.push({
         id: sId,
@@ -262,15 +294,17 @@ export class ResearchPipelineManager {
         url: item.url,
         canonical_url: item.url,
         domain,
-        title: item.title || `${job.industry} Outlook`,
-        publisher: item.publisher || domain,
-        published_at: new Date().toISOString(),
+        title: item.title && item.title.trim() ? item.title.trim() : null,
+        publisher: item.publisher && item.publisher.trim() ? item.publisher.trim() : null,
+        published_at: null,          // unknown until the document is fetched and parsed
         retrieved_at: new Date().toISOString(),
         source_type: tier,
         language: 'en',
-        http_status: 200,
+        http_status: null,           // unknown until a real HTTP response arrives
         discovery_method: 'SEARCH_API',
-        content_hash: `hash-${sId}`,
+        content_hash: null,          // computed from real document bytes after fetch
+        fetch_status: 'NOT_FETCHED',
+        fetch_error: null,
         reliability_score: reliability,
         snippet: item.snippet,
       });
@@ -289,26 +323,64 @@ export class ResearchPipelineManager {
     if (isCancelled(job, signal)) return;
 
     // -------------------------------------------------------------
-    // STAGE 3: FETCHING (Real HTTP Document Ingestion)
+    // STAGE 3: FETCHING (Real HTTP Document Ingestion — explicit FETCH_FAILED accounting)
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'FETCHING', `Ingesting and indexing ${sources.length} real document streams via HTTP fetch...`, 30);
+
+    let fetchedCount = 0;
+    let failedCount = 0;
 
     for (const src of sources) {
       if (isCancelled(job, signal)) return;
       try {
         const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
-        sourceTexts.set(src.id, fetchedDoc.extractedText);
+        if (!fetchedDoc.extractedText || fetchedDoc.extractedText.trim().length === 0) {
+          throw new Error('Document body was empty after text extraction');
+        }
+        src.fetch_status = 'FETCHED';
+        src.fetch_error = null;
+        src.http_status = fetchedDoc.httpStatus;
+        src.content_hash = fetchedDoc.contentHash; // real SHA-256 of extracted text
+        src.title = fetchedDoc.title && fetchedDoc.title.trim() ? fetchedDoc.title.trim() : src.title;
+        src.publisher = fetchedDoc.publisher && fetchedDoc.publisher.trim() ? fetchedDoc.publisher.trim() : src.publisher;
+        src.published_at = fetchedDoc.publishedAt; // verified date or null — never fabricated
+        src.retrieved_at = fetchedDoc.retrievedAt;
         src.snippet = fetchedDoc.extractedText.slice(0, 200);
-        src.publisher = fetchedDoc.publisher || src.publisher;
-        src.published_at = fetchedDoc.publishedAt;
-        src.content_hash = fetchedDoc.contentHash;
+        sourceTexts.set(src.id, fetchedDoc.extractedText);
+        fetchedCount++;
       } catch (err: any) {
-        console.warn(`Failed to fetch source URL ${src.url}:`, err.message);
+        // Truthful failure accounting: the source is explicitly FETCH_FAILED,
+        // excluded from analysis, and surfaced to the user — never silently dropped.
+        src.fetch_status = 'FETCH_FAILED';
+        src.fetch_error = err?.message || 'Unknown retrieval error';
+        src.http_status = null;
+        failedCount++;
+        console.warn(`[FETCHING] FETCH_FAILED ${src.url}: ${src.fetch_error}`);
       }
     }
 
-    job.stats.sources_analyzed = sources.length;
-    await logAndEmitEvent(job, 'stage_completed', 'FETCHING', `Indexed ${sources.length} live documents into structured character coordinate space`, 40);
+    const analyzableSources = sources.filter(
+      s => s.fetch_status === 'FETCHED' && (sourceTexts.get(s.id) || '').trim().length > 0
+    );
+
+    // Truthful statistics: discovered vs fetched vs failed vs actually analyzed.
+    job.stats.sources_discovered = sources.length;
+    job.stats.sources_fetched = fetchedCount;
+    job.stats.sources_fetch_failed = failedCount;
+    job.stats.sources_analyzed = analyzableSources.length;
+
+    await logAndEmitEvent(job, 'stage_completed', 'FETCHING', `Fetched ${fetchedCount}/${sources.length} documents (${failedCount} FETCH_FAILED); ${analyzableSources.length} analyzable`, 40, {
+      discovered: sources.length,
+      fetched: fetchedCount,
+      fetch_failed: failedCount,
+      analyzable: analyzableSources.length,
+    });
+
+    if (isCancelled(job, signal)) return;
+
+    if (analyzableSources.length === 0) {
+      throw new Error(`All ${sources.length} discovered sources failed retrieval (FETCH_FAILED). No verifiable evidence base exists; research aborted to maintain epistemic integrity.`);
+    }
 
     if (isCancelled(job, signal)) return;
 
@@ -320,7 +392,7 @@ export class ResearchPipelineManager {
     const evidencePool: Evidence[] = [];
     let evId = 1;
 
-    for (const src of sources) {
+    for (const src of analyzableSources) {
       const text = sourceTexts.get(src.id) || '';
       if (!text) continue;
 
@@ -368,17 +440,18 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'BUILDING_CLAIMS', 'Structuring atomic claims and binding citation provenance graphs...', 60);
 
-    const extractedLLMClaims = await GeminiResearchEngine.extractClaimsFromText({
+    const analyzableSourceIds = new Set(analyzableSources.map(s => s.id));
+    const extractedLLMClaims = (await GeminiResearchEngine.extractClaimsFromText({
       industry: job.industry,
       geography: job.geography,
-      sourceDocuments: sources.map(s => ({
+      sourceDocuments: analyzableSources.map(s => ({
         id: s.id,
         domain: s.domain,
-        title: s.title,
+        title: s.title || s.domain,
         text: sourceTexts.get(s.id) || '',
       })),
       signal,
-    });
+    })).filter(item => analyzableSourceIds.has(item.source_id));
 
     const claims: Claim[] = [];
     let claimIdx = 1;
@@ -443,10 +516,10 @@ export class ResearchPipelineManager {
     const financials = await GeminiResearchEngine.extractFinancialMetrics({
       industry: job.industry,
       geography: job.geography,
-      sourceDocuments: sources.map(s => ({
+      sourceDocuments: analyzableSources.map(s => ({
         id: s.id,
         domain: s.domain,
-        title: s.title,
+        title: s.title || s.domain,
         text: sourceTexts.get(s.id) || '',
       })),
       signal,
@@ -468,9 +541,16 @@ export class ResearchPipelineManager {
       sam: baseTAM * 0.4,
       som: baseTAM * 0.1,
     };
-    const claimVerification = RealClaimVerifier.verifyAll(claims, sources, evidencePool);
+    const claimVerification = RealClaimVerifier.verifyAll(claims, analyzableSources, evidencePool);
     const verifiedClaims = claimVerification.verifiedClaims;
     const evidenceBreakdown = claimVerification.evidenceBreakdown;
+
+    // Truthful claim statistics computed from actual verification outcomes.
+    job.stats.claims_total = claims.length;
+    job.stats.claims_verified = verifiedClaims.filter(c => c.verification_status === 'SUPPORTED' || c.verification_status === 'PARTIALLY_SUPPORTED').length;
+    job.stats.claims_contradicted = verifiedClaims.filter(c => c.verification_status === 'CONTRADICTED').length;
+    job.stats.claims_insufficient = verifiedClaims.filter(c => c.verification_status === 'INSUFFICIENT').length;
+    job.stats.evidence_score = evidenceBreakdown.overall_score;
 
     const unitEcon = FinancialEngine.calculateUnitEconomics({
       arpu_annual: isIndia ? 48000 : 4800,
@@ -511,8 +591,8 @@ export class ResearchPipelineManager {
         unit: currency,
         currency,
         geography: job.geography,
-        period_start: '2026',
-        period_end: '2026',
+        period_start: String(startYear),
+        period_end: String(startYear),
         confidence: 96,
       },
       {
@@ -524,8 +604,8 @@ export class ResearchPipelineManager {
         unit: currency,
         currency,
         geography: job.geography,
-        period_start: '2026',
-        period_end: '2030',
+        period_start: String(startYear),
+        period_end: String(endYear),
         confidence: 94,
       },
       {
@@ -537,8 +617,8 @@ export class ResearchPipelineManager {
         unit: '%',
         currency: '',
         geography: job.geography,
-        period_start: '2026',
-        period_end: '2030',
+        period_start: String(startYear),
+        period_end: String(endYear),
         confidence: 98,
       },
     ];
@@ -548,9 +628,24 @@ export class ResearchPipelineManager {
     if (isCancelled(job, signal)) return;
 
     // -------------------------------------------------------------
-    // STAGE 8 & 9: SYNTHESIZING & REPORT GENERATION
+    // STAGE 8 & 9: SYNTHESIZING & REPORT GENERATION (grounded in the verified claim/evidence graph)
     // -------------------------------------------------------------
-    await logAndEmitEvent(job, 'stage_started', 'SYNTHESIZING', 'Synthesizing strategic intelligence dossier with narrative citations...', 92);
+    await logAndEmitEvent(job, 'stage_started', 'SYNTHESIZING', 'Synthesizing strategic intelligence dossier grounded in the verified claim/evidence graph...', 92);
+
+    // The synthesizers receive the verified claim registry — the ONLY factual
+    // basis they are permitted to reason over. They never see raw imagination.
+    const verifiedClaimRegistry: SynthesisClaimContext[] = verifiedClaims.map(c => ({
+      id: c.id,
+      citation_number: c.citation_number ?? 0,
+      statement: c.statement,
+      claim_type: c.claim_type,
+      confidence: c.confidence,
+    }));
+    const supportedEvidenceIds = new Set(verifiedClaims.flatMap(c => c.supporting_evidence_ids || []));
+    const synthesisEvidence: SynthesisEvidenceContext[] = evidencePool
+      .filter(e => supportedEvidenceIds.has(e.id))
+      .slice(0, 20)
+      .map(e => ({ id: e.id, source_id: e.source_id, quote: e.quote.slice(0, 300) }));
 
     const narrative = await GeminiResearchEngine.synthesizeReportOverview({
       question: job.question,
@@ -559,6 +654,8 @@ export class ResearchPipelineManager {
       timeHorizon: job.time_horizon,
       tamForecast: sizing.tam_forecast,
       cagr: sizing.cagr_pct,
+      claims: verifiedClaimRegistry,
+      evidence: synthesisEvidence,
       signal,
     });
 
@@ -569,26 +666,57 @@ export class ResearchPipelineManager {
       timeHorizon: job.time_horizon,
       isIndia,
       currency,
+      claims: verifiedClaimRegistry,
       signal,
     });
 
-    const competitors = details.competitors;
-    const customerSegments = details.customerSegments;
-    const pricingTiers = details.pricingTiers;
-    const regulatoryFactors = details.regulatoryFactors;
-    const risks = details.risks;
+    // Ground the synthesis: every strategic entity must reference at least one
+    // VERIFIED claim id. Dangling references are stripped; entities left with
+    // none are DROPPED (an ungrounded entity is indistinguishable from a
+    // hallucinated one and must not be published).
+    const validClaimIds = new Set(verifiedClaims.map(c => c.id));
+    const filterClaimIds = (ids?: string[]): string[] => (ids || []).filter(id => validClaimIds.has(id));
+    const droppedEntities = { competitors: 0, customerSegments: 0, pricingTiers: 0, regulatoryFactors: 0, risks: 0, trends: 0, opportunities: 0 };
 
-    const recommendations: StrategicRecommendation[] = details.risks.length > 0 ? [
-      {
-        id: 'rec-1',
-        title: `Execute GTM Strategy in ${job.geography}`,
-        priority: 'CRITICAL',
-        timeframe: 'IMMEDIATE',
-        rationale: `Strategic entry into the ${job.industry} sector leveraging verified market growth of ${sizing.cagr_pct}%.`,
-        risk_factors: [details.risks[0].title],
-        supporting_claim_ids: ['clm-1', 'clm-2'],
-      }
-    ] : [];
+    const competitors = (details.competitors || [])
+      .map(c => ({ ...c, supporting_claim_ids: filterClaimIds(c.supporting_claim_ids) }))
+      .filter(c => { const ok = c.supporting_claim_ids.length > 0; if (!ok) droppedEntities.competitors++; return ok; });
+    const customerSegments = (details.customerSegments || [])
+      .map(s => ({ ...s, supporting_claim_ids: filterClaimIds(s.supporting_claim_ids) }))
+      .filter(s => { const ok = s.supporting_claim_ids.length > 0; if (!ok) droppedEntities.customerSegments++; return ok; });
+    const pricingTiers = (details.pricingTiers || [])
+      .map(p => ({ ...p, supporting_claim_ids: filterClaimIds(p.supporting_claim_ids) }))
+      .filter(p => { const ok = p.supporting_claim_ids.length > 0; if (!ok) droppedEntities.pricingTiers++; return ok; });
+    const regulatoryFactors = (details.regulatoryFactors || [])
+      .map(rf => ({ ...rf, claim_ids: filterClaimIds(rf.claim_ids) }))
+      .filter(rf => { const ok = rf.claim_ids.length > 0; if (!ok) droppedEntities.regulatoryFactors++; return ok; });
+    const risks = (details.risks || [])
+      .map(r => ({ ...r, supporting_claim_ids: filterClaimIds(r.supporting_claim_ids) }))
+      .filter(r => { const ok = r.supporting_claim_ids.length > 0; if (!ok) droppedEntities.risks++; return ok; });
+    const trends = (details.trends || [])
+      .map(t => ({ ...t, claim_ids: filterClaimIds(t.claim_ids) }))
+      .filter(t => { const ok = t.claim_ids.length > 0; if (!ok) droppedEntities.trends++; return ok; });
+    const opportunities = (details.opportunities || [])
+      .map(o => ({ ...o, claim_ids: filterClaimIds(o.claim_ids) }))
+      .filter(o => { const ok = o.claim_ids.length > 0; if (!ok) droppedEntities.opportunities++; return ok; });
+
+    const totalDroppedEntities = Object.values(droppedEntities).reduce((a, b) => a + b, 0);
+
+    // Recommendations are derived from the (already grounded) verified risks.
+    const recommendations: StrategicRecommendation[] = risks.slice(0, 1).map((r, i) => ({
+      id: `rec-${i + 1}`,
+      title: `Mitigate critical risk: ${r.title}`,
+      priority: 'CRITICAL' as const,
+      timeframe: 'IMMEDIATE' as const,
+      rationale: `Address the highest-impact verified risk before pursuing growth of ${sizing.cagr_pct}% in ${job.geography}.`,
+      risk_factors: [r.title],
+      supporting_claim_ids: r.supporting_claim_ids,
+    }));
+
+    // Section citations are DERIVED from actual verified claims by type —
+    // never hardcoded claim ids. Empty arrays are honest (no fake citations).
+    const claimsOfTypes = (types: Claim['claim_type'][]): string[] =>
+      verifiedClaims.filter(c => types.includes(c.claim_type)).map(c => c.id);
 
     const sections: ReportSection[] = [
       {
@@ -597,7 +725,7 @@ export class ResearchPipelineManager {
         order: 1,
         summary: 'Macro market trends and deterministic addressable market sizing',
         content: narrative.section1,
-        cited_claim_ids: ['clm-1', 'clm-2'],
+        cited_claim_ids: claimsOfTypes(['MARKET_SIZE', 'MARKET_GROWTH', 'REVENUE', 'VALUATION', 'FINANCIAL', 'FUNDING']),
       },
       {
         id: 'sec-buyers',
@@ -605,7 +733,7 @@ export class ResearchPipelineManager {
         order: 2,
         summary: 'Target customer profiles, key buying criteria, and pain points',
         content: narrative.section2,
-        cited_claim_ids: ['clm-4'],
+        cited_claim_ids: claimsOfTypes(['CUSTOMER', 'PRICING', 'OPPORTUNITY']),
       },
       {
         id: 'sec-strategy',
@@ -613,9 +741,20 @@ export class ResearchPipelineManager {
         order: 3,
         summary: 'Unit economics, pricing architecture, and strategic roadmap',
         content: narrative.section3,
-        cited_claim_ids: ['clm-3', 'clm-5'],
+        cited_claim_ids: claimsOfTypes(['STRATEGIC', 'TREND', 'PRICING', 'TECHNOLOGY']),
       },
     ];
+
+    const limitations: string[] = [
+      'Paywalled institutional research reports may require direct user subscription access.',
+      'Intra-day currency fluctuations not continuously indexed.',
+    ];
+    if (failedCount > 0) {
+      limitations.push(`${failedCount} of ${sources.length} discovered sources could not be retrieved (FETCH_FAILED) and were excluded from all analysis.`);
+    }
+    if (totalDroppedEntities > 0) {
+      limitations.push(`${totalDroppedEntities} synthesized strategic entities were excluded because they could not be grounded in the verified claim registry.`);
+    }
 
     const finalReport: FullResearchReport = {
       id: `rep-${job.id}`,
@@ -635,33 +774,26 @@ export class ResearchPipelineManager {
       pricing_tiers: pricingTiers,
       financial_models: financialOutputs,
       regulatory_factors: regulatoryFactors,
-      trends: [
-        {
-          title: 'Accelerated Enterprise Automation',
-          description: 'High migration towards modular API architectures to reduce operational headcount overhead.',
-          impact: 'HIGH',
-          claim_ids: ['clm-1'],
-        },
-      ],
-      opportunities: [
-        {
-          title: 'Vertical Mid-Market Wedge',
-          description: 'Capture underserved mid-market operators with self-serve compliance tools.',
-          value_pool: FinancialEngine.formatCurrency(sizing.som, currency),
-          claim_ids: ['clm-3', 'clm-4'],
-        },
-      ],
+      trends,
+      opportunities,
       risks,
       recommendations,
-      limitations: [
-        'Paywalled institutional research reports may require direct user subscription access.',
-        'Intra-day currency fluctuations not continuously indexed.',
-      ],
+      limitations,
       sources,
       evidence_pool: evidencePool,
       claims: verifiedClaims,
       generated_at: new Date().toISOString(),
     };
+
+    // -------------------------------------------------------------
+    // MANDATORY CITATION GRAPH VALIDATION — no report is persisted or served
+    // unless every claim/evidence/source/section/strategic reference is intact.
+    // -------------------------------------------------------------
+    const graphValidation = CitationGraphValidator.validate(finalReport);
+    if (!graphValidation.valid) {
+      const summary = graphValidation.errors.slice(0, 5).map(e => `${e.code}: ${e.message}`).join(' | ');
+      throw new Error(`Citation graph validation failed (${graphValidation.errors.length} errors). Report withheld to preserve citation integrity. ${summary}`);
+    }
 
     const userId = (job as any).user_id;
     if (!userId) throw new Error('Missing user_id for report saving');
@@ -676,43 +808,82 @@ export class ResearchPipelineManager {
       report_id: job.id,
       evidence_score: evidenceBreakdown.overall_score,
       claims_verified: job.stats.claims_verified,
+      citation_graph: graphValidation.stats,
+      grounded_strategic_entities_dropped: droppedEntities,
     });
   }
 }
 
-// Start Firestore Worker with transactional claiming and heartbeats
+// Start Firestore Worker with transactional claiming, lease-ownership
+// verification, and REAL cancellation via the AbortController registry.
 export async function startWorker() {
-  console.log('[Queue] Worker started with transactional claiming');
+  console.log('[Queue] Worker started with transactional claiming, lease verification, and real cancellation');
   const workerId = `worker-${Math.random().toString(36).substring(2, 8)}`;
   while (true) {
+    let job: QueueJob | null = null;
     try {
-      const job = await researchQueue.claimNextJob(workerId);
-      if (job) {
-        console.log(`[Queue] Claimed job ${job.id} for processing`);
-        const { job: jobData, userId } = job.data;
-        const pipelineJob = { ...jobData };
-        if (userId) {
-          (pipelineJob as any).user_id = userId;
-        }
-
-        const controller = new AbortController();
-        const heartbeatInterval = setInterval(() => {
-          researchQueue.heartbeat(job.id, workerId);
-        }, 60000); // 1 min heartbeat
-
-        try {
-          await ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal);
-          await researchQueue.updateJobStatus(job.id, 'COMPLETED');
-        } catch (err) {
-          console.error(`[Queue] Job ${job.id} failed`, err);
-          await researchQueue.updateJobStatus(job.id, 'FAILED');
-        } finally {
-          clearInterval(heartbeatInterval);
-        }
-      }
+      job = await researchQueue.claimNextJob(workerId);
     } catch (err) {
-      console.error('[Queue] Worker error', err);
+      console.error('[Queue] Worker claim error', err);
     }
+
+    if (job) {
+      console.log(`[Queue] Claimed job ${job.id} for processing`);
+      const { job: jobData, userId } = job.data;
+      const pipelineJob = { ...jobData };
+      if (userId) {
+        (pipelineJob as any).user_id = userId;
+      }
+
+      const controller = new AbortController();
+      // Register the REAL AbortSignal so user cancels reach the pipeline.
+      cancellationRegistry.register(job.id, controller, workerId);
+
+      let leaseOwned = true;
+      let heartbeatInFlight = false;
+      const heartbeatInterval = setInterval(async () => {
+        if (heartbeatInFlight) return; // never stack overlapping heartbeats
+        heartbeatInFlight = true;
+        try {
+          const hb = await researchQueue.heartbeat(job!.id, workerId);
+          if (!hb.owned && hb.definitive) {
+            // Lease ownership was definitively lost (expired and re-claimed by
+            // another worker, or the job was cancelled): STOP this worker.
+            console.warn(`[Queue] Worker ${workerId} lost lease for job ${job!.id}. Aborting execution.`);
+            leaseOwned = false;
+            cancellationRegistry.abort(job!.id, 'LEASE_LOST');
+            controller.abort();
+          }
+        } finally {
+          heartbeatInFlight = false;
+        }
+      }, 60000); // 1 min heartbeat against a 3-min lease
+
+      try {
+        await ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal, workerId);
+        if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
+          console.log(`[Queue] Job ${job.id} was cancelled by the user; preserving CANCELLED state.`);
+        } else if (!leaseOwned) {
+          console.log(`[Queue] Job ${job.id} abandoned after lease loss; ownership transferred to another worker.`);
+        } else {
+          await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId);
+        }
+      } catch (err) {
+        console.error(`[Queue] Job ${job.id} failed`, err);
+        if (!leaseOwned) {
+          console.log(`[Queue] Job ${job.id} failure after lease loss suppressed; new owner is responsible.`);
+        } else if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
+          console.log(`[Queue] Job ${job.id} aborted by user cancellation; preserving CANCELLED state.`);
+        } else {
+          // Ownership-verified + state-machine-validated transition.
+          await researchQueue.updateJobStatus(job.id, 'FAILED', workerId);
+        }
+      } finally {
+        clearInterval(heartbeatInterval);
+        cancellationRegistry.unregister(job.id, workerId);
+      }
+    }
+
     await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5s
   }
 }

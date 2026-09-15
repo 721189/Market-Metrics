@@ -60,14 +60,19 @@
         "job_id": { "type": "string" },
         "url": { "type": "string" },
         "domain": { "type": "string" },
-        "publisher": { "type": "string" },
+        "publisher": { "type": ["string", "null"], "description": "null = unknown; never fabricated" },
         "source_type": { "type": "string", "enum": ["TIER_1_GOV_REGULATORY", "TIER_2_INSTITUTIONAL", "TIER_3_TRADE_INDUSTRY", "TIER_4_NEWS_GENERAL"] },
         "reliability_score": { "type": "number" },
-        "title": { "type": "string" },
+        "title": { "type": ["string", "null"], "description": "null = unknown; never fabricated" },
+        "published_at": { "type": ["string", "null"], "format": "date-time", "description": "null = publication date could not be verified; never fabricated" },
+        "http_status": { "type": ["number", "null"], "description": "null until a real HTTP response is received" },
+        "content_hash": { "type": ["string", "null"], "description": "real SHA-256 of retrieved text; null before fetch" },
+        "fetch_status": { "type": "string", "enum": ["NOT_FETCHED", "FETCHED", "FETCH_FAILED"], "description": "FETCH_FAILED sources are excluded from all analysis and statistics" },
+        "fetch_error": { "type": ["string", "null"] },
         "raw_text": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "job_id", "url", "domain", "publisher", "source_type", "reliability_score"]
+      "required": ["id", "job_id", "url", "domain", "publisher", "source_type", "reliability_score", "fetch_status"]
     },
     "Evidence": {
       "title": "Evidence",

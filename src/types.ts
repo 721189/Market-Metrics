@@ -32,6 +32,14 @@ export type StageName =
 
 export type SourceTier = 'TIER_A' | 'TIER_B' | 'TIER_C' | 'TIER_D';
 
+/**
+ * Explicit, truthful fetch lifecycle for every discovered source.
+ * NOT_FETCHED: discovered but the HTTP retrieval has not happened yet.
+ * FETCHED: document body was retrieved and text extracted.
+ * FETCH_FAILED: retrieval failed — the source is EXCLUDED from all analysis.
+ */
+export type SourceFetchStatus = 'NOT_FETCHED' | 'FETCHED' | 'FETCH_FAILED';
+
 export type VerificationStatus =
   | 'SUPPORTED'
   | 'PARTIALLY_SUPPORTED'
@@ -71,7 +79,9 @@ export interface ResearchJobRequest {
 
 export interface ResearchStats {
   sources_discovered: number;
-  sources_analyzed: number;
+  sources_fetched: number;      // documents actually retrieved via HTTP
+  sources_fetch_failed: number; // documents that could NOT be retrieved (FETCH_FAILED)
+  sources_analyzed: number;     // documents with extractable text actually analyzed
   evidence_items: number;
   claims_total: number;
   claims_verified: number;
@@ -97,15 +107,17 @@ export interface Source {
   url: string;
   canonical_url: string;
   domain: string;
-  title: string;
-  publisher: string;
-  published_at: string;
+  title: string | null;            // null = unknown; NEVER fabricated
+  publisher: string | null;        // null = unknown; NEVER fabricated
+  published_at: string | null;     // null = unknown publication date; NEVER fabricated
   retrieved_at: string;
   source_type: SourceTier;
   language: string;
-  http_status: number;
+  http_status: number | null;      // null until a real HTTP response is received
   discovery_method: 'SEARCH_API' | 'SEED_URL' | 'CROSS_REFERENCE';
-  content_hash: string;
+  content_hash: string | null;     // real SHA-256 of retrieved text; null before fetch
+  fetch_status: SourceFetchStatus; // explicit, truthful fetch lifecycle
+  fetch_error?: string | null;     // human-readable retrieval failure reason
   snippet?: string;
   reliability_score: number; // 0 - 100
 }
@@ -189,6 +201,7 @@ export interface CompetitorProfile {
   pricing_summary: string;
   target_customer: string;
   verified_claims_count: number;
+  supporting_claim_ids?: string[]; // verified-claim grounding (validated before publish)
 }
 
 export interface PricingTier {
@@ -201,6 +214,7 @@ export interface PricingTier {
   annualized_amount: number;
   features: string[];
   target_segment: string;
+  supporting_claim_ids?: string[]; // verified-claim grounding (validated before publish)
 }
 
 export interface CustomerSegment {
@@ -214,6 +228,7 @@ export interface CustomerSegment {
   pain_points: string[];
   key_buying_criteria: string[];
   churn_risk: string;
+  supporting_claim_ids?: string[]; // verified-claim grounding (validated before publish)
 }
 
 export interface FinancialOutputs {
