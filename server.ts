@@ -20,6 +20,11 @@ import {
   idempotencyMiddleware,
   requireRole,
 } from './src/server/middleware.js';
+import {
+  adminPathBlocker,
+  rateLimiterByCategory,
+  logEnvelope,
+} from './src/server/rate_limits.js';
 
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
@@ -62,7 +67,14 @@ async function startServer() {
 
   // Global Security & Optimization Middleware
   
-  app.use(rateLimiterMiddleware({ maxRequests: 120, windowSec: 60 }));
+  // Server-side administrative path lockdown (must precede any route handlers).
+  app.use(adminPathBlocker());
+
+  // Identity-aware rate limiting by IP + Firebase UID + endpoint category.
+  app.use(rateLimiterByCategory());
+
+  // Coarse global safety rate limit (kept as a backstop; category limits above are the real control).
+  app.use(rateLimiterMiddleware({ maxRequests: 300, windowSec: 60 }));
 
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
@@ -241,13 +253,18 @@ async function startServer() {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
-    // Check Last-Event-ID header for automatic resume
-    const lastEventId = parseInt(req.headers['last-event-id'] as string || '0', 10);
+    // Check Last-Event-ID header for automatic resume.
+    // The SSE id field is the event's sequence number (string token), so we
+    // resume from the last seen sequence rather than a numeric event identity.
+    const lastEventIdHeader = (req.headers['last-event-id'] as string) || '0';
+    const lastSequence = Number(lastEventIdHeader);
+    const afterSequence = Number.isFinite(lastSequence) ? lastSequence : 0;
 
-    // Send all existing events first
-    const existingEvents = await ResearchPipelineManager.getEvents(jobId, lastEventId, tenantId);
+    // Send all existing events first (already sorted by sequence in DB).
+    const existingEvents = await ResearchPipelineManager.getEvents(jobId, afterSequence, tenantId);
     existingEvents.forEach(evt => {
-      res.write(`id: ${evt.id}\ndata: ${JSON.stringify(evt)}\n\n`);
+      // SSE id token: use the event sequence so resume aligns with sequence ordering.
+      res.write(`id: ${evt.sequence}\ndata: ${JSON.stringify(evt)}\n\n`);
     });
 
     // Heartbeat to keep connection alive through any intermediate proxies
@@ -257,7 +274,7 @@ async function startServer() {
 
     // Listen for new events
     const eventHandler = (evt: any) => {
-      res.write(`id: ${evt.id}\ndata: ${JSON.stringify(evt)}\n\n`);
+      res.write(`id: ${evt.sequence}\ndata: ${JSON.stringify(evt)}\n\n`);
       if (evt.event_type === 'completed' || evt.event_type === 'error') {
         setTimeout(() => {
           clearInterval(heartbeatInterval);
