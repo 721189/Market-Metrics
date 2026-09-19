@@ -11,9 +11,9 @@
  *   7. ANALYZING (Pure Deterministic Financial Calculations & Sensitivities)
  *   8. SYNTHESIZING (Strategic Market Vectors: Competitors, Segments, Pricing, Regulatory, Risks, Playbook)
  *   9. GENERATING_REPORT (Structured Markdown Dossier & Citation Integrity Validation)
- * - BullMQ concurrency and queue limits
+ * - Firestore-transactional queue with lease ownership (lease_id + lease_version)
  * - Real AbortController cancellation
- * - Full database persistence via DatabaseRepository & DatabaseAdapter
+ * - Full database persistence via DatabaseRepository (Firestore-backed)
  */
 
 import { generateId } from '../lib/uuid.js';

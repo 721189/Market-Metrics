@@ -76,21 +76,22 @@ export class DatabaseRepository {
     }
   }
 
-  public static async getEvents(jobId: string, afterId: number = 0): Promise<ResearchEvent[]> {
+  public static async getEvents(jobId: string, afterSequence: number = 0): Promise<ResearchEvent[]> {
     try {
       const snap = await adminDb.collection(`jobs/${jobId}/events`).get();
       const events: ResearchEvent[] = [];
       snap.forEach(doc => {
         const item = doc.data() as any;
-        const eventId = Number(String(item.id).replace('evt-', '')) || 0;
-        if (eventId > afterId) {
+        if (!item) return;
+        const seq = Number(item.sequence) || 0;
+        if (seq > afterSequence) {
           events.push({
             ...item,
-            id: eventId,
+            id: String(item.id ?? doc.id),
           });
         }
       });
-      events.sort((a, b) => a.id - b.id);
+      events.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
       return events;
     } catch (err) {
       console.error(`[DB] Error getting events for job ${jobId}:`, err);

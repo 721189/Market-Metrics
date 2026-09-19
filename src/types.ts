@@ -41,11 +41,17 @@ export type SourceTier = 'TIER_A' | 'TIER_B' | 'TIER_C' | 'TIER_D';
 export type SourceFetchStatus = 'NOT_FETCHED' | 'FETCHED' | 'FETCH_FAILED';
 
 export type VerificationStatus =
+  | 'EXTRACTED'
+  | 'UNVERIFIED'
+  | 'EVIDENCE-MATCHED'
+  | 'SOURCE-ASSESSED'
+  | 'TEMPORALLY-VALID'
+  | 'CONTRADICTION-CHECKED'
+  | 'CORROBORATED'
   | 'SUPPORTED'
   | 'PARTIALLY_SUPPORTED'
   | 'CONTRADICTED'
-  | 'INSUFFICIENT'
-  | 'UNVERIFIED';
+  | 'INSUFFICIENT';
 
 export type ClaimType =
   | 'MARKET_SIZE'
@@ -133,6 +139,19 @@ export interface DocumentChunk {
   offset_end: number;
 }
 
+export interface EvidenceProvenance {
+  document_text: string;
+  document_hash: string;
+  source_url: string;
+  retrieved_at: string;
+  parser_version: string;
+  normalizer_version: string;
+  start_offset: number;
+  end_offset: number;
+  quote: string;
+  exact_normalized_match: boolean;
+}
+
 export interface Evidence {
   id: string;
   job_id: string;
@@ -148,6 +167,23 @@ export interface Evidence {
   extraction_confidence: number; // 0 - 100
   provenance_type: 'OBSERVED' | 'INFERRED' | 'ASSUMED' | 'CALCULATED';
   created_at: string;
+  // Truthful provenance fields (required by spec item 8). Where a value is not
+  // yet available at construction time, it is set to a safe placeholder and
+  // MUST be populated before any report is served.
+  source_url: string;
+  source_domain: string;
+  citation_number: number;
+  statement: string;
+  extracted_quote: string;
+  relevance_score: number;
+  verification_status: VerificationStatus;
+  confidence: number;
+  provenance: EvidenceProvenance;
+  retrieved_at: string;
+  parser_version: string;
+  normalizer_version: string;
+  supporting_claim_ids: string[];
+  contradicting_claim_ids: string[];
   // Hydrated references
   source?: Source;
 }
@@ -341,6 +377,13 @@ export interface FullResearchReport {
   evidence_pool: Evidence[];
 }
 
+export interface QueueJobLease {
+  worker_id?: string;
+  lease_id?: string;
+  lease_version?: number;
+  leased_until?: any;
+}
+
 export interface ResearchJob {
   id: string;
   question: string;
@@ -362,7 +405,8 @@ export interface ResearchJob {
 }
 
 export interface ResearchEvent {
-  id: number;
+  id: string;                       // UUIDv7 — identity / path lookups
+  sequence: number;                 // per-job ordering for SSE replay / order
   job_id: string;
   event_type: 'stage_started' | 'stage_progress' | 'stage_completed' | 'source_discovered' | 'evidence_extracted' | 'claim_verified' | 'calculation_performed' | 'error' | 'completed';
   stage: StageName;
@@ -370,4 +414,5 @@ export interface ResearchEvent {
   progress: number;
   metadata?: Record<string, any>;
   created_at: string;
+  created_at_ms: number;
 }

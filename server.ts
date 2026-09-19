@@ -1,7 +1,8 @@
 /**
  * Full-Stack Production Express Server for Market Research Agent V2
- * Connected to Production Database Repository, Postgres Adapter, BullMQ Queue Worker,
- * Telemetry Engine, Financial/Security/E2E Test Suites, and Real Export Modules.
+ * Connected to the Firestore-backed Database Repository, the transactional
+ * Firestore queue worker, Telemetry Engine, and the Financial/Security/E2E
+ * test suites and export modules.
  */
 
 import './src/server/telemetry.js';

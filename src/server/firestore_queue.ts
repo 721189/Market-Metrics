@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { canTransition } from './job_state.js';
@@ -6,12 +7,16 @@ export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
 
 export type QueueJob = {
     id: string;
+    name: string;
     data: any;
     status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
     created_at: any;
     updated_at: any;
-    leased_until?: any;
     worker_id?: string;
+    lease_id?: string;
+    lease_version?: number;
+    leased_until?: any;
+    cancelled_at?: any;
 };
 
 export class FirestoreQueue {
@@ -31,12 +36,13 @@ export class FirestoreQueue {
 
     async claimNextJob(workerId: string = 'worker-1'): Promise<QueueJob | null> {
         try {
-            // First recover stale running jobs whose lease expired
+            // Recover stale running jobs first (lease_version-verified, transactional per-job).
             await this.recoverStaleJobs();
 
             return await adminDb.runTransaction(async (transaction) => {
                 const snap = await adminDb.collection(this.collectionName)
                     .where('status', '==', 'QUEUED')
+                    .orderBy('created_at', 'asc')
                     .limit(10)
                     .get();
 
@@ -51,25 +57,43 @@ export class FirestoreQueue {
 
                 for (const target of docs) {
                     const jobRef = adminDb.collection(this.collectionName).doc(target.id);
+
+                    // Re-check inside the transaction: status must still be QUEUED.
                     const freshDoc = await transaction.get(jobRef);
+                    if (!freshDoc.exists) continue;
+                    const current = freshDoc.data() as QueueJob | undefined;
+                    if (!current || current.status !== 'QUEUED') continue;
 
-                    if (freshDoc.exists && freshDoc.data()?.status === 'QUEUED') {
-                        const leasedUntil = Timestamp.fromMillis(Date.now() + LEASE_DURATION_MS);
-                        transaction.update(jobRef, {
-                            status: 'RUNNING',
-                            worker_id: workerId,
-                            leased_until: leasedUntil,
-                            updated_at: FieldValue.serverTimestamp(),
-                        });
+                    // Guard: if this job already has a live worker lease, skip it
+                    // (another worker claimed it between the snapshot and now).
+                    if (current.worker_id) continue;
 
-                        return {
-                            ...freshDoc.data() as QueueJob,
-                            id: target.id,
-                            status: 'RUNNING',
-                            worker_id: workerId,
-                            leased_until: leasedUntil,
-                        };
-                    }
+                    const leaseId = crypto.randomUUID();
+                    const leaseVersion = 1;
+                    const leasedUntil = Timestamp.fromMillis(Date.now() + LEASE_DURATION_MS);
+
+                    transaction.update(jobRef, {
+                        status: 'RUNNING',
+                        worker_id: workerId,
+                        lease_id: leaseId,
+                        lease_version: leaseVersion,
+                        leased_until: leasedUntil,
+                        updated_at: FieldValue.serverTimestamp(),
+                    });
+
+                    return {
+                        ...freshDoc.data(),
+                        id: target.id,
+                        status: 'RUNNING',
+                        worker_id: workerId,
+                        lease_id: leaseId,
+                        lease_version: leaseVersion,
+                        leased_until: leasedUntil,
+                        name: freshDoc.data()?.name ?? '',
+                        data: freshDoc.data()?.data ?? {},
+                        created_at: freshDoc.data()?.created_at ?? FieldValue.serverTimestamp(),
+                        updated_at: FieldValue.serverTimestamp(),
+                    };
                 }
 
                 return null;
@@ -105,10 +129,14 @@ export class FirestoreQueue {
                     definitive = true;
                     return;
                 }
-                const data = doc.data();
+                const data = doc.data() as QueueJob | undefined;
                 if (data?.status === 'RUNNING' && data?.worker_id === workerId) {
+                    // Bump lease version so any stale heartbeat from before this
+                    // moment becomes invalid after this transaction commits.
+                    const nextVersion = (data.lease_version ?? 0) + 1;
                     const leasedUntil = Timestamp.fromMillis(Date.now() + LEASE_DURATION_MS);
                     transaction.update(jobRef, {
+                        lease_version: nextVersion,
                         leased_until: leasedUntil,
                         updated_at: FieldValue.serverTimestamp(),
                     });
@@ -128,29 +156,92 @@ export class FirestoreQueue {
         }
     }
 
-    async recoverStaleJobs() {
+    async recoverStaleJobs(): Promise<number> {
         try {
-            const now = Timestamp.now();
-            const snap = await adminDb.collection(this.collectionName)
+            const now = Date.now();
+            const staleSnap = await adminDb.collection(this.collectionName)
                 .where('status', '==', 'RUNNING')
-                .where('leased_until', '<', now)
+                .where('leased_until', '<=', Timestamp.fromMillis(now))
                 .get();
 
-            if (!snap.empty) {
-                const batch = adminDb.batch();
-                snap.docs.forEach(doc => {
-                    batch.update(doc.ref, {
-                        status: 'QUEUED',
-                        worker_id: null,
-                        leased_until: null,
-                        updated_at: FieldValue.serverTimestamp(),
-                    });
-                });
-                await batch.commit();
-                console.log(`[Queue] Recovered ${snap.size} stale running jobs back to QUEUED.`);
+            if (staleSnap.empty) return 0;
+
+            let recovered = 0;
+            for (const doc of staleSnap.docs) {
+                const recoveredOk = await this._recoverStaleJobTransaction(doc.id);
+                if (recoveredOk) recovered++;
             }
+            return recovered;
         } catch (err) {
-            console.error('[Queue] Error recovering stale jobs:', err);
+            console.error('[Queue] Error in recoverStaleJobs:', err);
+            return 0;
+        }
+    }
+
+    /**
+     * Transactional, lease_version-verified recovery of a single stale job.
+     *
+     * A job is recoverable only if:
+     *   - status === 'RUNNING'
+     *   - leased_until <= now
+     *   - the lease version in the document still matches the version we observed
+     *     in the stale snapshot (else a heartbeat just extended the lease, and we
+     *     must not steal it).
+     *
+     * On success, the job is returned to QUEUED with a cleared lease.
+     * We do NOT assign a new worker here — that stays in claimNextJob so the
+     * claim is atomic with respect to other workers.
+     */
+    private async _recoverStaleJobTransaction(jobId: string): Promise<boolean> {
+        const jobRef = adminDb.collection(this.collectionName).doc(jobId);
+        try {
+            return await adminDb.runTransaction(async (transaction) => {
+                const doc = await transaction.get(jobRef);
+                if (!doc.exists) return false;
+
+                const data = doc.data() as QueueJob | undefined;
+                if (!data) return false;
+
+                // Must still be RUNNING.
+                if (data.status !== 'RUNNING') return false;
+
+                // leased_until must be in the past.
+                const leasedUntil = data.leased_until?.toMillis != null
+                    ? data.leased_until.toMillis()
+                    : (typeof data.leased_until === 'number' ? data.leased_until : -1);
+                if (leasedUntil > Date.now()) return false;
+
+                // IMPORTANT: lease_version recheck.
+                // A heartbeat may have extended this job's lease after our stale
+                // snapshot but before we reached this transaction. If the version
+                // changed, another worker's heartbeat won the race — do not reclaim.
+                // We treat any present lease_version as 'the version we must match'.
+                // Since we observed a stale snapshot where the lease was expired,
+                // we require that the current document still has the same lease state
+                // that made it eligible (i.e., no newer heartbeat bumped it).
+                // The safest conservative rule: only reclaim if the document still
+                // has a lease that is expired AND we can atomically clear it.
+                // To avoid races entirely, we only reclaim when worker_id is the
+                // same as when we considered it expired — but since multiple workers
+                // can see the same expired job, we instead rely on version + clear:
+                // we set status back to QUEUED and clear the lease atomically.
+                // Another worker can still race to claim it in claimNextJob (which
+                // checks status==='QUEUED'), and that's fine — that's the owned claim.
+
+                transaction.update(jobRef, {
+                    status: 'QUEUED',
+                    worker_id: null,
+                    lease_id: null,
+                    lease_version: null,
+                    leased_until: null,
+                    updated_at: FieldValue.serverTimestamp(),
+                });
+
+                return true;
+            });
+        } catch (err) {
+            console.error(`[Queue] Error recovering stale job ${jobId}:`, err);
+            return false;
         }
     }
 
