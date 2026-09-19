@@ -45,11 +45,15 @@ import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
 import { canTransition, cancellationRegistry } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
+import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
+import { CostGovernor } from './cost_governor.js';
 
 export const pipelineEmitter = new EventEmitter();
 pipelineEmitter.setMaxListeners(500);
 
 let eventCounter = Date.now();
+
+let eventSequence = 0;
 
 function isCancelled(job: ResearchJob, signal?: AbortSignal): boolean {
   if (signal?.aborted === true) return true;
@@ -85,7 +89,8 @@ async function logAndEmitEvent(
   metadata?: Record<string, any>
 ) {
   const event: ResearchEvent = {
-    id: ++eventCounter,
+    id: generateId(),
+    sequence: ++eventSequence,
     job_id: job.id,
     event_type: eventType,
     stage,
@@ -93,6 +98,7 @@ async function logAndEmitEvent(
     progress,
     metadata,
     created_at: new Date().toISOString(),
+    created_at_ms: Date.now(),
   };
 
   job.current_stage = stage;
@@ -235,6 +241,10 @@ export class ResearchPipelineManager {
       console.log(`[Pipeline] Stage worker executing job ${job.id} as ${workerId}`);
     }
 
+    const costGovernor = new CostGovernor();
+    const artifactStorage = new InMemoryArtifactStorage();
+    const sourceArtifacts = new Map<string, RetrievalArtifact>();
+
     // -------------------------------------------------------------
     // STAGE 1: PLANNING (Model A)
     // -------------------------------------------------------------
@@ -337,6 +347,40 @@ export class ResearchPipelineManager {
         if (!fetchedDoc.extractedText || fetchedDoc.extractedText.trim().length === 0) {
           throw new Error('Document body was empty after text extraction');
         }
+
+        // Cost governor: enforce per-request caps and document size budget.
+        const estimatedSize = fetchedDoc.extractedText.length;
+        const fetchReject = costGovernor.allowFetch(estimatedSize);
+        if (fetchReject) {
+          throw new Error(`Fetch rejected by cost governor: ${fetchReject}`);
+        }
+
+        // Persist the raw + normalized artifact boundary (in-memory for now;
+        // production swaps InMemoryArtifactStorage for object storage).
+        const rawBytes = Buffer.from(fetchedDoc.extractedText, 'utf8');
+        const normalizedText = fetchedDoc.extractedText;
+        const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, 'text/plain', rawBytes);
+        const textRef = await artifactStorage.putNormalizedText(src.id, job.id, normalizedText);
+
+        const artifact: RetrievalArtifact = {
+          source_id: src.id,
+          job_id: job.id,
+          url: src.url,
+          retrieved_at: fetchedDoc.retrievedAt,
+          parser_version: '1.0.0',
+          normalizer_version: '1.0.0',
+          content_type: 'text/plain',
+          content_hash: fetchedDoc.contentHash,
+          raw_size_bytes: rawBytes.length,
+          normalized_text_size_bytes: Buffer.from(normalizedText, 'utf8').length,
+          storage_ref: rawRef,
+          raw_available: true,
+          normalized_text_available: true,
+        };
+        sourceArtifacts.set(src.id, artifact);
+        costGovernor.recordArtifact(artifact);
+        costGovernor.recordFetch(rawBytes.length, 0.01);
+
         src.fetch_status = 'FETCHED';
         src.fetch_error = null;
         src.http_status = fetchedDoc.httpStatus;
@@ -423,6 +467,31 @@ export class ResearchPipelineManager {
           extraction_confidence: 94,
           provenance_type: 'OBSERVED',
           created_at: new Date().toISOString(),
+          source_url: src.url,
+          source_domain: src.domain,
+          citation_number: 0,
+          statement: offset.quote,
+          extracted_quote: offset.quote,
+          relevance_score: 0,
+          verification_status: 'UNVERIFIED',
+          confidence: 94,
+          provenance: {
+            document_text: offset.quote,
+            document_hash: src.content_hash || '',
+            source_url: src.url,
+            retrieved_at: src.retrieved_at,
+            parser_version: '1.0.0',
+            normalizer_version: '1.0.0',
+            start_offset: offset.startOffset,
+            end_offset: offset.endOffset,
+            quote: offset.quote,
+            exact_normalized_match: true,
+          },
+          retrieved_at: src.retrieved_at,
+          parser_version: '1.0.0',
+          normalizer_version: '1.0.0',
+          supporting_claim_ids: [],
+          contradicting_claim_ids: [],
           source: src,
         });
       }
@@ -480,6 +549,31 @@ export class ResearchPipelineManager {
           extraction_confidence: 98,
           provenance_type: 'OBSERVED',
           created_at: new Date().toISOString(),
+          source_url: source?.url || '',
+          source_domain: source?.domain || '',
+          citation_number: 0,
+          statement: offset.quote,
+          extracted_quote: offset.quote,
+          relevance_score: 0,
+          verification_status: 'UNVERIFIED',
+          confidence: 98,
+          provenance: {
+            document_text: offset.quote,
+            document_hash: source?.content_hash || '',
+            source_url: source?.url || '',
+            retrieved_at: source?.retrieved_at || new Date().toISOString(),
+            parser_version: '1.0.0',
+            normalizer_version: '1.0.0',
+            start_offset: offset.startOffset,
+            end_offset: offset.endOffset,
+            quote: offset.quote,
+            exact_normalized_match: true,
+          },
+          retrieved_at: source?.retrieved_at || new Date().toISOString(),
+          parser_version: '1.0.0',
+          normalizer_version: '1.0.0',
+          supporting_claim_ids: [],
+          contradicting_claim_ids: [],
           source: source,
         };
         evidencePool.push(newEvidence);

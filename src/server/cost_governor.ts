@@ -97,7 +97,7 @@ export class CostGovernor {
     this.globalCost = makeFreshGlobal();
   }
 
-  recordFetch(responseSizeBytes: number, estimatedCostUsd: number): void {
+  recordFetch(_responseSizeBytes: number, estimatedCostUsd: number): void {
     this.requestCost.fetch_calls += 1;
     this.requestCost.documents_processed += 1;
     this.requestCost.estimated_cost_usd += estimatedCostUsd;

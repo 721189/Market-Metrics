@@ -20,6 +20,7 @@ import { runApiAuthTest } from './api_auth.test.js';
 import { runPipelineFixtureTest } from './pipeline_fixture.test.js';
 import { runCitationIntegrityTest } from './citation_integrity.test.js';
 import { runPrecisionHardeningTest } from './precision_hardening.test.js';
+import { runCostArtifactTest } from './cost_artifact_integration.test.js';
 import { runE2ETest } from './e2e.test.js';
 import { runDeploymentLoadTest } from './load.test.js';
 
@@ -69,6 +70,7 @@ export async function runAllTests() {
     { name: '5. API Auth & Security Middleware Test', fn: runApiAuthTest },
     { name: '6. Pipeline Fixture Test', fn: runPipelineFixtureTest },
     { name: '7. Citation Integrity & Coordinate Test', fn: runCitationIntegrityTest },
+    { name: 'Cost + Artifact Integration Test (P1)', fn: runCostArtifactTest },
     { name: '8. Precision Hardening Suite (P0)', fn: runPrecisionHardeningTest },
     { name: '9. Playwright / E2E Simulation Test', fn: runE2ETest },
     { name: '10. Real Deployment Load Test', fn: runDeploymentLoadTest },
