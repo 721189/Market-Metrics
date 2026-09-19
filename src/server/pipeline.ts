@@ -47,6 +47,7 @@ import { canTransition, cancellationRegistry } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
+import { logEnvelope } from './rate_limits.js';
 
 export const pipelineEmitter = new EventEmitter();
 pipelineEmitter.setMaxListeners(500);
@@ -245,6 +246,20 @@ export class ResearchPipelineManager {
     const artifactStorage = new InMemoryArtifactStorage();
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
+    const requestId = (job as any).request_id || `req-${job.id}`;
+    const workerUserId = (job as any).user_id || 'unknown';
+
+    function logStage(event: string, stage: string, status: string, message: string, durationMs?: number): void {
+      logEnvelope(event, {
+        request_id: requestId,
+        user_id: workerUserId,
+        job_id: job.id,
+        stage,
+        status,
+        duration_ms: durationMs,
+      }, message);
+    }
+
     // -------------------------------------------------------------
     // STAGE 1: PLANNING (Model A)
     // -------------------------------------------------------------
@@ -263,6 +278,7 @@ export class ResearchPipelineManager {
       queries: plan.search_query_families,
       metrics: plan.metrics_needed,
     });
+    logStage('stage', 'PLANNING', 'success', 'Planning stage completed', 8);
 
     if (isCancelled(job, signal)) return;
 

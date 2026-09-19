@@ -7,6 +7,7 @@
 
 import { CostGovernor } from '../server/cost_governor.js';
 import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from '../server/artifacts.js';
+import { logEnvelope } from '../server/rate_limits.js';
 import { RealDocumentFetcher } from '../server/fetcher.js';
 
 function approxEqual(a: number, b: number, tol = 0.01): boolean {
@@ -82,6 +83,24 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
   };
   if (artifact.source_id !== 'src-1' || artifact.storage_ref !== ref) {
     return { passed: false, message: 'RetrievalArtifact should preserve identity fields' };
+  }
+
+  // --- Structured log envelope shape ---
+  const logged: any[] = [];
+  const original = console.log;
+  console.log = (...args: any[]) => { logged.push(...args); };
+  logEnvelope('stage', { request_id: 'req-1', user_id: 'usr-1', job_id: 'job-1', stage: 'PLANNING', status: 'success', duration_ms: 8 }, 'Planning stage completed');
+  console.log = original;
+  if (logged.length < 1) {
+    return { passed: false, message: 'logEnvelope should emit a line' };
+  }
+  const parsed = logged[0];
+  if (typeof parsed !== 'string') {
+    return { passed: false, message: 'logEnvelope should JSON.stringify its output' };
+  }
+  const envelope = JSON.parse(parsed);
+  if (envelope.event !== 'stage' || envelope.request_id !== 'req-1' || envelope.user_id !== 'usr-1' || envelope.job_id !== 'job-1' || envelope.stage !== 'PLANNING' || envelope.status !== 'success' || envelope.duration_ms !== 8 || envelope.message !== 'Planning stage completed') {
+    return { passed: false, message: 'logEnvelope should preserve structured fields' };
   }
 
   console.log('[Cost/Artifact Integration] Cost governor + artifact persistence tests passed.');
