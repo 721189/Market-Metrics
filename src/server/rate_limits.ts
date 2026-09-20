@@ -1,4 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
+import {
+  InMemoryRateLimitStore,
+  resolveStoreKind,
+  throwRedisNotProvisioned,
+  type RateLimitStore,
+} from './stores.js';
 
 /**
  * Server-side administrative path lockdown.
@@ -32,13 +38,26 @@ function isAdminPath(path: string): boolean {
 }
 
 export function adminPathBlocker() {
+  // ADMIN_UIDS: comma-separated Firebase UIDs allowed to touch admin paths.
+  // Parsed per request (cheap) so Railway env-var changes take effect on
+  // redeploy without a code change. Empty = nobody is admin (fail closed).
+  const adminUids = (): Set<string> =>
+    new Set(
+      (process.env.ADMIN_UIDS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+
   return (req: Request, res: Response, next: NextFunction) => {
     if (!isAdminPath(req.path)) {
       return next();
     }
 
     const user = (req as any).user;
-    const isAdmin = user?.role === 'admin' || user?.admin === true;
+    const uid: string | undefined = user?.uid;
+    const isAdmin =
+      (!!uid && adminUids().has(uid)) || user?.role === 'admin' || user?.admin === true;
 
     if (!user || !isAdmin) {
       return res.status(404).json({
@@ -76,11 +95,32 @@ const DEFAULT_BUDGETS: Record<RateLimitCategory, CategoryBudget> = {
 /**
  * In-memory rate-limit store keyed by IP + Firebase UID + category.
  *
- * In production this should be backed by a distributed store (Redis /
- * Firestore), but this satisfies the correctness requirement that limits
- * are enforced by identity, not just by IP.
+ * Single-replica default. Multi-replica without Redis uses the Firestore
+ * store (selected via RATE_LIMIT_STORE=firestore); Redis slots in later
+ * behind the same RateLimitStore interface with zero middleware changes.
  */
-const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
+let rateLimitStore: RateLimitStore | null = null;
+
+function getRateLimitStore(): RateLimitStore {
+  if (rateLimitStore) return rateLimitStore;
+  const kind = resolveStoreKind(process.env.RATE_LIMIT_STORE, 'memory');
+  // Firestore-backed buckets land here when replicas>1 (atomic increment
+  // docs); for now the only provisioned backend is the in-memory one.
+  if (kind === 'redis') throwRedisNotProvisioned('rateLimiterByCategory');
+  if (kind === 'firestore') {
+    throw new Error(
+      '[rateLimiterByCategory] RATE_LIMIT_STORE=firestore selected but the ' +
+        'Firestore bucket store is not wired yet. Use memory (single replica).',
+    );
+  }
+  rateLimitStore = new InMemoryRateLimitStore();
+  return rateLimitStore;
+}
+
+/** Test hook: swap the backing store without touching middleware. */
+export function __setRateLimitStoreForTests(store: RateLimitStore | null): void {
+  rateLimitStore = store;
+}
 
 function bucketKey(ip: string, uid: string, category: RateLimitCategory): string {
   return `${category}::${uid || 'anonymous'}::${ip}`;
@@ -117,37 +157,37 @@ export function rateLimiterByCategory(
   budgets: Partial<Record<RateLimitCategory, CategoryBudget>> = {},
   classify: (req: Request) => RateLimitCategory = defaultCategoryClassifier,
 ) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const uid = (req as any).user?.uid || '';
     const category = classify(req);
     const budget = budgets[category] ?? DEFAULT_BUDGETS[category];
 
     const key = bucketKey(ip, uid, category);
-    const now = Date.now();
-    const windowMs = budget.windowSec * 1000;
 
-    let record = rateLimitStore.get(key);
-    if (!record || now > record.resetTime) {
-      record = { count: 1, resetTime: now + windowMs };
-      rateLimitStore.set(key, record);
-    } else {
-      record.count++;
+    // Fail open: if the store is down/misconfigured, never block traffic —
+    // rate limiting is a cost control, not an availability gate.
+    let verdict;
+    try {
+      verdict = await getRateLimitStore().hit(key, budget.maxRequests, budget.windowSec);
+    } catch (err) {
+      console.error('[RateLimit] store error (failing open):', (err as Error)?.message || err);
+      return next();
     }
 
-    const remaining = Math.max(0, budget.maxRequests - record.count);
-
     res.setHeader('X-RateLimit-Limit', String(budget.maxRequests));
-    res.setHeader('X-RateLimit-Remaining', String(remaining));
+    res.setHeader('X-RateLimit-Remaining', String(verdict.remaining));
     res.setHeader('X-RateLimit-Category', category);
     res.setHeader('X-RateLimit-Scope', 'identity');
+    res.setHeader('X-RateLimit-Store', getRateLimitStore().kind);
 
-    if (record.count > budget.maxRequests) {
+    if (verdict.limited) {
       return res.status(429).json({
         error: {
           code: 'RATE_LIMIT_EXCEEDED',
           message: 'Too many requests in this category. Please try again later.',
           category,
+          retry_after: verdict.resetAfterSec,
         },
       });
     }

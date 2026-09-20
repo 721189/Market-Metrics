@@ -941,6 +941,11 @@ export class ResearchPipelineManager {
     // Save final report to persistent DatabaseRepository
     await DatabaseRepository.saveReport(finalReport, userId);
 
+    // The cached entry (if any) predates this report — drop it so the next
+    // read serves the freshly validated dossier, never a stale copy.
+    const { CacheLayer } = await import('./cache.js');
+    await CacheLayer.invalidateReportCache(finalReport.job_id, userId);
+
     job.report = finalReport;
     job.status = 'COMPLETED';
 

@@ -26,11 +26,13 @@ import {
   rateLimiterByCategory,
   logEnvelope,
 } from './src/server/rate_limits.js';
+import { corsMiddleware } from './src/server/cors.js';
 import {
   validateEnvironmentOrThrow,
   describeEnvironment,
 } from './src/server/environment.js';
 import { observabilitySnapshot } from './src/server/observability.js';
+import { CacheLayer } from './src/server/cache.js';
 
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
@@ -58,11 +60,15 @@ async function startServer() {
   console.log(`[Environment] ${describeEnvironment(envCfg)}`);
 
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   // Middleware with size safety limits
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+  // Cross-origin gate for the Vercel SPA -> Railway API split.
+  // Must run before any response is written (including preflight short-circuit).
+  app.use(corsMiddleware());
 
   // Global Telemetry & Request Timing
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -362,8 +368,6 @@ async function startServer() {
       res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
   });
-
-  // Get Structured Report
   app.get('/api/v1/research/:id/report', async (req: Request, res: Response) => {
     try {
       const tenantId = getUserId(req);
@@ -371,7 +375,7 @@ async function startServer() {
       if (!job) {
         return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
       }
-      const report = await DatabaseRepository.getReport(req.params.id, tenantId);
+      const report = await CacheLayer.getReportCached(req.params.id, tenantId);
       if (!report) {
         return res.status(202).json({
           status: job.status,

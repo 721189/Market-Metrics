@@ -1,0 +1,21 @@
+# Keep the build context lean: never ship deps, build output, secrets,
+# scratch/test artifacts, or platform-local config into the image.
+node_modules
+npm-debug.log
+dist
+.git
+.gitignore
+README.md
+.env
+.env.*
+!.env.example
+.vscode
+.idea
+*.md
+*.txt
+coverage
+src/tests
+.github
+firebase-applet-config.json
+firebase-blueprint.json
+.DS_Store

@@ -1,0 +1,97 @@
+# Local development stack: app (tsx hot reload) + Firestore emulator.
+#
+#   docker compose --profile dev up --build     # hot-reload dev against emulator
+#   docker compose --profile prod up --build    # production image smoke test
+#
+# Redis intentionally ABSENT (decision: Redis later, behind store
+# interfaces). When replicas>1 justifies it, add a `redis` service here and
+# a RedisRateLimitStore/RedisCostStore/RedisCacheStore behind the same
+# interfaces — no middleware changes required.
+#
+# Firestore emulator runs on :8080 with a named volume so local data
+# survives `docker compose down`.
+
+services:
+  app-dev:
+    profiles: ['dev']
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: market-metrics-app-dev
+    ports:
+      - '3000:3000'
+      - '24678:24678'
+    environment:
+      NODE_ENV: development
+      APP_ENV: development
+      PORT: 3000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-market-metrics-dev}
+      FIRESTORE_DATABASE_ID: ${FIRESTORE_DATABASE_ID:-(default)}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-localhost}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-market-metrics-dev.appspot.com}
+      APP_URL: http://localhost:3000
+      FIRESTORE_EMULATOR_HOST: firestore-emulator:8080
+      DISABLE_HMR: 'false'
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./server.ts:/app/server.ts:ro
+      - ./index.html:/app/index.html:ro
+      - /app/node_modules
+    depends_on:
+      firestore-emulator:
+        condition: service_started
+    networks:
+      - market-metrics
+    restart: unless-stopped
+
+  app-prod:
+    profiles: ['prod']
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: market-metrics-app-prod
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      APP_ENV: production
+      PORT: 3000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?set FIREBASE_PROJECT_ID for prod smoke}
+      FIRESTORE_DATABASE_ID: ${FIRESTORE_DATABASE_ID:-(default)}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:?set FIREBASE_AUTH_DOMAIN for prod smoke}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:?set STORAGE_BUCKET for prod smoke}
+      APP_URL: http://localhost:3000
+      GEMINI_CREDENTIAL_SOURCE: env:GEMINI_API_KEY
+      ADMIN_UIDS: ${ADMIN_UIDS:-}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
+    networks:
+      - market-metrics
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  firestore-emulator:
+    profiles: ['dev']
+    image: ghcr.io/firebase-extensions/firestore-emulator:latest
+    container_name: market-metrics-firestore
+    ports:
+      - '8080:8080'
+    volumes:
+      - firestore-data:/opt/data
+    networks:
+      - market-metrics
+    restart: unless-stopped
+
+volumes:
+  firestore-data:
+
+networks:
+  market-metrics:
+    driver: bridge
