@@ -26,6 +26,11 @@ import {
   rateLimiterByCategory,
   logEnvelope,
 } from './src/server/rate_limits.js';
+import {
+  validateEnvironmentOrThrow,
+  describeEnvironment,
+} from './src/server/environment.js';
+import { observabilitySnapshot } from './src/server/observability.js';
 
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
@@ -41,6 +46,17 @@ function getUserId(req: Request): string {
 }
 
 async function startServer() {
+  // ---------------------------------------------------------------------------
+  // DEPLOYMENT ISOLATION GATE (production hardening)
+  // ---------------------------------------------------------------------------
+  // Resolved before anything else binds a port, opens Firestore, or mounts
+  // routes. A missing resource identifier, a mislabelled environment, a
+  // production/staging collision, or an attempt to bind the AI Studio applet
+  // project from staging/production throws here — the process fails closed
+  // rather than serving traffic against the wrong tenant.
+  const envCfg = validateEnvironmentOrThrow();
+  console.log(`[Environment] ${describeEnvironment(envCfg)}`);
+
   const app = express();
   const PORT = 3000;
 
@@ -100,6 +116,22 @@ async function startServer() {
       persisted_jobs_count: jobs.length,
       queue: queueStats,
       version: '2.0.0',
+    });
+  });
+
+  // -------------------------------------------------------------
+  // OPERATIONAL METRICS (admin only)
+  // -------------------------------------------------------------
+  // adminPathBlocker() (installed before every route) returns 404 to any caller
+  // that is not an authenticated admin, so this handler is reachable only by an
+  // authorized operator. Front-end visibility is irrelevant — the authorization
+  // decision is made server-side, on every request.
+  app.get('/metrics', (req: Request, res: Response) => {
+    const snapshot = observabilitySnapshot();
+    res.status(200).json({
+      ...snapshot,
+      generated_at: new Date().toISOString(),
+      uptime_seconds: process.uptime(),
     });
   });
 
@@ -501,7 +533,7 @@ async function startServer() {
   // -------------------------------------------------------------
   // VITE MIDDLEWARE (Development & Static Production)
   // -------------------------------------------------------------
-  if (process.env.NODE_ENV !== 'production') {
+  if (envCfg.allowViteDevServer) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

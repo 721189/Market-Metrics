@@ -48,6 +48,15 @@ import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logEnvelope } from './rate_limits.js';
+import {
+  recordJobStarted,
+  recordJobCompleted,
+  recordJobFailed,
+  recordStageDuration,
+  recordCitationFailure,
+  recordVerificationFailure,
+  recordCostPerJob,
+} from './observability.js';
 
 export const pipelineEmitter = new EventEmitter();
 pipelineEmitter.setMaxListeners(500);
@@ -248,6 +257,10 @@ export class ResearchPipelineManager {
 
     const requestId = (job as any).request_id || `req-${job.id}`;
     const workerUserId = (job as any).user_id || 'unknown';
+    // Wall-clock start, so job_duration_ms measures the whole pipeline rather
+    // than only the stages that remember to report a duration.
+    const pipelineStartedAt = Date.now();
+    recordJobStarted({ job_id: job.id, user_id: workerUserId });
 
     function logStage(event: string, stage: string, status: string, message: string, durationMs?: number): void {
       logEnvelope(event, {
@@ -258,6 +271,11 @@ export class ResearchPipelineManager {
         status,
         duration_ms: durationMs,
       }, message);
+      // Stage latency is a first-class operational signal: it identifies WHICH
+      // stage degraded, not merely that the job got slower overall.
+      if (typeof durationMs === 'number') {
+        recordStageDuration(stage, durationMs, { job_id: job.id });
+      }
     }
 
     // -------------------------------------------------------------
@@ -657,10 +675,21 @@ export class ResearchPipelineManager {
 
     // Truthful claim statistics computed from actual verification outcomes.
     job.stats.claims_total = claims.length;
-    job.stats.claims_verified = verifiedClaims.filter(c => c.verification_status === 'SUPPORTED' || c.verification_status === 'PARTIALLY_SUPPORTED').length;
+    // With the earned-verification ladder, a claim counts as verified only when
+    // it cleared every evidence gate (SUPPORTED), or cleared them all but had
+    // extraction confidence below the support bar (CORROBORATED). PARTIALLY_
+    // SUPPORTED is no longer produced by the verifier.
+    const claimFullyGrounded = (status: string) => status === 'SUPPORTED' || status === 'CORROBORATED';
+    job.stats.claims_verified = verifiedClaims.filter(c => claimFullyGrounded(c.verification_status)).length;
     job.stats.claims_contradicted = verifiedClaims.filter(c => c.verification_status === 'CONTRADICTED').length;
     job.stats.claims_insufficient = verifiedClaims.filter(c => c.verification_status === 'INSUFFICIENT').length;
     job.stats.evidence_score = evidenceBreakdown.overall_score;
+
+    // A claim that could not reach SUPPORTED is a verification failure worth
+    // graphing: it is the leading indicator of evidence-quality problems, long
+    // before a user complains that a number looks wrong.
+    const unverifiedCount = verifiedClaims.filter(c => !claimFullyGrounded(c.verification_status)).length;
+    if (unverifiedCount > 0) recordVerificationFailure(unverifiedCount);
 
     const unitEcon = FinancialEngine.calculateUnitEconomics({
       arpu_annual: isIndia ? 48000 : 4800,
@@ -902,6 +931,7 @@ export class ResearchPipelineManager {
     const graphValidation = CitationGraphValidator.validate(finalReport);
     if (!graphValidation.valid) {
       const summary = graphValidation.errors.slice(0, 5).map(e => `${e.code}: ${e.message}`).join(' | ');
+      recordCitationFailure(job.id);
       throw new Error(`Citation graph validation failed (${graphValidation.errors.length} errors). Report withheld to preserve citation integrity. ${summary}`);
     }
 
@@ -913,6 +943,9 @@ export class ResearchPipelineManager {
 
     job.report = finalReport;
     job.status = 'COMPLETED';
+
+    recordJobCompleted(Date.now() - pipelineStartedAt, { job_id: job.id });
+    recordCostPerJob(costGovernor.snapshot(job.id).request.estimated_cost_usd, { job_id: job.id });
 
     await logAndEmitEvent(job, 'completed', 'GENERATING_REPORT', 'Intelligence dossier successfully generated, audited, and persisted to database.', 100, {
       report_id: job.id,
@@ -980,6 +1013,7 @@ export async function startWorker() {
         }
       } catch (err) {
         console.error(`[Queue] Job ${job.id} failed`, err);
+        recordJobFailed(String((job as any).current_stage || 'UNKNOWN'), { job_id: job.id });
         if (!leaseOwned) {
           console.log(`[Queue] Job ${job.id} failure after lease loss suppressed; new owner is responsible.`);
         } else if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {

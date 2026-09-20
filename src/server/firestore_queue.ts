@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { canTransition } from './job_state.js';
+import { recordLeaseRecovery, recordQueueDepth } from './observability.js';
 
 export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
 
@@ -38,6 +39,10 @@ export class FirestoreQueue {
         try {
             // Recover stale running jobs first (lease_version-verified, transactional per-job).
             await this.recoverStaleJobs();
+
+            // Record truthful queue depth via a count aggregation. This is a
+            // constant-cost server-side count — never a full collection scan.
+            await this.observeQueueDepth();
 
             return await adminDb.runTransaction(async (transaction) => {
                 const snap = await adminDb.collection(this.collectionName)
@@ -100,6 +105,32 @@ export class FirestoreQueue {
             });
         } catch (err: any) {
             console.error('[Queue] Error claiming next job:', err);
+            return null;
+        }
+    }
+
+    /**
+     * Publishes the current queue depth gauge.
+     *
+     * Uses the Firestore count() aggregation, which computes the total
+     * server-side in constant cost. This replaces the naive "read every queued
+     * document to count them" approach, which does not scale past a prototype
+     * and exposes the queue to read-amplification under load.
+     *
+     * Depth is a best-effort operational signal, so a transient failure is
+     * logged and swallowed rather than failing the claim path.
+     */
+    async observeQueueDepth(): Promise<number | null> {
+        try {
+            const aggregate = await adminDb.collection(this.collectionName)
+                .where('status', '==', 'QUEUED')
+                .count()
+                .get();
+            const depth = aggregate.data().count;
+            recordQueueDepth(depth);
+            return depth;
+        } catch (err) {
+            console.warn('[Queue] Failed to observe queue depth:', err);
             return null;
         }
     }
@@ -171,6 +202,10 @@ export class FirestoreQueue {
                 const recoveredOk = await this._recoverStaleJobTransaction(doc.id);
                 if (recoveredOk) recovered++;
             }
+            if (recovered > 0) {
+                recordLeaseRecovery(recovered);
+                console.warn(`[Queue] Recovered ${recovered} stale job(s) back to QUEUED.`);
+            }
             return recovered;
         } catch (err) {
             console.error('[Queue] Error in recoverStaleJobs:', err);
@@ -211,22 +246,22 @@ export class FirestoreQueue {
                     : (typeof data.leased_until === 'number' ? data.leased_until : -1);
                 if (leasedUntil > Date.now()) return false;
 
-                // IMPORTANT: lease_version recheck.
-                // A heartbeat may have extended this job's lease after our stale
-                // snapshot but before we reached this transaction. If the version
-                // changed, another worker's heartbeat won the race — do not reclaim.
-                // We treat any present lease_version as 'the version we must match'.
-                // Since we observed a stale snapshot where the lease was expired,
-                // we require that the current document still has the same lease state
-                // that made it eligible (i.e., no newer heartbeat bumped it).
-                // The safest conservative rule: only reclaim if the document still
-                // has a lease that is expired AND we can atomically clear it.
-                // To avoid races entirely, we only reclaim when worker_id is the
-                // same as when we considered it expired — but since multiple workers
-                // can see the same expired job, we instead rely on version + clear:
-                // we set status back to QUEUED and clear the lease atomically.
-                // Another worker can still race to claim it in claimNextJob (which
-                // checks status==='QUEUED'), and that's fine — that's the owned claim.
+                // The transactional re-read IS the race guard.
+                //
+                // A heartbeat may have extended this job's lease after the stale
+                // snapshot was taken but before this transaction ran. Because we
+                // re-read `leased_until` from the live document above, a heartbeat
+                // that landed in between makes `leasedUntil > Date.now()` true and
+                // this function returns false — the lease is NOT stolen.
+                //
+                // We deliberately do not compare `lease_version` here: recovery
+                // does not own a lease, so there is no version for it to prove.
+                // The version is the *owner's* proof of ownership (heartbeat /
+                // completion); recovery's proof is the live expired timestamp,
+                // checked atomically inside this transaction. Ownership of the
+                // reclaimed job is then established by claimNextJob, which
+                // verifies status === 'QUEUED' and assigns a fresh lease_id and
+                // lease_version = 1 atomically.
 
                 transaction.update(jobRef, {
                     status: 'QUEUED',

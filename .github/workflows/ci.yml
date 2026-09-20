@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_ENV: test
+  APP_ENV: test
+  CI: 'true'
+
+jobs:
+  verify:
+    name: Typecheck, security, unit, benchmark regression & build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node: ['20.x', '22.x']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+
+      - name: Install dependencies (lockfile-exact)
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Unit + emulator + security + benchmark tests
+        # A single entrypoint runs the whole suite: Firestore emulator harness,
+        # queue race/lease recovery, ownership & security rules, API auth &
+        # middleware, pipeline fixture, citation integrity, cost/artifact,
+        # concurrency & fault injection, precision hardening, E2E and load,
+        # plus golden-benchmark citation-graph validation.
+        run: npm test
+
+      - name: Environment isolation self-check
+        run: node -e "require('child_process')" && npx tsx -e "import('./src/server/environment.js').then(m=>{const c=m.validateEnvironmentOrThrow({APP_ENV:'test',FIREBASE_PROJECT_ID:'ci-project',FIRESTORE_DATABASE_ID:'ci-db',STORAGE_BUCKET:'ci-bucket',FIREBASE_AUTH_DOMAIN:'ci.firebaseapp.com'});console.log('isolated:',m.describeEnvironment(c));})"
+
+      - name: Build (client bundle + server bundle)
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node }}
+          path: dist
+          retention-days: 7
+
+  dependency-hygiene:
+    name: Forbidden-architecture guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail if abandoned stacks reappear
+        # The PostgreSQL/Drizzle/BullMQ/Redis architecture was deliberately
+        # removed. Guard against silent reintroduction.
+        run: |
+          set -e
+          for pkg in bullmq ioredis pg drizzle-orm drizzle-kit @types/pg; do
+            if grep -RIn --include='*.ts' --include='*.tsx' -E "from ['\"]${pkg}['\"]" src server.ts 2>/dev/null; then
+              echo "::error::Abandoned dependency '${pkg}' is imported again."
+              exit 1
+            fi
+            if node -e "const p=require('./package.json'); process.exit((p.dependencies&&p.dependencies['${pkg}'])||(p.devDependencies&&p.devDependencies['${pkg}'])?0:1)"; then
+              echo "::error::Abandoned dependency '${pkg}' reappeared in package.json."
+              exit 1
+            fi
+          done
+          echo "OK: no abandoned architecture dependencies present."

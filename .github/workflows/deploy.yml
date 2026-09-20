@@ -1,0 +1,135 @@
+name: Deploy
+
+# Promotion path: main -> CI -> staging -> smoke tests -> production.
+# Nothing reaches production without passing the same verify job CI runs.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      promote_to_production:
+        description: 'Promote the built artifact to production after staging smoke tests pass'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22.x'
+
+jobs:
+  verify:
+    name: Verify (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run lint
+      - name: Full test suite
+        run: npm test
+        env:
+          APP_ENV: test
+          NODE_ENV: test
+      - name: Build
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 14
+
+  staging:
+    name: Deploy to staging
+    needs: [verify]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Assert staging isolation (staging must not bind production)
+        env:
+          APP_ENV: staging
+          FIREBASE_PROJECT_ID: ${{ secrets.STAGING_FIREBASE_PROJECT_ID }}
+          FIRESTORE_DATABASE_ID: ${{ secrets.STAGING_FIRESTORE_DATABASE_ID }}
+          STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.STAGING_FIREBASE_AUTH_DOMAIN }}
+          GEMINI_API_KEY: ${{ secrets.STAGING_GEMINI_API_KEY }}
+          PRODUCTION_PROJECT_ID: ${{ secrets.PRODUCTION_FIREBASE_PROJECT_ID }}
+        run: npx tsx -e "import('./src/server/environment.js').then(m=>{const c=m.validateEnvironmentOrThrow();console.log('staging isolated:',m.describeEnvironment(c));})"
+      - name: Deploy to staging
+        run: echo "Deploy the verified dist/ artifact to the staging service."
+
+  smoke:
+    name: Staging smoke tests
+    needs: [staging]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - name: Smoke the staged service
+        env:
+          APP_ENV: test
+          STAGING_URL: ${{ vars.STAGING_URL }}
+        run: |
+          set -e
+          if [ -z "$STAGING_URL" ]; then
+            echo "::warning::STAGING_URL is not configured; running the local suite as the smoke gate."
+            npm test
+          else
+            curl -fsS "$STAGING_URL/api/health" > /dev/null
+            curl -fsS "$STAGING_URL/api/ready"  > /dev/null
+            echo "Health and readiness endpoints responded on staging."
+          fi
+
+  production:
+    name: Promote to production
+    needs: [smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.promote_to_production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Assert production isolation (production must not bind dev/staging)
+        env:
+          APP_ENV: production
+          FIREBASE_PROJECT_ID: ${{ secrets.PRODUCTION_FIREBASE_PROJECT_ID }}
+          FIRESTORE_DATABASE_ID: ${{ secrets.PRODUCTION_FIRESTORE_DATABASE_ID }}
+          STORAGE_BUCKET: ${{ secrets.PRODUCTION_STORAGE_BUCKET }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.PRODUCTION_FIREBASE_AUTH_DOMAIN }}
+          GEMINI_API_KEY: ${{ secrets.PRODUCTION_GEMINI_API_KEY }}
+        run: npx tsx -e "import('./src/server/environment.js').then(m=>{const c=m.validateEnvironmentOrThrow();console.log('production isolated:',m.describeEnvironment(c));})"
+      - name: Promote the staging-verified artifact
+        run: echo "Promote the staging-verified dist/ artifact to production."

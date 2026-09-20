@@ -12,6 +12,8 @@
 
 import { GoogleGenAI, Type } from '@google/genai';
 import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier, RiskFactor } from '../types.js';
+import { recordProviderCall } from './observability.js';
+import { logEnvelope } from './rate_limits.js';
 
 /**
  * Compact, serializable projection of a verified claim handed to every
@@ -44,25 +46,115 @@ export function getGemini(): GoogleGenAI | null {
   return aiClient;
 }
 
+/**
+ * Retry taxonomy (production hardening, item 13).
+ *
+ * Retrying every failure is wrong: a malformed request or an authorization
+ * failure will fail identically forever, wasting budget and delaying the user's
+ * error. Only genuinely transient conditions are retried.
+ *
+ * RETRYABLE   : 429, 5xx, transient network faults, provider outages,
+ *               Firestore/ABORTED contention.
+ * NON_RETRYABLE: 4xx validation/auth errors, SSRF-blocked fetches, malformed
+ *               model output, unsupported documents.
+ */
+export interface RetryClassification {
+  retryable: boolean;
+  reason: string;
+}
+
+const NON_RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
+  [/invalid[_ ]?argument|INVALID_ARGUMENT/i, 'invalid_request'],
+  [/permission[_ ]?denied|PERMISSION_DENIED/i, 'authorization_failure'],
+  [/unauthenticated|UNAUTHENTICATED|401/i, 'authentication_failure'],
+  [/not[_ ]?found|NOT_FOUND|404/i, 'unsupported_document'],
+  [/failed[_ ]?precondition|FAILED_PRECONDITION/i, 'invalid_request'],
+  [/ssrf|blocked[_ ]?destination/i, 'ssrf_blocked'],
+  [/malformed|invalid JSON|JSON parse|unexpected token/i, 'malformed_model_output'],
+];
+
+const RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
+  [/resource[_ ]?exhausted|RESOURCE_EXHAUSTED|429|rate limit/i, 'rate_limited'],
+  [/aborted|ABORTED|contention/i, 'contention'],
+  [/deadline[_ ]?exceeded|DEADLINE_EXCEEDED|timeout|ETIMEDOUT/i, 'timeout'],
+  [/unavailable|UNAVAILABLE|503|502|500|overloaded/i, 'provider_outage'],
+  [/ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up/i, 'transient_network'],
+];
+
+/**
+ * Classifies a provider/transport error as retryable or not. The classification
+ * is intentionally conservative: anything unrecognized is treated as
+ * NON-retryable so we never burn budget retrying a deterministic failure.
+ */
+export function classifyProviderError(err: any): RetryClassification {
+  const message = String(err?.message || err?.status || err || '');
+
+  // Explicit non-retryable signals win: a 401 that also mentions "unavailable"
+  // must not be retried.
+  for (const [pattern, reason] of NON_RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) return { retryable: false, reason };
+  }
+  for (const [pattern, reason] of RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) return { retryable: true, reason };
+  }
+  return { retryable: false, reason: 'unclassified_error' };
+}
+
+/**
+ * Executes a provider call with an explicit retry taxonomy, exponential backoff
+ * WITH jitter, and per-attempt observability (latency + error counters).
+ *
+ * Non-retryable failures fail fast. Retryable failures back off exponentially
+ * with jitter so a fleet of workers never synchronises into a thundering herd.
+ */
 export async function executeWithRetry<T>(
   fn: () => Promise<T>,
-  opts: { maxRetries?: number; baseDelayMs?: number } = {}
+  opts: { maxRetries?: number; baseDelayMs?: number; operation?: string } = {}
 ): Promise<T> {
   const maxRetries = opts.maxRetries || 3;
   const baseDelay = opts.baseDelayMs || 500;
+  const operation = opts.operation || 'provider_call';
 
   let lastError: any;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const startedAt = Date.now();
     try {
-      return await fn();
+      const result = await fn();
+      recordProviderCall(Date.now() - startedAt, true, { operation });
+      return result;
     } catch (err: any) {
       lastError = err;
+      const classification = classifyProviderError(err);
+      recordProviderCall(Date.now() - startedAt, false, {
+        operation,
+        reason: classification.reason,
+      });
+
+      // Never retry a deterministic failure — fail fast with the real reason.
+      if (!classification.retryable) {
+        logEnvelope('provider_call_failed', {
+          status: 'non_retryable',
+          duration_ms: Date.now() - startedAt,
+        }, `${operation}: ${classification.reason} (${attempt}/${maxRetries}): ${err?.message || err}`);
+        throw err;
+      }
+
       if (attempt === maxRetries) break;
-      const jitter = Math.random() * 200;
+
+      const jitter = Math.random() * baseDelay;
       const delay = baseDelay * Math.pow(2, attempt - 1) + jitter;
+      logEnvelope('provider_call_retry', {
+        status: 'retryable',
+        duration_ms: delay,
+      }, `${operation}: ${classification.reason}, retrying in ${Math.round(delay)}ms (attempt ${attempt}/${maxRetries})`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+
+  const finalReason = classifyProviderError(lastError).reason;
+  logEnvelope('provider_call_failed', {
+    status: 'retries_exhausted',
+  }, `${operation}: ${finalReason} after ${maxRetries} attempts: ${lastError?.message || lastError}`);
   throw lastError;
 }
 
