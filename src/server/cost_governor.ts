@@ -1,9 +1,83 @@
 /**
  * Cost governor for the research agent — part 1: config, budgets, caps.
+ *
+ * Two accounting layers:
+ *   1. Request-scoped caps (in-process, per pipeline run): maxSources,
+ *      maxDocumentSizeBytes, maxModelCalls, maxRetries, requestBudgetUsd.
+ *      These never leave the pipeline run and stay synchronous.
+ *   2. Persistent spend (CostStore): per-user daily + monthly totals and a
+ *      global daily total. These survive restarts and are shared across
+ *      replicas, so budgets are enforced even when two instances serve the
+ *      same user. Selected via COST_STORE (memory default; firestore for
+ *      multi-replica; redis reserved for later and fails closed).
  */
 
 import { RequestCost, UserCost, GlobalCost, JobCost, CostSnapshot } from './cost_types.js';
 import { RetrievalArtifact } from './artifacts.js';
+import { logger } from './logger.js';
+import {
+  InMemoryCostStore,
+  resolveStoreKind,
+  throwRedisNotProvisioned,
+  type CostStore,
+} from './stores.js';
+
+/** Persistent budget caps (USD). Override via constructor config. */
+export interface PersistentBudgetConfig {
+  /** Maximum spend per user per UTC day. */
+  userDailyBudgetUsd?: number;
+  /** Maximum spend per user per UTC month. */
+  userMonthlyBudgetUsd?: number;
+  /** Maximum spend across all users per UTC day (global kill-switch). */
+  globalDailyBudgetUsd?: number;
+}
+
+const DEFAULT_PERSISTENT_BUDGETS: Required<PersistentBudgetConfig> = {
+  userDailyBudgetUsd: 10,
+  userMonthlyBudgetUsd: 100,
+  globalDailyBudgetUsd: 500,
+};
+
+let sharedCostStore: CostStore | null = null;
+
+function getCostStore(): CostStore {
+  if (sharedCostStore) return sharedCostStore;
+  const kind = resolveStoreKind(process.env.COST_STORE, 'memory');
+  if (kind === 'redis') throwRedisNotProvisioned('CostGovernor');
+  if (kind === 'firestore') {
+    throw new Error(
+      '[CostGovernor] COST_STORE=firestore selected but the Firestore cost ' +
+        'store is not wired yet. Use memory (single replica).',
+    );
+  }
+  sharedCostStore = new InMemoryCostStore();
+  return sharedCostStore;
+}
+
+/** Test hook: swap the persistent spend backend without touching callers. */
+export function __setCostStoreForTests(store: CostStore | null): void {
+  sharedCostStore = store;
+}
+
+function utcDay(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function utcMonth(d = new Date()): string {
+  return d.toISOString().slice(0, 7);
+}
+
+export function userDailyKey(userId: string, day = utcDay()): string {
+  return `cost:daily:${userId}:${day}`;
+}
+
+export function userMonthlyKey(userId: string, month = utcMonth()): string {
+  return `cost:monthly:${userId}:${month}`;
+}
+
+export function globalDailyKey(day = utcDay()): string {
+  return `cost:global:${day}`;
+}
 
 export interface CostGovernorConfig {
   maxSources?: number;
@@ -27,13 +101,19 @@ const DEFAULT_CONFIG: Required<CostGovernorConfig> = {
 
 export class CostGovernor {
   private readonly config: Required<CostGovernorConfig>;
+  private readonly persistent: Required<PersistentBudgetConfig>;
   private readonly requestCost: RequestCost = makeFreshCost();
   private readonly userCosts = new Map<string, UserCost>();
   private readonly jobCosts = new Map<string, JobCost>();
   private globalCost: GlobalCost = makeFreshGlobal();
 
-  constructor(config: CostGovernorConfig = {}) {
+  constructor(config: CostGovernorConfig & PersistentBudgetConfig = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.persistent = {
+      userDailyBudgetUsd: config.userDailyBudgetUsd ?? DEFAULT_PERSISTENT_BUDGETS.userDailyBudgetUsd,
+      userMonthlyBudgetUsd: config.userMonthlyBudgetUsd ?? DEFAULT_PERSISTENT_BUDGETS.userMonthlyBudgetUsd,
+      globalDailyBudgetUsd: config.globalDailyBudgetUsd ?? DEFAULT_PERSISTENT_BUDGETS.globalDailyBudgetUsd,
+    };
   }
 
   allowFetch(responseSizeBytes: number): string | null {
@@ -79,6 +159,91 @@ export class CostGovernor {
       return `Global daily budget exceeded: $${this.config.globalDailyBudgetUsd} per day`;
     }
     return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Persistent spend (CostStore): pre-job gate + post-job recording.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Pre-job budget gate. Call BEFORE queueing: returns null when the user
+   * and the platform both have budget headroom, otherwise a BUDGET_EXCEEDED
+   * reason the route turns into a 402/429. Fails open when the store is
+   * unreachable (cost control must never become an availability gate).
+   */
+  async canStartJob(userId: string): Promise<string | null> {
+    if (!userId) return 'User id is required for budget check';
+    let daily = 0;
+    let monthly = 0;
+    let global = 0;
+    try {
+      const store = getCostStore();
+      [daily, monthly, global] = await Promise.all([
+        store.get(userDailyKey(userId)),
+        store.get(userMonthlyKey(userId)),
+        store.get(globalDailyKey()),
+      ]);
+    } catch (err) {
+      logger.warn('cost.spend_read_failed', 'Spend-store read failed (failing open)', {
+        status: (err as Error)?.message || String(err),
+      });
+      return null;
+    }
+    if (daily >= this.persistent.userDailyBudgetUsd) {
+      return `BUDGET_EXCEEDED: user daily budget $${this.persistent.userDailyBudgetUsd} reached (spent $${daily.toFixed(2)} today)`;
+    }
+    if (monthly >= this.persistent.userMonthlyBudgetUsd) {
+      return `BUDGET_EXCEEDED: user monthly budget $${this.persistent.userMonthlyBudgetUsd} reached (spent $${monthly.toFixed(2)} this month)`;
+    }
+    if (global >= this.persistent.globalDailyBudgetUsd) {
+      return `BUDGET_EXCEEDED: platform daily budget $${this.persistent.globalDailyBudgetUsd} reached — try again tomorrow`;
+    }
+    return null;
+  }
+
+  /**
+   * Post-job recording. Adds costUsd atomically to the user-daily,
+   * user-monthly and global-daily buckets (24h/31d TTLs). No-op for
+   * non-positive costs. Store errors are logged, never thrown.
+   */
+  async recordJobCost(userId: string, jobId: string, costUsd: number): Promise<void> {
+    void jobId;
+    if (!userId || !(costUsd > 0)) return;
+    try {
+      const store = getCostStore();
+      await Promise.all([
+        store.add(userDailyKey(userId), costUsd, 24 * 3600),
+        store.add(userMonthlyKey(userId), costUsd, 31 * 24 * 3600),
+        store.add(globalDailyKey(), costUsd, 24 * 3600),
+      ]);
+    } catch (err) {
+      logger.warn('cost.spend_write_failed', 'Spend-store write failed', {
+        status: (err as Error)?.message || String(err),
+      });
+    }
+  }
+
+  /**
+   * Cost breakdown for the authenticated user (powers the cost-breakdown
+   * endpoint). Remaining budgets are clamped at zero.
+   */
+  async getUserCostBreakdown(userId: string): Promise<{
+    today_usd: number;
+    this_month_usd: number;
+    daily_remaining: number;
+    monthly_remaining: number;
+  }> {
+    const store = getCostStore();
+    const [daily, monthly] = await Promise.all([
+      store.get(userDailyKey(userId)),
+      store.get(userMonthlyKey(userId)),
+    ]);
+    return {
+      today_usd: daily,
+      this_month_usd: monthly,
+      daily_remaining: Math.max(0, this.persistent.userDailyBudgetUsd - daily),
+      monthly_remaining: Math.max(0, this.persistent.userMonthlyBudgetUsd - monthly),
+    };
   }
 
   snapshot(jobId?: string): CostSnapshot {

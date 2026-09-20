@@ -188,6 +188,17 @@ export class ResearchPipelineManager {
    */
   public static async createAndRunJob(req: ResearchJobRequest, userId: string): Promise<ResearchJob> {
     if (!userId) throw new Error('userId is required for createAndRunJob');
+
+    // Pre-queue budget gate: refuse BEFORE a job id is minted or anything is
+    // persisted, so an over-budget user never occupies queue or worker time.
+    // Fail-open lives inside canStartJob (store outage => allow).
+    const budgetBlock = await new CostGovernor().canStartJob(userId);
+    if (budgetBlock) {
+      const err = new Error(budgetBlock) as Error & { code?: string };
+      err.code = 'BUDGET_EXCEEDED';
+      throw err;
+    }
+
     const jobId = `job-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
@@ -950,7 +961,9 @@ export class ResearchPipelineManager {
     job.status = 'COMPLETED';
 
     recordJobCompleted(Date.now() - pipelineStartedAt, { job_id: job.id });
-    recordCostPerJob(costGovernor.snapshot(job.id).request.estimated_cost_usd, { job_id: job.id });
+    // userId threads through so the spend persists into the CostStore and
+    // the next canStartJob() call for this user sees the real total.
+    recordCostPerJob(costGovernor.snapshot(job.id).request.estimated_cost_usd, { job_id: job.id }, userId);
 
     await logAndEmitEvent(job, 'completed', 'GENERATING_REPORT', 'Intelligence dossier successfully generated, audited, and persisted to database.', 100, {
       report_id: job.id,

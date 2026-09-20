@@ -27,12 +27,14 @@ import {
   logEnvelope,
 } from './src/server/rate_limits.js';
 import { corsMiddleware } from './src/server/cors.js';
+import { logger } from './src/server/logger.js';
 import {
   validateEnvironmentOrThrow,
   describeEnvironment,
 } from './src/server/environment.js';
 import { observabilitySnapshot } from './src/server/observability.js';
 import { CacheLayer } from './src/server/cache.js';
+import { CostGovernor } from './src/server/cost_governor.js';
 
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
@@ -57,7 +59,9 @@ async function startServer() {
   // project from staging/production throws here — the process fails closed
   // rather than serving traffic against the wrong tenant.
   const envCfg = validateEnvironmentOrThrow();
-  console.log(`[Environment] ${describeEnvironment(envCfg)}`);
+  logger.info('boot.environment', `Environment resolved`, {
+    status: describeEnvironment(envCfg),
+  });
 
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
@@ -70,18 +74,26 @@ async function startServer() {
   // Must run before any response is written (including preflight short-circuit).
   app.use(corsMiddleware());
 
-  // Global Telemetry & Request Timing
+  // Structured request logging (Railway drains stdout; JSON lines in prod).
+  // Replaces the previous empty timing block: every API response now emits
+  // method/path/status/duration + user, and slow requests warn separately.
   app.use((req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
-    
 
     res.on('finish', () => {
-      
       const duration = Date.now() - start;
-      
-
-      if (res.statusCode >= 400 && req.path.startsWith('/api')) {
-        
+      const userId = (req as any).user?.uid;
+      const fields = {
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        duration_ms: duration,
+        ...(userId ? { user_id: userId } : {}),
+      };
+      if (duration > 10000) {
+        logger.warn('http.slow_request', 'Slow request detected', fields);
+      } else {
+        logger.info('http.request', 'HTTP request completed', fields);
       }
     });
 
@@ -205,7 +217,15 @@ async function startServer() {
         created_at: job.created_at,
       });
     } catch (err: any) {
-      console.error('Error creating research job:', err);
+      if (err?.code === 'BUDGET_EXCEEDED') {
+        return res.status(402).json({
+          error: { code: 'BUDGET_EXCEEDED', message: err.message },
+        });
+      }
+      logger.error('research.create_failed', 'Error creating research job', {
+        user_id: (req as any).user?.uid,
+        status: 500,
+      });
       res.status(500).json({
         error: { code: 'INTERNAL_ERROR', message: err.message || 'Failed to initialize research job' },
       });
@@ -220,6 +240,17 @@ async function startServer() {
       res.json({ jobs, total: jobs.length });
     } catch (err: any) {
       res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+    }
+  });
+
+  // Authenticated cost breakdown (persistent spend: user daily + monthly).
+  app.get('/api/v1/user/cost-breakdown', async (req: Request, res: Response) => {
+    try {
+      const tenantId = getUserId(req);
+      const breakdown = await new CostGovernor().getUserCostBreakdown(tenantId);
+      res.json(breakdown);
+    } catch (err: any) {
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
     }
   });
 
@@ -552,10 +583,16 @@ async function startServer() {
   }
 
   // Start background queue worker
-  startWorker().catch(err => console.error('[Queue Worker] Fatal error:', err));
+  startWorker().catch(err =>
+    logger.error('worker.fatal', '[Queue Worker] Fatal error', {
+      status: (err as Error)?.message || String(err),
+    }),
+  );
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Market Intelligence Agent V2 running on http://0.0.0.0:${PORT}`);
+    logger.info('boot.listening', `Market Intelligence Agent V2 running`, {
+      status: `http://0.0.0.0:${PORT}`,
+    });
   });
 }
 

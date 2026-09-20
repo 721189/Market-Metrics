@@ -5,6 +5,7 @@ import {
   throwRedisNotProvisioned,
   type RateLimitStore,
 } from './stores.js';
+import { logger } from './logger.js';
 
 /**
  * Server-side administrative path lockdown.
@@ -171,7 +172,9 @@ export function rateLimiterByCategory(
     try {
       verdict = await getRateLimitStore().hit(key, budget.maxRequests, budget.windowSec);
     } catch (err) {
-      console.error('[RateLimit] store error (failing open):', (err as Error)?.message || err);
+      logger.warn('ratelimit.store_error', 'Rate-limit store error (failing open)', {
+        status: (err as Error)?.message || String(err),
+      });
       return next();
     }
 

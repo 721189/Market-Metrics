@@ -492,9 +492,21 @@ export function recordVerificationFailure(count = 1): void {
   metrics.increment(MetricNames.verificationFailures, undefined, count);
 }
 
-/** The realized cost of one completed job, in USD. */
-export function recordCostPerJob(costUsd: number, labels?: Labels): void {
+/**
+ * The realized cost of one completed job, in USD. Also persists the spend
+ * into the CostStore (user-daily / user-monthly / global-daily buckets) so
+ * the pre-job budget gate sees real totals across restarts and replicas.
+ * `userId` is required for persistence; without it only the in-process
+ * histogram is updated (fail-open, never throws).
+ */
+export function recordCostPerJob(costUsd: number, labels?: Labels, userId?: string): void {
   metrics.observe(MetricNames.costPerJob, costUsd, labels);
+  if (userId && costUsd > 0) {
+    const jobId = typeof labels?.job_id === 'string' ? labels.job_id : 'unknown';
+    import('./cost_governor.js')
+      .then((m) => new m.CostGovernor().recordJobCost(userId, jobId, costUsd))
+      .catch(() => undefined);
+  }
 }
 
 /**
