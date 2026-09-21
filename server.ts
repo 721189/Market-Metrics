@@ -33,6 +33,7 @@ import {
   describeEnvironment,
 } from './src/server/environment.js';
 import { observabilitySnapshot } from './src/server/observability.js';
+import { startMetricsFlusher } from './src/server/ops_metrics.js';
 import { CacheLayer } from './src/server/cache.js';
 import { CostGovernor } from './src/server/cost_governor.js';
 
@@ -58,10 +59,16 @@ async function startServer() {
   // production/staging collision, or an attempt to bind the AI Studio applet
   // project from staging/production throws here — the process fails closed
   // rather than serving traffic against the wrong tenant.
-  const envCfg = validateEnvironmentOrThrow();
+    const envCfg = validateEnvironmentOrThrow();
   logger.info('boot.environment', `Environment resolved`, {
     status: describeEnvironment(envCfg),
   });
+
+  // Start the background metrics persistence flusher (Firestore sharded docs).
+  // Persistence failures are logged, never thrown — observability must not break
+  // serving. In development without Firestore, the flusher is a safe no-op
+  // (the flush catches its own errors).
+  startMetricsFlusher();
 
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
