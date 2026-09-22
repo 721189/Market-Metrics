@@ -118,11 +118,11 @@ Key risks include escalating data center energy costs and supply chain constrain
 
   // Test 6.8: Unknown publication date must be null (never fabricated as "now")
   const noDateHtml = `<html><head><title>No metadata page</title></head><body><p>Plain content without any date metadata whatsoever.</p></body></html>`;
-  // NOTE: `Headers` is NOT constructed here. `new Headers()` is an undici
-  // global whose constructor reads Node 20+ internals that crash tsx's
-  // module-graph evaluation inside CI (~1s abort, no test output). Only a
-  // structurally-compatible `{ get() }` object is needed, so pass a plain
-  // stub. (Runtime fetches still use real Headers objects.)
+  // NOTE: `Headers` is NOT constructed here. Only a structurally-compatible
+  // `{ get() }` object is needed, so pass a plain stub. (Runtime fetches still
+  // use real Headers objects. Node >= 22 is now the supported floor —
+  // firebase-admin@14 requires it — so this stub also keeps the suite off
+  // newer-undici constructor paths entirely.)
   const noDateHeaders = { get: (_name: string) => null } as unknown as Headers;
   const unknownDate = RealDocumentFetcher.extractPublicationDate(noDateHtml, noDateHeaders);
   if (unknownDate !== null) {
