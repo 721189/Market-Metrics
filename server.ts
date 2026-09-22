@@ -36,6 +36,10 @@ import { observabilitySnapshot } from './src/server/observability.js';
 import { startMetricsFlusher } from './src/server/ops_metrics.js';
 import { CacheLayer } from './src/server/cache.js';
 import { CostGovernor } from './src/server/cost_governor.js';
+import {
+  getStreamTicketStore,
+  STREAM_TICKET_TTL_MS,
+} from './src/server/stream_tickets.js';
 
 import { researchQueue } from './src/server/firestore_queue.js';
 import { BENCHMARKS } from './src/server/benchmarks.js';
@@ -43,7 +47,10 @@ import { BENCHMARKS } from './src/server/benchmarks.js';
 dotenv.config();
 
 function getUserId(req: Request): string {
-  const userId = (req as any).user?.uid || (req.headers['x-user-id'] as string);
+  // Identity comes ONLY from the verified Firebase ID token. There is no
+  // X-User-Id fallback, no default user, and no default tenant — a missing
+  // authenticated identity is an authorization failure, not a default.
+  const userId = (req as any).user?.uid;
   if (!userId) {
     throw new Error('Unauthorized: Missing authenticated user ID');
   }
@@ -131,14 +138,15 @@ async function startServer() {
   });
 
   app.get('/ready', async (req: Request, res: Response) => {
-    const jobs = await ResearchPipelineManager.listJobs('system-health');
+    // Readiness must not fabricate a tenant. Queue depth is tenant-independent
+    // and comes from the queue collection; per-tenant job counts are not
+    // probed here (that would require inventing an identity).
     const queueStats = await researchQueue.getStats();
 
     res.status(200).json({
       status: 'ready',
       gemini_configured: Boolean(process.env.GEMINI_API_KEY),
       environment: process.env.NODE_ENV || 'development',
-      persisted_jobs_count: jobs.length,
       queue: queueStats,
       version: '2.0.0',
     });
@@ -187,7 +195,12 @@ async function startServer() {
   // -------------------------------------------------------------
   // RESEARCH JOBS API (MULTI-TENANT ENFORCED)
   // -------------------------------------------------------------
+  // authMiddleware is mounted on /api/v1/research (below) AND on the
+  // /api/v1/user scope: cost breakdowns are tenant-confidential and must not
+  // be reachable through an unauthenticated path. Public entry points
+  // (/health, /ready, /metrics-behind-admin, /api/v1/benchmarks) stay outside.
   app.use('/api/v1/research', authMiddleware);
+  app.use('/api/v1/user', authMiddleware);
 
   app.post('/api/v1/research', async (req: Request, res: Response) => {
     try {
@@ -299,22 +312,27 @@ async function startServer() {
     }
   });
 
-  // Server-Sent Events (SSE) stream for live job progress with Heartbeat Keep-Alive & Last-Event-ID resume
+  // Server-Sent Events (SSE): EventSource cannot send Authorization headers and
+  // query-string Firebase tokens are rejected by authMiddleware, so live
+  // progress uses short-lived single-use stream tickets (see the
+  // stream-ticket route below). `?token=` Firebase ID tokens are NOT accepted
+  // here. Authenticated identity comes from the consumed ticket only.
   app.get('/api/v1/research/:id/events', async (req: Request, res: Response) => {
     const jobId = req.params.id;
-    const token = req.query.token as string;
-    let tenantId = 'default_tenant';
-
-    try {
-      if (token) {
-        const decoded = await getAdminApp().auth().verifyIdToken(token);
-        tenantId = decoded.uid;
-      } else {
-        tenantId = (req as any).user?.uid || 'default_tenant';
-      }
-    } catch (e) {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid token in query' } });
+    const ticket = req.query.ticket as string | undefined;
+    if (!ticket) {
+      return res.status(401).json({
+        error: { code: 'UNAUTHORIZED', message: 'SSE requires a stream ticket. POST /api/v1/research/:id/stream-ticket with a Bearer token first.' },
+      });
     }
+
+    const consumed = await getStreamTicketStore().consume(ticket, jobId);
+    if (!consumed) {
+      return res.status(401).json({
+        error: { code: 'UNAUTHORIZED', message: 'Invalid, expired, or already-used stream ticket' },
+      });
+    }
+    const tenantId = consumed.userId;
 
     const job = await ResearchPipelineManager.getJob(jobId, tenantId);
 
@@ -330,12 +348,13 @@ async function startServer() {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
-    // Check Last-Event-ID header for automatic resume.
-    // The SSE id field is the event's sequence number (string token), so we
-    // resume from the last seen sequence rather than a numeric event identity.
-    const lastEventIdHeader = (req.headers['last-event-id'] as string) || '0';
-    const lastSequence = Number(lastEventIdHeader);
-    const afterSequence = Number.isFinite(lastSequence) ? lastSequence : 0;
+    // Resume point. Last-Event-ID is the browser's native resume header; the
+    // `after` query param covers the client's own reconnect path (a fresh
+    // single-use ticket cannot carry last-event-id).
+    const lastEventIdHeader = (req.headers['last-event-id'] as string) || '';
+    const afterQuery = (req.query.after as string) || '';
+    const parsed = Number(lastEventIdHeader || afterQuery || 0);
+    const afterSequence = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 
     // Send all existing events first (already sorted by sequence in DB).
     const existingEvents = await ResearchPipelineManager.getEvents(jobId, afterSequence, tenantId);
@@ -369,14 +388,38 @@ async function startServer() {
     });
   });
 
-  // Get Sources
-  app.get('/api/v1/research/:id/sources', async (req: Request, res: Response) => {
-    const tenantId = (req as any).user?.uid || 'default_tenant';
-    const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
-    if (!job || !job.report) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+  // Stream ticket issuance: authenticated callers mint a 60s single-use ticket
+  // bound to (userId, jobId). The browser passes it as ?ticket= to the SSE
+  // route because EventSource cannot send Authorization headers. The Firebase
+  // ID token itself must NEVER appear in a URL (logs, history, referers).
+  app.post('/api/v1/research/:id/stream-ticket', async (req: Request, res: Response) => {
+    try {
+      const tenantId = getUserId(req);
+      const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
+      if (!job) {
+        return res.status(404).json({
+          error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
+        });
+      }
+      const ticket = await getStreamTicketStore().issue(req.params.id, tenantId, STREAM_TICKET_TTL_MS);
+      res.json({ ticket: ticket.ticket, expires_at: ticket.expiresAt });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
     }
-    res.json({ sources: job.report.sources, count: job.report.sources.length });
+  });
+
+  // Get Sources — authenticated tenant only; no default-tenant fallback.
+  app.get('/api/v1/research/:id/sources', async (req: Request, res: Response) => {
+    try {
+      const tenantId = getUserId(req);
+      const job = await ResearchPipelineManager.getJob(req.params.id, tenantId);
+      if (!job || !job.report) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Report or job not found' } });
+      }
+      res.json({ sources: job.report.sources, count: job.report.sources.length });
+    } catch (err: any) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+    }
   });
 
   // Get Evidence Pool

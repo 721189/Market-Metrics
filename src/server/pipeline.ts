@@ -135,23 +135,28 @@ async function logAndEmitEvent(
 
 export class ResearchPipelineManager {
   /**
-   * List all jobs from persistent DB
+   * List all jobs from persistent DB. userId is REQUIRED — there is no
+   * default tenant: an unauthenticated caller must be rejected at the route,
+   * never silently scoped to shared data.
    */
-  public static async listJobs(userId: string = 'default_tenant'): Promise<ResearchJob[]> {
+  public static async listJobs(userId: string): Promise<ResearchJob[]> {
+    if (!userId) throw new Error('userId is required for listJobs');
     return await DatabaseRepository.listJobs(50, userId);
   }
 
   /**
-   * Get specific job
+   * Get specific job. userId is REQUIRED (same invariant as listJobs).
    */
-  public static async getJob(jobId: string, userId: string = 'default_tenant'): Promise<ResearchJob | null> {
+  public static async getJob(jobId: string, userId: string): Promise<ResearchJob | null> {
+    if (!userId) throw new Error('userId is required for getJob');
     return await DatabaseRepository.getJob(jobId, userId);
   }
 
   /**
-   * Get telemetry events for SSE
+   * Get telemetry events for SSE. userId is REQUIRED (same invariant).
    */
-  public static async getEvents(jobId: string, afterId: number = 0, userId: string = 'default_tenant'): Promise<ResearchEvent[]> {
+  public static async getEvents(jobId: string, afterId: number = 0, userId: string): Promise<ResearchEvent[]> {
+    if (!userId) throw new Error('userId is required for getEvents');
     const job = await DatabaseRepository.getJob(jobId, userId);
     if (!job) return [];
     return await DatabaseRepository.getEvents(jobId, afterId);

@@ -22,6 +22,8 @@ import { runCitationIntegrityTest } from './citation_integrity.test.js';
 import { runPrecisionHardeningTest } from './precision_hardening.test.js';
 import { runCostArtifactTest } from './cost_artifact_integration.test.js';
 import { observabilityChecks } from './observability_part1.js';
+import { p0IdentityChecks } from './p0_identity_tickets.test.js';
+import { p0IdentityStaticChecks } from './p0_identity_part2.js';
 import { runConcurrencyTest } from './concurrency.test.js';
 import { runDeployLayerTest } from './deploy_layer_part3.js';
 import { runBenchmarkCorpusTest } from './benchmark.test.js';
@@ -85,6 +87,20 @@ export async function runAllTests() {
         if (!ok) throw new Error(`Observability check failed: ${check.name}`);
       }
       return { passed: true, message: `All ${observabilityChecks.length} observability invariants passed.` };
+    } },
+    { name: 'P0 Identity & SSE Tickets (runtime)', fn: async () => {
+      for (const check of p0IdentityChecks) {
+        const ok = await check.fn();
+        if (!ok) throw new Error(`P0 identity check failed: ${check.name}`);
+      }
+      return { passed: true, message: `All ${p0IdentityChecks.length} ticket invariants passed.` };
+    } },
+    { name: 'P0 Identity & SSE Tickets (static guards)', fn: async () => {
+      for (const check of p0IdentityStaticChecks) {
+        const ok = await check.fn();
+        if (!ok) throw new Error(`P0 static guard failed: ${check.name}`);
+      }
+      return { passed: true, message: `All ${p0IdentityStaticChecks.length} source guards passed.` };
     } },
     { name: '9. Playwright / E2E Simulation Test', fn: runE2ETest },
     { name: '10. Real Deployment Load Test', fn: runDeploymentLoadTest },

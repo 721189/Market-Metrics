@@ -126,16 +126,50 @@ export default function App() {
     }
   };
 
-  const subscribeToEvents = async (jobId: string) => {
+  const subscribeToEvents = async (jobId: string, resumeAfter = 0) => {
     eventSourceRef.current?.close();
 
-    const token = await user?.getIdToken();
-    const es = new EventSource(`/api/v1/research/${jobId}/events?token=${token}`);
+    // SSE cannot carry an Authorization header, and the Firebase ID token must
+    // never travel in a URL. Mint a 60s single-use ticket over an authenticated
+    // request, then hand only that ticket to EventSource.
+    let ticket: string | undefined;
+    try {
+      const headers = await getHeaders();
+      const res = await fetch(`/api/v1/research/${jobId}/stream-ticket`, {
+        method: 'POST',
+        headers,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        ticket = data.ticket;
+      } else {
+        console.error('Could not obtain stream ticket:', res.status);
+        return;
+      }
+    } catch (err) {
+      console.error('Stream ticket request failed:', err);
+      return;
+    }
+
+    // `after` resumes a re-established stream: tickets are single-use and a new
+    // EventSource cannot replay Last-Event-ID, so the client carries the last
+    // sequence number it has seen.
+    const es = new EventSource(
+      `/api/v1/research/${jobId}/events?ticket=${ticket}&after=${resumeAfter}`
+    );
     eventSourceRef.current = es;
+    let lastSequence = resumeAfter;
+    let terminal = false;
 
     es.onmessage = async (e) => {
       try {
         const evt: ResearchEvent = JSON.parse(e.data);
+        if (typeof evt.sequence === 'number' && evt.sequence > lastSequence) {
+          lastSequence = evt.sequence;
+        }
+        if (evt.event_type === 'completed' || evt.event_type === 'error') {
+          terminal = true;
+        }
         setEvents(prev => {
           if (prev.some(x => x.id === evt.id)) return prev;
           return [...prev, evt];
@@ -158,7 +192,19 @@ export default function App() {
     };
 
     es.onerror = () => {
-      // Reconnect handled natively by browser
+      // The browser's native retry reuses the same URL — and the ticket in it
+      // has already been consumed, so it would 401 forever. Close and
+      // re-subscribe with a fresh ticket instead, resuming from the last
+      // sequence we actually processed. A terminal event means the server
+      // closed the stream deliberately: do not reconnect.
+      if (terminal) return;
+      es.close();
+      if (eventSourceRef.current !== es) return; // superseded by a newer call
+      setTimeout(() => {
+        if (eventSourceRef.current === es) {
+          subscribeToEvents(jobId, lastSequence);
+        }
+      }, 1500);
     };
   };
 
@@ -240,8 +286,27 @@ export default function App() {
 
   const handleExportJson = async () => {
     if (!currentJob) return;
-    const token = await user?.getIdToken();
-    window.open(`/api/v1/research/${currentJob.id}/export/json?token=${token}`, '_blank');
+    // Bearer header + programmatic download. The Firebase ID token is never
+    // placed in a URL (previous behaviour used ?token=<idToken>).
+    try {
+      const headers = await getHeaders();
+      const res = await fetch(`/api/v1/research/${currentJob.id}/export/json`, { headers });
+      if (!res.ok) {
+        console.error('JSON export failed:', res.status);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `research-${currentJob.id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('JSON export failed:', err);
+    }
   };
 
   if (loading) {

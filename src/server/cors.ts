@@ -43,7 +43,7 @@ export function corsMiddleware() {
       if (allowed) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-Idempotency-Key,X-User-Id');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-Idempotency-Key');
         res.setHeader('Access-Control-Max-Age', '600');
         return res.status(204).end();
       }

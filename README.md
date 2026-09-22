@@ -300,8 +300,38 @@ Event identity and event ordering are separate concerns, deliberately:
 Ordering and resume use `sequence` (`afterSequence`), so a reconnecting browser replays exactly
 the events it missed. The stream sets `Cache-Control: no-cache, no-transform` and
 `X-Accel-Buffering: no` so no proxy buffers progress away, and keeps a heartbeat so idle
-connections are not reaped. Authentication is by Bearer token; a token supplied in the query
-string is explicitly rejected.
+connections are not reaped.
+
+**Authentication is by ticket, not by URL token.** `EventSource` cannot send
+`Authorization` headers, and a Firebase ID token in a query string would leak a long-lived
+credential into access logs, browser history and `Referer` headers — which is exactly why
+`authMiddleware` rejects `?token=`. The stream therefore works like this:
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as API (authenticated)
+    participant F as Ticket store
+    B->>A: POST /research/:id/stream-ticket (Bearer ID token)
+    A->>F: issue sha256(ticket) → {user, job, exp+60s, used:false}
+    A-->>B: { ticket, expires_at }
+    B->>A: GET /events?ticket=... (EventSource)
+    A->>F: consume(ticket, jobId) — transaction, single-use
+    F-->>A: { user } or null
+    A-->>B: event-stream (replay by sequence, then live)
+```
+
+Properties that make this safe rather than merely convenient:
+
+| Property | Why it matters |
+|---|---|
+| **60s TTL** | A leaked ticket is worthless almost immediately |
+| **Single use** | Consumed inside a transaction — a replay is refused |
+| **Hashed at rest** | The stored value is `sha256(ticket)`, so a datastore read yields no usable ticket |
+| **Bound to `(user, job)`** | A ticket for job A cannot open job B; a wrong-job probe is refused *without* consuming, so it cannot be used to kill a legitimate stream |
+| **Shared store in production** | `STREAM_TICKET_STORE` defaults to Firestore in production, so a ticket minted by one replica is consumable exactly once by another |
+| **Client reconnect** | The browser cannot replay `Last-Event-ID` on a new URL, so the client carries the last `sequence` and re-mints a ticket; a terminal event closes the stream deliberately |
+| **Export downloads** | `GET /export/json` is fetched with the Bearer header and saved as a Blob — the ID token never enters a URL |
 
 ---
 
@@ -394,6 +424,14 @@ flowchart LR
 | 4 | Global limiter | Coarse flood backstop | Fail open |
 | 5 | `authMiddleware` | Unauthenticated and forged tokens | Deny (401) |
 | 6 | Tenant scoping | Cross-tenant reads and writes | Deny (404 — existence is not leaked) |
+
+**Identity has exactly one source.** `getUserId(req)` reads `req.user.uid` — the UID from the
+verified Firebase ID token — and throws otherwise. There is no `X-User-Id` fallback, no default
+user, and no `default_tenant`: a missing identity is an authorization failure, never a silent
+scope. `authMiddleware` is mounted on both `/api/v1/research` and `/api/v1/user`, so
+tenant-confidential endpoints (cost breakdowns, job lists, reports, exports) sit behind the same
+gate. Two static guards in the test suite assert this shape so the escape hatch cannot return:
+the header is never read, and neither `server.ts` nor the pipeline reintroduces a default tenant.
 
 **Admin gating is server-side, and the front end is irrelevant.** `adminPathBlocker` is
 installed *before* every route, so `/metrics` is reachable only by an authenticated operator.
@@ -669,7 +707,8 @@ is not leaked.
 | `GET` | `/api/v1/research` | List this tenant's jobs |
 | `GET` | `/api/v1/research/:id` | Job state, progress, current stage |
 | `POST` | `/api/v1/research/:id/cancel` | Cancel. Fires the `AbortController` and stops in-flight work |
-| `GET` | `/api/v1/research/:id/events` | **SSE** live progress with heartbeat and resume |
+| `POST` | `/api/v1/research/:id/stream-ticket` | Mint a 60s **single-use** SSE ticket bound to (user, job). Required before opening the stream |
+| `GET` | `/api/v1/research/:id/events` | **SSE** live progress with heartbeat and resume. Requires `?ticket=` (never a Firebase ID token) |
 | `GET` | `/api/v1/research/:id/sources` | Source catalog with authority tier and `fetch_status` |
 | `GET` | `/api/v1/research/:id/evidence` | Evidence pool with quotes, offsets and provenance |
 | `GET` | `/api/v1/research/:id/claims` | Atomic claims with verification status and reasoning |
@@ -789,7 +828,11 @@ Documentation that only lists strengths is marketing. These are the real limits:
 
 | Boundary | Reality |
 |---|---|
-| **Single replica** | `RATE_LIMIT_STORE`, `COST_STORE` and `CACHE_STORE` are `memory` by default. Budgets and rate limits are therefore **per-process** until a persistent store is wired. `COST_STORE=firestore` is not yet implemented and `redis` is not provisioned — both fail closed rather than silently under-enforcing |
+| **Single replica** | `RATE_LIMIT_STORE`, `COST_STORE` and `CACHE_STORE` are `memory` by default. Budgets and rate limits are therefore **per-process** until a persistent store is wired. `COST_STORE=firestore` is not yet implemented and `redis` is not provisioned — both fail closed rather than silently under-enforcing. **SSE stream tickets are the exception:** they default to Firestore in production, so single-use semantics already hold across replicas |
+| **Idempotency is in-process** | `idempotencyMiddleware` keys responses in a `Map` with no user scoping: it is lost on restart, is not shared across replicas, and a key collision between two users could replay the wrong response. **Do not treat it as a safety mechanism for expensive jobs yet** — persist it as `sha256(user_id + endpoint + key)` before exposing `POST /research` publicly |
+| **Raw artifacts are in memory** | `InMemoryArtifactStorage` is the only implementation. The `ArtifactStorage` interface, the blob metadata record, and `STORAGE_BUCKET` are all in place, but until an object-storage adapter is wired, **raw source documents do not survive a restart** — the structured graph (citations, offsets, hashes) does |
+| **Outbound fetch is not a full network boundary** | Hostname-pattern validation blocks obvious private/link-local targets and unsupported schemes, and response size and MIME are capped, but there is no DNS-pinning (rebinding), no per-redirect re-validation, and no decompression-bomb guard. Treat the fetcher as hardened-but-not-complete |
+| **Ingestion is HTML-first** | Text extraction is regex/heuristic based. PDFs, SEC filings, scanned documents and complex tables are **not** parsed — such sources genuinely `FETCH_FAILED` rather than being guessed at. This is the single biggest lever on research quality |
 | **Workers are in-process** | The worker loop shares the API process today. Lease semantics already make multiple workers *safe*; splitting the role out is a deployment change, not a redesign |
 | **Paywalls and JS-only pages** | Such sources will genuinely `FETCH_FAILED`. The engine does not bypass paywalls or render client-side JavaScript. The cost of this honesty is **lower recall than a system willing to fabricate** — the correct trade-off, and it is visible in `fetch_status` rather than hidden |
 | **Artifact storage** | The `ArtifactStorage` interface exists for raw bytes and normalized text; confirm the production target behind `STORAGE_BUCKET` before relying on long-term raw-document retention |

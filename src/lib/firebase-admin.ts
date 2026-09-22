@@ -1,19 +1,35 @@
 import { initializeApp, getApps, App } from 'firebase-admin/app';
-import { getFirestore, Firestore, CollectionReference, DocumentReference, Transaction, WriteBatch, FieldValue } from 'firebase-admin/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { loadEnvironmentConfig } from '../server/environment.js';
+import { logger } from '../server/logger.js';
 
 // Lazy singleton: Firebase Admin app + Firestore instance, initialized on
 // first actual use. Importing this module in test environments without Google
 // credentials (or where the module is never used) is safe — no auth errors
 // are triggered at import time.
+//
+// ENVIRONMENT BINDING: the project and database are resolved through
+// `loadEnvironmentConfig()`, NOT read from firebase-applet-config.json. Reading
+// the applet file here (the previous behaviour) meant production traffic was
+// verified against its own project by the auth middleware while every job,
+// event, report and queue write landed in the AI Studio development project —
+// a silent cross-environment data-leak in the opposite direction from the one
+// the isolation gate guards against. Development/test still fall back to the
+// applet project, because that fallback is resolved by the environment module.
 let _app: App | null = null;
 let _firestore: Firestore | null = null;
 
 function getApp(): App {
   if (!_app) {
-    _app = !getApps().length
-      ? initializeApp({ projectId: firebaseConfig.projectId })
-      : getApps()[0];
+    if (getApps().length) {
+      _app = getApps()[0];
+    } else {
+      const cfg = loadEnvironmentConfig();
+      _app = initializeApp({ projectId: cfg.projectId });
+      logger.info('firebase.admin_init', `Firestore bound to environment '${cfg.name}'`, {
+        status: `project: ${cfg.projectId}`,
+      });
+    }
   }
   return _app;
 }
@@ -21,8 +37,9 @@ function getApp(): App {
 function getFirestoreInstance(): Firestore {
   if (!_firestore) {
     const app = getApp();
-    _firestore = firebaseConfig.firestoreDatabaseId
-      ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+    const cfg = loadEnvironmentConfig();
+    _firestore = cfg.firestoreDatabaseId
+      ? getFirestore(app, cfg.firestoreDatabaseId)
       : getFirestore(app);
   }
   return _firestore;
