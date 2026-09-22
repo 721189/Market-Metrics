@@ -118,7 +118,12 @@ Key risks include escalating data center energy costs and supply chain constrain
 
   // Test 6.8: Unknown publication date must be null (never fabricated as "now")
   const noDateHtml = `<html><head><title>No metadata page</title></head><body><p>Plain content without any date metadata whatsoever.</p></body></html>`;
-  const noDateHeaders = new Headers();
+  // NOTE: `Headers` is NOT constructed here. `new Headers()` is an undici
+  // global whose constructor reads Node 20+ internals that crash tsx's
+  // module-graph evaluation inside CI (~1s abort, no test output). Only a
+  // structurally-compatible `{ get() }` object is needed, so pass a plain
+  // stub. (Runtime fetches still use real Headers objects.)
+  const noDateHeaders = { get: (_name: string) => null } as unknown as Headers;
   const unknownDate = RealDocumentFetcher.extractPublicationDate(noDateHtml, noDateHeaders);
   if (unknownDate !== null) {
     return { passed: false, message: `Unknown publication date must be null, got fabricated: ${unknownDate}` };
