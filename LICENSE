@@ -1,0 +1,60 @@
+Proprietary License — Market-Metrics ("Market Intelligence V2")
+
+Copyright (c) 2026 721189. All rights reserved.
+
+1. Ownership. The software, including all source code, documentation,
+   diagrams, test corpora, prompts, schemas, and build/packaging
+   configuration in this repository (collectively, the "Software"), is the
+   exclusive property of the copyright holder named above ("Owner").
+
+2. Limited viewing permission. You may view the Software in this repository
+   for evaluation purposes only. No other right is granted by viewing.
+
+3. No grant of rights. Except as expressly stated in Section 2, no right,
+   title, or interest in the Software is granted, whether by implication,
+   estoppel, or otherwise. Without limiting the foregoing, you may NOT:
+
+   (a) copy, reproduce, or republish the Software or any part of it;
+   (b) modify, adapt, translate, or create derivative works of the Software;
+   (c) distribute, sublicense, lease, lend, sell, or otherwise transfer the
+       Software to any third party;
+   (d) deploy, host, or operate the Software (or any derivative) in any
+       environment, including development, staging, or production;
+   (e) use the Software, in whole or in part, to provide any service to any
+       third party, whether paid or unpaid;
+   (f) remove, alter, or obscure any copyright, attribution, or license
+       notice in the Software;
+   (g) use the Software to train, fine-tune, or evaluate any machine-learning
+       model, or to generate training data, without prior written consent.
+
+4. Public repository notice. The fact that the Software is visible in a
+   public repository does not grant any license. Hosting-platform terms that
+   permit viewing and forking for platform functionality do not expand the
+   rights granted here, and any fork remains subject to this License.
+
+5. Third-party components. The Software depends on third-party packages
+   listed in package.json / package-lock.json. Those components remain
+   governed by their own licenses. Nothing in this License grants rights in
+   third-party components beyond what their licenses allow.
+
+6. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+   IN NO EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+   FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+7. Limitation of liability. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE
+   OWNER SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+   CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, REVENUE,
+   DATA, OR USE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+8. Termination. Any use of the Software outside the scope of this License
+   automatically terminates the limited permission in Section 2. Sections 1,
+   3, and 5 through 9 survive termination.
+
+9. Contact. To request a license (evaluation, commercial, or otherwise),
+   contact the Owner via the repository owner's GitHub profile (@721189).
+
+END OF LICENSE

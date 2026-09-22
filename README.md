@@ -37,6 +37,9 @@
 | 17 | [Testing & Benchmark Corpus](#17-testing--benchmark-corpus) |
 | 18 | [Local Development](#18-local-development) |
 | 19 | [Honest Boundaries](#19-honest-boundaries) |
+| 20 | [License](#20-license) |
+| 21 | [Contributing](#21-contributing) |
+| 22 | [Code of Conduct](#22-code-of-conduct) |
 
 ---
 
@@ -794,6 +797,42 @@ Documentation that only lists strengths is marketing. These are the real limits:
 | **Benchmark scope** | The corpus validates evidence discipline, offset exactness and arithmetic. It measures behaviour on a *known* corpus — it is not a statement about live-source coverage |
 | **Verification is a grade, not a verdict** | `SUPPORTED` means *evidence was found and survived adversarial checking*. It is not a guarantee of truth, and consequential decisions still warrant human review of the cited sources |
 | **Rate limiting is cost control** | It deliberately **fails open** and is scoped by identity — it is not a security boundary. Authorization is enforced separately by auth middleware and the admin path blocker |
+
+---
+
+## 20. License
+
+Market-Metrics is **proprietary software**. Copyright (c) 2026 721189. All
+rights reserved.
+
+The full terms are in [LICENSE](./LICENSE). In short: you may view the
+repository for evaluation; you may not copy, modify, distribute, deploy, or
+operate the software (or derivatives) without prior written permission. Public
+visibility of the repository grants no license beyond viewing.
+
+Third-party packages listed in `package.json` / `package-lock.json` remain
+under their own licenses.
+
+---
+
+## 21. Contributing
+
+Contributions are welcome under the repository's proprietary license terms —
+see [CONTRIBUTING.md](./CONTRIBUTING.md) for the ground rules, the
+evidence-first invariants every change is judged against, the pull-request
+checklist (`npm run lint`, `npm test`, Node >= 22, no `console.*` in
+`src/server/**`, docs), and the review process.
+
+Security reports are **not** handled as regular contributions — see
+[SECURITY.md](./SECURITY.md) for the private reporting path.
+
+---
+
+## 22. Code of Conduct
+
+All participation is governed by our [Code of Conduct](./CODE_OF_CONDUCT.md)
+(adapted from the Contributor Covenant v2.1). Reports are handled as described
+there, via the repository owner's GitHub profile.
 
 ---
 
