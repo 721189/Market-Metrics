@@ -3,6 +3,7 @@ import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { canTransition } from './job_state.js';
 import { recordLeaseRecovery, recordQueueDepth } from './observability.js';
+import { logger } from './logger.js';
 
 export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
 
@@ -104,7 +105,7 @@ export class FirestoreQueue {
                 return null;
             });
         } catch (err: any) {
-            console.error('[Queue] Error claiming next job:', err);
+            logger.error('queue.claim_failed', 'Error claiming next job', { status: (err as Error)?.message || String(err) });
             return null;
         }
     }
@@ -130,7 +131,7 @@ export class FirestoreQueue {
             recordQueueDepth(depth);
             return depth;
         } catch (err) {
-            console.warn('[Queue] Failed to observe queue depth:', err);
+            logger.warn('queue.depth_observe_failed', 'Failed to observe queue depth', { status: (err as Error)?.message || String(err) });
             return null;
         }
     }
@@ -178,11 +179,11 @@ export class FirestoreQueue {
             });
 
             if (!owned && definitive) {
-                console.warn(`[Queue] Heartbeat REJECTED for job ${jobId}: worker ${workerId} no longer owns the lease.`);
+                logger.warn('queue.heartbeat_rejected', `Heartbeat REJECTED: worker ${workerId} no longer owns the lease`, { job_id: jobId });
             }
             return { owned, definitive };
         } catch (err) {
-            console.error(`[Queue] Failed to heartbeat job ${jobId}:`, err);
+            logger.error('queue.heartbeat_failed', `Failed to heartbeat job ${jobId}`, { job_id: jobId, status: (err as Error)?.message || String(err) });
             return { owned: false, definitive: false };
         }
     }
@@ -204,11 +205,11 @@ export class FirestoreQueue {
             }
             if (recovered > 0) {
                 recordLeaseRecovery(recovered);
-                console.warn(`[Queue] Recovered ${recovered} stale job(s) back to QUEUED.`);
+                logger.info('queue.recovered', `Recovered ${recovered} stale job(s) back to QUEUED`);
             }
             return recovered;
         } catch (err) {
-            console.error('[Queue] Error in recoverStaleJobs:', err);
+            logger.error('queue.recover_failed', 'Error in recoverStaleJobs', { status: (err as Error)?.message || String(err) });
             return 0;
         }
     }
@@ -275,7 +276,7 @@ export class FirestoreQueue {
                 return true;
             });
         } catch (err) {
-            console.error(`[Queue] Error recovering stale job ${jobId}:`, err);
+            logger.error('queue.recover_job_failed', `Error recovering stale job ${jobId}`, { job_id: jobId, status: (err as Error)?.message || String(err) });
             return false;
         }
     }
@@ -292,17 +293,17 @@ export class FirestoreQueue {
             return await adminDb.runTransaction(async (transaction) => {
                 const doc = await transaction.get(jobRef);
                 if (!doc.exists) {
-                    console.warn(`[Queue] updateJobStatus: job ${jobId} does not exist.`);
+                    logger.warn('queue.status_missing', `updateJobStatus: job ${jobId} does not exist`, { job_id: jobId });
                     return false;
                 }
                 const data = doc.data();
                 if (workerId && data?.worker_id && data.worker_id !== workerId) {
-                    console.warn(`[Queue] updateJobStatus REFUSED for job ${jobId}: worker ${workerId} lost ownership to ${data.worker_id}.`);
+                    logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost ownership`, { job_id: jobId });
                     return false;
                 }
                 const current = data?.status ?? 'QUEUED';
                 if (!canTransition(current, status)) {
-                    console.warn(`[Queue] updateJobStatus REFUSED: illegal transition ${current} -> ${status} for job ${jobId}.`);
+                    logger.warn('queue.status_refused_transition', `updateJobStatus REFUSED: illegal transition ${current} -> ${status}`, { job_id: jobId });
                     return false;
                 }
                 transaction.update(jobRef, {
@@ -312,7 +313,7 @@ export class FirestoreQueue {
                 return true;
             });
         } catch (err) {
-            console.error(`[Queue] Error in updateJobStatus for ${jobId}:`, err);
+            logger.error('queue.update_status_failed', `Error in updateJobStatus for ${jobId}`, { job_id: jobId, status: (err as Error)?.message || String(err) });
             return false;
         }
     }
@@ -374,7 +375,7 @@ export class FirestoreQueue {
                 if (!doc.exists) return false;
                 const current = doc.data()?.status ?? 'QUEUED';
                 if (!canTransition(current, 'CANCELLED')) {
-                    console.warn(`[Queue] cancel REFUSED: illegal transition ${current} -> CANCELLED for job ${jobId}.`);
+                    logger.warn('queue.cancel_refused', `cancel REFUSED: illegal transition ${current} -> CANCELLED`, { job_id: jobId });
                     return false;
                 }
                 transaction.update(jobRef, {
@@ -385,7 +386,7 @@ export class FirestoreQueue {
                 return true;
             });
         } catch (err) {
-            console.error(`[Queue] Error cancelling job ${jobId}:`, err);
+            logger.error('queue.cancel_failed', `Error cancelling job ${jobId}`, { job_id: jobId, status: (err as Error)?.message || String(err) });
             return false;
         }
     }

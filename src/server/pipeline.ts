@@ -47,6 +47,7 @@ import { canTransition, cancellationRegistry } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
+import { logger } from './logger.js';
 import { logEnvelope } from './rate_limits.js';
 import {
   recordJobStarted,
@@ -259,7 +260,9 @@ export class ResearchPipelineManager {
   public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string): Promise<void> {
     if (isCancelled(job, signal)) return;
     if (workerId) {
-      console.log(`[Pipeline] Stage worker executing job ${job.id} as ${workerId}`);
+      logger.debug('pipeline.worker_start', `Stage worker executing job ${job.id} as ${workerId}`, {
+        job_id: job.id,
+      });
     }
 
     const costGovernor = new CostGovernor();
@@ -333,11 +336,17 @@ export class ResearchPipelineManager {
         domain = new URL(item.url).hostname.replace(/^www\./, '').toLowerCase();
       } catch (e) {
         // An invalid URL can never become a citable source — skip it honestly.
-        console.warn(`[DISCOVERING] Skipping discovered item with invalid URL: ${item.url}`);
+        logger.warn('pipeline.discovering_skip_url', `Skipping discovered item with invalid URL`, {
+          job_id: job.id,
+          status: item.url,
+        });
         continue;
       }
       if (!domain || !domain.includes('.')) {
-        console.warn(`[DISCOVERING] Skipping discovered item with unusable domain: ${item.url}`);
+        logger.warn('pipeline.discovering_skip_domain', `Skipping discovered item with unusable domain`, {
+          job_id: job.id,
+          status: item.url,
+        });
         continue;
       }
 
@@ -444,7 +453,10 @@ export class ResearchPipelineManager {
         src.fetch_error = err?.message || 'Unknown retrieval error';
         src.http_status = null;
         failedCount++;
-        console.warn(`[FETCHING] FETCH_FAILED ${src.url}: ${src.fetch_error}`);
+        logger.warn('pipeline.fetch_failed', `FETCH_FAILED ${src.url}`, {
+          job_id: job.id,
+          status: src.fetch_error,
+        });
       }
     }
 
@@ -978,18 +990,18 @@ export class ResearchPipelineManager {
 // Start Firestore Worker with transactional claiming, lease-ownership
 // verification, and REAL cancellation via the AbortController registry.
 export async function startWorker() {
-  console.log('[Queue] Worker started with transactional claiming, lease verification, and real cancellation');
+  logger.info('queue.worker_started', 'Worker started with transactional claiming, lease verification, and real cancellation');
   const workerId = `worker-${Math.random().toString(36).substring(2, 8)}`;
   while (true) {
     let job: QueueJob | null = null;
     try {
       job = await researchQueue.claimNextJob(workerId);
     } catch (err) {
-      console.error('[Queue] Worker claim error', err);
+      logger.error('queue.worker_claim_error', 'Worker claim error', { status: (err as Error)?.message || String(err) });
     }
 
     if (job) {
-      console.log(`[Queue] Claimed job ${job.id} for processing`);
+      logger.info('queue.job_claimed', `Claimed job ${job.id} for processing`, { job_id: job.id });
       const { job: jobData, userId } = job.data;
       const pipelineJob = { ...jobData };
       if (userId) {
@@ -1010,7 +1022,7 @@ export async function startWorker() {
           if (!hb.owned && hb.definitive) {
             // Lease ownership was definitively lost (expired and re-claimed by
             // another worker, or the job was cancelled): STOP this worker.
-            console.warn(`[Queue] Worker ${workerId} lost lease for job ${job!.id}. Aborting execution.`);
+            logger.warn('queue.lease_lost', `Worker ${workerId} lost lease. Aborting execution.`, { job_id: job!.id });
             leaseOwned = false;
             cancellationRegistry.abort(job!.id, 'LEASE_LOST');
             controller.abort();
@@ -1023,19 +1035,19 @@ export async function startWorker() {
       try {
         await ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal, workerId);
         if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
-          console.log(`[Queue] Job ${job.id} was cancelled by the user; preserving CANCELLED state.`);
+          logger.info('queue.job_cancelled', `Job ${job.id} cancelled by user; preserving CANCELLED state.`, { job_id: job.id });
         } else if (!leaseOwned) {
-          console.log(`[Queue] Job ${job.id} abandoned after lease loss; ownership transferred to another worker.`);
+          logger.info('queue.job_abandoned', `Job ${job.id} abandoned after lease loss; ownership transferred.`, { job_id: job.id });
         } else {
           await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId);
         }
       } catch (err) {
-        console.error(`[Queue] Job ${job.id} failed`, err);
+        logger.error('queue.job_failed', `Job ${job.id} failed`, { job_id: job.id, status: (err as Error)?.message || String(err) });
         recordJobFailed(String((job as any).current_stage || 'UNKNOWN'), { job_id: job.id });
         if (!leaseOwned) {
-          console.log(`[Queue] Job ${job.id} failure after lease loss suppressed; new owner is responsible.`);
+          logger.info('queue.failure_suppressed', `Job ${job.id} failure after lease loss suppressed; new owner responsible.`, { job_id: job.id });
         } else if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
-          console.log(`[Queue] Job ${job.id} aborted by user cancellation; preserving CANCELLED state.`);
+          logger.info('queue.job_aborted', `Job ${job.id} aborted by user cancellation; preserving CANCELLED state.`, { job_id: job.id });
         } else {
           // Ownership-verified + state-machine-validated transition.
           await researchQueue.updateJobStatus(job.id, 'FAILED', workerId);

@@ -14,6 +14,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier, RiskFactor } from '../types.js';
 import { recordProviderCall } from './observability.js';
 import { logEnvelope } from './rate_limits.js';
+import { logger } from './logger.js';
 
 /**
  * Compact, serializable projection of a verified claim handed to every
@@ -231,7 +232,9 @@ Return a strict JSON object matching:
         return JSON.parse(text);
       }, { maxRetries: 2 });
     } catch (err: any) {
-      console.error('Gemini planning failed:', err);
+      logger.error('gemini.planning_failed', 'Gemini planning failed', {
+        status: err?.message || String(err),
+      });
       throw new Error(`Research planning failed: ${err.message || 'Gemini service is currently unavailable.'}`);
     }
   }
@@ -281,7 +284,9 @@ Return a strict JSON object matching:
         return JSON.parse(text);
       }, { maxRetries: 2 });
     } catch (e: any) {
-      console.error('Discovery search failed:', e);
+      logger.error('gemini.discovery_failed', 'Discovery search failed', {
+        status: e?.message || String(e),
+      });
       throw new Error(`Web search and source discovery failed: ${e.message || 'Google Search Grounding Service is currently unavailable.'}`);
     }
   }

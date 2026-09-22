@@ -215,5 +215,5 @@ export function logEnvelope(event: string, envelope: LogEnvelope, message: strin
     ...envelope,
     message,
   };
-  console.log(JSON.stringify(line));
+  logger.info(`envelope.${event}`, message, line);
 }

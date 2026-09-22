@@ -1,5 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase-admin/app';
 import { loadEnvironmentConfig } from './environment.js';
+import { logger } from './logger.js';
 
 let adminApp: any = null;
 
@@ -24,20 +25,24 @@ export function getAdminApp(): any {
       const cfg = loadEnvironmentConfig();
       if (cfg.projectId) {
         adminApp = initializeApp({ projectId: cfg.projectId });
-        console.log(
-          `[Firebase Admin] Initialized for environment '${cfg.name}' (project: ${cfg.projectId})`,
-        );
+        logger.info('firebase.admin_init', `Initialized for environment '${cfg.name}'`, {
+          status: `project: ${cfg.projectId}`,
+        });
       } else {
         // No explicit project: fall back to Application Default Credentials.
         adminApp = initializeApp();
-        console.log('[Firebase Admin] Initialized with default credentials');
+        logger.info('firebase.admin_init_default', 'Initialized with default credentials');
       }
     } catch (err) {
-      console.warn('[Firebase Admin] Initialization warning:', err);
+      logger.warn('firebase.admin_init_warning', 'Initialization warning', {
+        status: (err as Error)?.message || String(err),
+      });
       try {
         adminApp = getApp();
       } catch (e) {
-        console.error('[Firebase Admin] Critical error: could not retrieve admin app instance.');
+        logger.error('firebase.admin_init_critical', 'Could not retrieve admin app instance', {
+          status: (e as Error)?.message || String(e),
+        });
       }
     }
   }

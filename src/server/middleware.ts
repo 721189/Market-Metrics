@@ -3,6 +3,7 @@ import admin from 'firebase-admin';
 import path from 'path';
 import fs from 'fs';
 import { getAdminApp } from './firebase_admin.js';
+import { logger } from './logger.js';
 
 const idempotencyStore = new Map<string, { status: number; body: any; timestamp: number }>();
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -90,7 +91,9 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
       throw new Error('Firebase Admin not initialized');
     }
   } catch (err: any) {
-    console.error('[Auth Middleware] Verification failed:', err.message);
+    logger.warn('auth.verification_failed', 'Token verification failed', {
+      status: err.message,
+    });
     res.status(401).json({
       error: { code: 'UNAUTHORIZED', message: `Token verification failed: ${err.message}` }
     });

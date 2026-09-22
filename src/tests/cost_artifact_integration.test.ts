@@ -85,21 +85,59 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
     return { passed: false, message: 'RetrievalArtifact should preserve identity fields' };
   }
 
-  // --- Structured log envelope shape ---
-  const logged: any[] = [];
-  const original = console.log;
-  console.log = (...args: any[]) => { logged.push(...args); };
-  logEnvelope('stage', { request_id: 'req-1', user_id: 'usr-1', job_id: 'job-1', stage: 'PLANNING', status: 'success', duration_ms: 8 }, 'Planning stage completed');
-  console.log = original;
-  if (logged.length < 1) {
+    // --- Structured log envelope shape (production stdout-JSON path) ---
+  // logEnvelope routes through logger.info -> emit() -> JSON-lines on stdout
+  // ONLY when NODE_ENV=production (the real deployment path). This test must
+  // exercise that production path, not the human-readable dev formatter, so we
+  // force NODE_ENV=production locally, run the assertion, then restore it.
+  const savedNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  const written: string[] = [];
+  // In production mode emit() writes non-error levels (info/debug/warn) to
+  // process.stdout. Capture it to validate the structured JSON path.
+  const stream = process.stdout;
+  const origWrite = stream.write.bind(stream);
+  const capture = (chunk: any): boolean => {
+    written.push(String(chunk));
+    return true;
+  };
+  (stream as any).write = capture;
+  try {
+    logEnvelope(
+      'stage',
+      {
+        request_id: 'req-1',
+        user_id: 'usr-1',
+        job_id: 'job-1',
+        stage: 'PLANNING',
+        status: 'success',
+        duration_ms: 8,
+      },
+      'Planning stage completed',
+    );
+  } finally {
+    (stream as any).write = origWrite;
+    process.env.NODE_ENV = savedNodeEnv;
+  }
+
+  const raw = written.join('');
+  // Production JSON-lines: one trimmed line per emit() call.
+  const line = raw.trim().split('\n').pop();
+  if (!line) {
     return { passed: false, message: 'logEnvelope should emit a line' };
   }
-  const parsed = logged[0];
-  if (typeof parsed !== 'string') {
-    return { passed: false, message: 'logEnvelope should JSON.stringify its output' };
-  }
-  const envelope = JSON.parse(parsed);
-  if (envelope.event !== 'stage' || envelope.request_id !== 'req-1' || envelope.user_id !== 'usr-1' || envelope.job_id !== 'job-1' || envelope.stage !== 'PLANNING' || envelope.status !== 'success' || envelope.duration_ms !== 8 || envelope.message !== 'Planning stage completed') {
+  const envelope = JSON.parse(line); // { timestamp, level, service, environment, event, message, ... }
+
+  if (
+    envelope.event !== 'stage' ||
+    envelope.request_id !== 'req-1' ||
+    envelope.user_id !== 'usr-1' ||
+    envelope.job_id !== 'job-1' ||
+    envelope.stage !== 'PLANNING' ||
+    envelope.status !== 'success' ||
+    envelope.duration_ms !== 8 ||
+    envelope.message !== 'Planning stage completed'
+  ) {
     return { passed: false, message: 'logEnvelope should preserve structured fields' };
   }
 

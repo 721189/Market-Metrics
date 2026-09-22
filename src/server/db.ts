@@ -4,6 +4,7 @@
 
 import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue } from 'firebase-admin/firestore';
+import { logger } from './logger.js';
 import type { 
   ResearchJob, 
   ResearchEvent, 
@@ -21,7 +22,9 @@ export class DatabaseRepository {
         updated_at: FieldValue.serverTimestamp(),
       }, { merge: true });
     } catch (err) {
-      console.error(`[DB] Error saving job ${job.id}:`, err);
+      logger.error('db.save_job_failed', `Error saving job ${job.id}`, {
+        status: (err as Error)?.message || String(err),
+      });
       throw err;
     }
   }
@@ -37,7 +40,9 @@ export class DatabaseRepository {
       }
       return data;
     } catch (err) {
-      console.error(`[DB] Error getting job ${jobId}:`, err);
+      logger.error('db.get_job_failed', `Error getting job ${jobId}`, {
+        status: (err as Error)?.message || String(err),
+      });
       return null;
     }
   }
@@ -57,7 +62,9 @@ export class DatabaseRepository {
       });
       return jobs;
     } catch (err) {
-      console.error('[DB] Error listing jobs:', err);
+      logger.error('db.list_jobs_failed', 'Error listing jobs', {
+        status: (err as Error)?.message || String(err),
+      });
       return [];
     }
   }
@@ -71,7 +78,10 @@ export class DatabaseRepository {
         created_at: event.created_at || new Date().toISOString(),
       });
     } catch (err) {
-      console.error(`[DB] Error adding event to job ${jobId}:`, err);
+      logger.error('db.add_event_failed', `Error adding event to job ${jobId}`, {
+        job_id: jobId,
+        status: (err as Error)?.message || String(err),
+      });
       throw err;
     }
   }
@@ -94,7 +104,10 @@ export class DatabaseRepository {
       events.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
       return events;
     } catch (err) {
-      console.error(`[DB] Error getting events for job ${jobId}:`, err);
+      logger.error('db.get_events_failed', `Error getting events for job ${jobId}`, {
+        job_id: jobId,
+        status: (err as Error)?.message || String(err),
+      });
       return [];
     }
   }
@@ -109,7 +122,10 @@ export class DatabaseRepository {
         saved_at: FieldValue.serverTimestamp(),
       });
     } catch (err) {
-      console.error(`[DB] Error saving report ${report.job_id}:`, err);
+      logger.error('db.save_report_failed', `Error saving report ${report.job_id}`, {
+        job_id: report.job_id,
+        status: (err as Error)?.message || String(err),
+      });
       throw err;
     }
   }
@@ -125,7 +141,10 @@ export class DatabaseRepository {
       }
       return data;
     } catch (err) {
-      console.error(`[DB] Error getting report ${jobId}:`, err);
+      logger.error('db.get_report_failed', `Error getting report ${jobId}`, {
+        job_id: jobId,
+        status: (err as Error)?.message || String(err),
+      });
       return null;
     }
   }

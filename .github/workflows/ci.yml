@@ -21,7 +21,10 @@ jobs:
     name: Typecheck, security, unit, benchmark regression & build
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      # fail-fast is intentionally false. With fail-fast true, a failure on one
+      # Node version cancels the other mid-flight, destroying the evidence
+      # needed to tell whether the failure is version-specific or universal.
+      fail-fast: false
       matrix:
         node: ['20.x', '22.x']
 
@@ -35,8 +38,21 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: 'npm'
 
+      - name: Runtime versions
+        run: |
+          node --version
+          npm --version
+
       - name: Install dependencies (lockfile-exact)
         run: npm ci --no-audit --no-fund
+
+      - name: Verify test toolchain (tsx + esbuild)
+        # A missing platform binary makes the test step fail within about a
+        # second with an opaque error, so assert the toolchain explicitly.
+        run: |
+          set -e
+          npx tsx --version
+          node --input-type=module -e "const m = await import('esbuild'); console.log('esbuild', m.version);"
 
       - name: Typecheck
         run: npm run lint
@@ -45,9 +61,19 @@ jobs:
         # A single entrypoint runs the whole suite: Firestore emulator harness,
         # queue race/lease recovery, ownership & security rules, API auth &
         # middleware, pipeline fixture, citation integrity, cost/artifact,
-        # concurrency & fault injection, precision hardening, E2E and load,
-        # plus golden-benchmark citation-graph validation.
+        # concurrency & fault injection, deploy-layer, benchmark corpus,
+        # precision hardening, observability, E2E and load.
         run: npm test
+
+      - name: Diagnostics (on failure)
+        if: failure()
+        run: |
+          set +e
+          echo "--- runtime ---"; node --version; npm --version
+          echo "--- platform ---"; uname -a
+          echo "--- esbuild platform packages ---"; ls -1 node_modules/@esbuild 2>/dev/null || echo none
+          echo "--- rollup platform packages ---"; ls -1 node_modules/@rollup 2>/dev/null || echo none
+          echo "--- installed top-level packages ---"; npm ls --depth=0 2>&1 | head -40
 
       - name: Environment isolation self-check
         run: node -e "require('child_process')" && npx tsx -e "import('./src/server/environment.js').then(m=>{const c=m.validateEnvironmentOrThrow({APP_ENV:'test',FIREBASE_PROJECT_ID:'ci-project',FIRESTORE_DATABASE_ID:'ci-db',STORAGE_BUCKET:'ci-bucket',FIREBASE_AUTH_DOMAIN:'ci.firebaseapp.com'});console.log('isolated:',m.describeEnvironment(c));})"
@@ -85,3 +111,28 @@ jobs:
             fi
           done
           echo "OK: no abandoned architecture dependencies present."
+
+      - name: Single lockfile policy
+        # npm ci is authoritative. A stray bun/pnpm/yarn lockfile silently
+        # diverges the dependency graph, which is how a stale lockfile shipped
+        # before.
+        run: |
+          set -e
+          found=$(ls -1 package-lock.json bun.lock yarn.lock pnpm-lock.yaml 2>/dev/null | wc -l)
+          if [ "$found" -gt 1 ]; then
+            echo "::error::Multiple lockfiles present; keep only package-lock.json."
+            ls -1 package-lock.json bun.lock yarn.lock pnpm-lock.yaml 2>/dev/null
+            exit 1
+          fi
+          echo "OK: exactly one lockfile."
+
+      - name: No stray console.* in server code
+        # src/server/** may only log through the structured logger; ad-hoc debug
+        # console calls are a regression risk. The test harness is excluded.
+        run: |
+          set -e
+          if grep -RIn --include='*.ts' --include='*.tsx' -E '\bconsole\.(log|warn|error|debug|info)\b' src/server 2>/dev/null; then
+            echo "::error::Stray console.* calls found in server code."
+            exit 1
+          fi
+          echo "OK: no stray console.* calls in server code."

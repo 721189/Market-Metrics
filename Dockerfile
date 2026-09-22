@@ -13,8 +13,12 @@ COPY package.json package-lock.json tsconfig.json vite.config.ts ./
 
 RUN npm ci --no-audit --no-fund
 
+# NOTE: there is deliberately no `COPY public ./public` here. This project has
+# no `public/` directory (verified against the repository root and
+# vite.config.ts, which sets no publicDir), and Docker fails the whole build
+# when a COPY source does not exist. The client bundle is produced by
+# `npm run build` below, so no static passthrough directory is required.
 COPY src ./src
-COPY public ./public
 COPY index.html ./
 COPY server.ts ./
 
