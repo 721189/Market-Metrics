@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp } from 'firebase-admin/app';
+import { initializeApp, getApps, getApp, cert } from 'firebase-admin/app';
 import { loadEnvironmentConfig } from './environment.js';
 import { logger } from './logger.js';
 
@@ -23,7 +23,24 @@ export function getAdminApp(): any {
       }
 
       const cfg = loadEnvironmentConfig();
-      if (cfg.projectId) {
+      const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+      let credentialOption = undefined;
+      if (serviceAccountRaw) {
+        try {
+          const parsed = typeof serviceAccountRaw === 'string' ? JSON.parse(serviceAccountRaw) : serviceAccountRaw;
+          credentialOption = cert(parsed);
+        } catch (e) {
+          logger.warn('firebase.cert_parse_failed', 'Could not parse FIREBASE_SERVICE_ACCOUNT JSON', { status: String(e) });
+        }
+      }
+
+      if (credentialOption) {
+        adminApp = initializeApp({
+          credential: credentialOption,
+          projectId: cfg.projectId || undefined,
+        });
+        logger.info('firebase.admin_init_cert', `Initialized with service account credential for '${cfg.name}'`);
+      } else if (cfg.projectId) {
         adminApp = initializeApp({ projectId: cfg.projectId });
         logger.info('firebase.admin_init', `Initialized for environment '${cfg.name}'`, {
           status: `project: ${cfg.projectId}`,

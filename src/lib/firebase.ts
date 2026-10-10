@@ -8,13 +8,32 @@ import { getFirestore } from 'firebase/firestore';
 // fresh checkout runs with zero Firebase setup.
 function resolveFirebaseConfig() {
   if (import.meta.env.DEV) {
+    // Development: requires VITE_FIREBASE_* env vars (same as production).
+    // A fresh checkout without Firebase setup must create a .env file with
+    // VITE_FIREBASE_* values. This prevents the browser from ever being tied
+    // to a hardcoded project.
+    const required = [
+      'VITE_FIREBASE_API_KEY',
+      'VITE_FIREBASE_AUTH_DOMAIN',
+      'VITE_FIREBASE_PROJECT_ID',
+      'VITE_FIREBASE_STORAGE_BUCKET',
+      'VITE_FIREBASE_MESSAGING_SENDER_ID',
+      'VITE_FIREBASE_APP_ID',
+    ] as const;
+    const missing = required.filter((k) => !import.meta.env[k]);
+    if (missing.length > 0) {
+      throw new Error(
+        `[firebase] dev build missing required env: ${missing.join(', ')}. ` +
+          'Create a .env file with VITE_FIREBASE_* values for local development.',
+      );
+    }
     return {
-      apiKey: 'AIzaSyBf8gwNxlu7HT2iZrnvPIPL87aiiBdIL2s',
-      authDomain: 'gen-lang-client-0526957989.firebaseapp.com',
-      projectId: 'gen-lang-client-0526957989',
-      storageBucket: 'gen-lang-client-0526957989.firebasestorage.app',
-      messagingSenderId: '1054744311444',
-      appId: '1:1054744311444:web:e97a25066c8c07a1ffe681',
+      apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string,
+      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string,
+      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string,
+      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET as string,
+      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID as string,
+      appId: import.meta.env.VITE_FIREBASE_APP_ID as string,
     };
   }
   const required = [

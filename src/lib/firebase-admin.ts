@@ -1,5 +1,6 @@
 import { initializeApp, getApps, App } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 import { loadEnvironmentConfig } from '../server/environment.js';
 import { logger } from '../server/logger.js';
 
@@ -66,6 +67,28 @@ const METHODS_NEEDING_INSTANCE = new Set([
  * but never used for actual Firestore operations (e.g. in tests that use
  * mock Firestore).
  */
+
+
+/**
+ * Returns the Firebase Storage bucket name for the current environment.
+ */
+export function getStorageBucket(): string {
+  const cfg = loadEnvironmentConfig();
+  if (!cfg.storageBucket) {
+    throw new Error('[firebase-admin] storageBucket is not configured for this environment');
+  }
+  return cfg.storageBucket;
+}
+
+/**
+ * Returns a Firebase Storage bucket instance for the current environment.
+ */
+export function getStorageInstance() {
+  const bucketName = getStorageBucket();
+  const storage = getStorage();
+  return storage.bucket(bucketName);
+}
+
 export const adminDb: Firestore = new Proxy({} as Firestore, {
   get(_target, prop) {
 

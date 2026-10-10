@@ -12,12 +12,7 @@
 
 import { DatabaseRepository } from './db.js';
 import type { FullResearchReport } from '../types.js';
-import {
-  InMemoryCacheStore,
-  resolveStoreKind,
-  throwRedisNotProvisioned,
-  type CacheStore,
-} from './stores.js';
+import { InMemoryCacheStore, FirestoreCacheStore, resolveStoreKind, throwRedisNotProvisioned, type CacheStore } from './stores.js';
 
 const REPORT_CACHE_TTL_SEC = 3600;
 
@@ -28,10 +23,7 @@ function getCacheStore(): CacheStore {
   const kind = resolveStoreKind(process.env.CACHE_STORE, 'memory');
   if (kind === 'redis') throwRedisNotProvisioned('CacheLayer');
   if (kind === 'firestore') {
-    throw new Error(
-      '[CacheLayer] CACHE_STORE=firestore selected but no Firestore cache store ' +
-        'is provisioned. Use memory (single replica).',
-    );
+    cacheStore = new FirestoreCacheStore(); return cacheStore;
   }
   cacheStore = new InMemoryCacheStore();
   return cacheStore;
@@ -91,3 +83,4 @@ export class CacheLayer {
     await getCacheStore().del(cacheKey(userId, jobId)).catch(() => undefined);
   }
 }
+

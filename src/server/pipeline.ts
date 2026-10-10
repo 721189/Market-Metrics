@@ -45,7 +45,7 @@ import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
 import { canTransition, cancellationRegistry } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
-import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
+import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
 import { logEnvelope } from './rate_limits.js';
@@ -270,8 +270,14 @@ export class ResearchPipelineManager {
       });
     }
 
-    const costGovernor = new CostGovernor();
-    const artifactStorage = new InMemoryArtifactStorage();
+    const costGovernor = new CostGovernor({ userId });
+    let artifactStorage: import('./artifacts.js').ArtifactStorage;
+    try {
+      artifactStorage = new FirestoreArtifactStorage();
+    } catch {
+      artifactStorage = new InMemoryArtifactStorage();
+      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+    }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
     const requestId = (job as any).request_id || `req-${job.id}`;

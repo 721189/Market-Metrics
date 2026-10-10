@@ -10,6 +10,8 @@
  * object storage backend (S3, GCS, etc.).
  */
 
+import { adminDb } from '../lib/firebase-admin.js';
+import { getStorage } from 'firebase-admin/storage';
 export interface RetrievalArtifact {
   source_id: string;
   job_id: string;
@@ -96,6 +98,97 @@ export class InMemoryArtifactStorage implements ArtifactStorage {
 
 export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'normalized'): string {
   return `artifacts/${job_id}/${source_id}/${kind}`;
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Firestore / Firebase Storage-backed artifact store (production)
+// ---------------------------------------------------------------------------
+// Stores raw bytes and normalized text in Firebase Cloud Storage.
+// Falls back to InMemoryArtifactStorage when STORAGE_BUCKET is not configured.
+// ---------------------------------------------------------------------------
+
+const STORAGE_BUCKET_ENV = process.env.STORAGE_BUCKET || process.env.FIREBASE_STORAGE_BUCKET || '';
+
+function getStorageBucketName(): string | null {
+  const name = STORAGE_BUCKET_ENV.trim();
+  return name || null;
+}
+
+export class FirestoreArtifactStorage implements ArtifactStorage {
+  readonly kind = 'firestore';
+
+  async putBlob(storageRef: string, contentType: string, bytes: Buffer): Promise<void> {
+    const bucketName = getStorageBucketName();
+    if (!bucketName) {
+      throw new Error('[FirestoreArtifactStorage] STORAGE_BUCKET is not configured.');
+    }
+    const storage = getStorage();
+    const bucket = storage.bucket(bucketName);
+    await bucket.file(storageRef).save(bytes, {
+      contentType,
+      metadata: {
+        cacheControl: 'no-cache',
+        metadata: {
+          source_id: storageRef.split('/')[1] || 'unknown',
+          job_id: storageRef.split('/')[2] || 'unknown',
+          kind: storageRef.split('/').slice(-1)[0] || 'unknown',
+        },
+      },
+    });
+  }
+
+  async putRaw(source_id: string, job_id: string, url: string, contentType: string, bytes: Buffer): Promise<string> {
+    const ref = artifactRef(source_id, job_id, 'raw');
+    await this.putBlob(ref, contentType, bytes);
+    return ref;
+  }
+
+  async putNormalizedText(source_id: string, job_id: string, text: string): Promise<string> {
+    const ref = artifactRef(source_id, job_id, 'normalized');
+    await this.putBlob(ref, 'text/plain', Buffer.from(text, 'utf8'));
+    return ref;
+  }
+
+  async getRaw(storageRef: string): Promise<Buffer | null> {
+    const bucketName = getStorageBucketName();
+    if (!bucketName) return null;
+    try {
+      const storage = getStorage();
+      const bucket = storage.bucket(bucketName);
+      const file = bucket.file(storageRef);
+      const [exists] = await file.getMetadata();
+      if (!exists) return null;
+      const [data] = await file.download();
+      return Buffer.from(data);
+    } catch {
+      return null;
+    }
+  }
+
+  async getNormalizedText(storageRef: string): Promise<string | null> {
+    const raw = await this.getRaw(storageRef);
+    if (!raw) return null;
+    return raw.toString('utf8');
+  }
+
+  async delete(source_id: string, job_id: string): Promise<void> {
+    const bucketName = getStorageBucketName();
+    if (!bucketName) return;
+    try {
+      const storage = getStorage();
+      const bucket = storage.bucket(bucketName);
+      const rawRef = artifactRef(source_id, job_id, 'raw');
+      const normRef = artifactRef(source_id, job_id, 'normalized');
+      await Promise.all([
+        bucket.file(rawRef).delete().catch(() => {}),
+        bucket.file(normRef).delete().catch(() => {}),
+      ]);
+    } catch {
+      // Best-effort cleanup.
+    }
+  }
 }
 
 export function parseArtifactRef(ref: string): { job_id: string; source_id: string; kind: string } | null {

@@ -17,6 +17,7 @@ import { RetrievalArtifact } from './artifacts.js';
 import { logger } from './logger.js';
 import {
   InMemoryCostStore,
+  FirestoreCostStore,
   resolveStoreKind,
   throwRedisNotProvisioned,
   type CostStore,
@@ -45,10 +46,8 @@ function getCostStore(): CostStore {
   const kind = resolveStoreKind(process.env.COST_STORE, 'memory');
   if (kind === 'redis') throwRedisNotProvisioned('CostGovernor');
   if (kind === 'firestore') {
-    throw new Error(
-      '[CostGovernor] COST_STORE=firestore selected but the Firestore cost ' +
-        'store is not wired yet. Use memory (single replica).',
-    );
+    sharedCostStore = new FirestoreCostStore();
+    return sharedCostStore;
   }
   sharedCostStore = new InMemoryCostStore();
   return sharedCostStore;
@@ -87,9 +86,13 @@ export interface CostGovernorConfig {
   requestBudgetUsd?: number;
   userDailyBudgetUsd?: number;
   globalDailyBudgetUsd?: number;
+  /** The authenticated user performing this job. Required for persistent cost
+   *  accounting (per-user daily/monthly buckets). When absent, cost is still
+   *  tracked in-process but is not persisted to the CostStore. */
+  userId?: string;
 }
 
-const DEFAULT_CONFIG: Required<CostGovernorConfig> = {
+const DEFAULT_CONFIG: Required<Omit<CostGovernorConfig, 'userId'>> = {
   maxSources: 25,
   maxDocumentSizeBytes: 50 * 1024 * 1024,
   maxModelCalls: 120,
@@ -100,8 +103,9 @@ const DEFAULT_CONFIG: Required<CostGovernorConfig> = {
 };
 
 export class CostGovernor {
-  private readonly config: Required<CostGovernorConfig>;
+  private readonly config: Required<Omit<CostGovernorConfig, 'userId'>>;
   private readonly persistent: Required<PersistentBudgetConfig>;
+  private readonly userId: string | undefined;
   private readonly requestCost: RequestCost = makeFreshCost();
   private readonly userCosts = new Map<string, UserCost>();
   private readonly jobCosts = new Map<string, JobCost>();
@@ -172,23 +176,53 @@ export class CostGovernor {
    * unreachable (cost control must never become an availability gate).
    */
   async canStartJob(userId: string): Promise<string | null> {
-    if (!userId) return 'User id is required for budget check';
-    let daily = 0;
-    let monthly = 0;
-    let global = 0;
+    if (!userId) return "User id is required for budget check";
+    // In-memory (single replica, no persistence): the in-process counters are
+    // the only source of truth. This is the beta-safe default.
+    if (getCostStore().kind === 'memory') {
+      return this.canStartJobInMemory(userId);
+    }
+    // Persistent store (Firestore): read the real totals. In production,
+    // any failure to read the store is treated as 'budget exhausted'.
     try {
-      const store = getCostStore();
-      [daily, monthly, global] = await Promise.all([
-        store.get(userDailyKey(userId)),
-        store.get(userMonthlyKey(userId)),
-        store.get(globalDailyKey()),
-      ]);
+      return await this.canStartJobPersistent(userId);
     } catch (err) {
-      logger.warn('cost.spend_read_failed', 'Spend-store read failed (failing open)', {
-        status: (err as Error)?.message || String(err),
+      const isProd = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+      if (isProd) {
+        logger.error('cost.budget_gate_fail_closed', 'Cost store unreachable in production — rejecting job', {
+          store: getCostStore().kind,
+          status: err instanceof Error ? err.message : String(err),
+        });
+        return 'BUDGET_EXCEEDED: cost store unavailable — budget gate failed closed';
+      }
+      logger.warn('cost.budget_gate_fail_open', 'Cost store unreachable outside production — allowing job', {
+        store: getCostStore().kind,
+        status: err instanceof Error ? err.message : String(err),
       });
       return null;
     }
+  }
+
+  private canStartJobInMemory(userId: string): string | null {
+    const daily = this.globalCost.actual_cost_usd;
+    if (daily >= this.persistent.userDailyBudgetUsd) {
+      return `BUDGET_EXCEEDED: user daily budget $${this.persistent.userDailyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)} today)`;
+    }
+    if (daily >= this.persistent.userMonthlyBudgetUsd) {
+      return `BUDGET_EXCEEDED: user monthly budget $${this.persistent.userMonthlyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)} this month)`;
+    }
+    if (daily >= this.persistent.globalDailyBudgetUsd) {
+      return `BUDGET_EXCEEDED: platform daily budget $${this.persistent.globalDailyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)}) — try again tomorrow`;
+    }
+    return null;
+  }
+
+  private async canStartJobPersistent(userId: string): Promise<string | null> {
+    const [daily, monthly, global] = await Promise.all([
+      getCostStore().get(userDailyKey(userId)),
+      getCostStore().get(userMonthlyKey(userId)),
+      getCostStore().get(globalDailyKey()),
+    ]);
     if (daily >= this.persistent.userDailyBudgetUsd) {
       return `BUDGET_EXCEEDED: user daily budget $${this.persistent.userDailyBudgetUsd} reached (spent $${daily.toFixed(2)} today)`;
     }
@@ -196,18 +230,11 @@ export class CostGovernor {
       return `BUDGET_EXCEEDED: user monthly budget $${this.persistent.userMonthlyBudgetUsd} reached (spent $${monthly.toFixed(2)} this month)`;
     }
     if (global >= this.persistent.globalDailyBudgetUsd) {
-      return `BUDGET_EXCEEDED: platform daily budget $${this.persistent.globalDailyBudgetUsd} reached — try again tomorrow`;
+      return `BUDGET_EXCEEDED: platform daily budget $${this.persistent.globalDailyBudgetUsd} reached (spent $${global.toFixed(2)}) — try again tomorrow`;
     }
     return null;
   }
-
-  /**
-   * Post-job recording. Adds costUsd atomically to the user-daily,
-   * user-monthly and global-daily buckets (24h/31d TTLs). No-op for
-   * non-positive costs. Store errors are logged, never thrown.
-   */
   async recordJobCost(userId: string, jobId: string, costUsd: number): Promise<void> {
-    void jobId;
     if (!userId || !(costUsd > 0)) return;
     try {
       const store = getCostStore();
@@ -307,10 +334,11 @@ export class CostGovernor {
   }
 
   private addToUser(): void {
-    let user = this.userCosts.get('*');
+    const key = this.userId ?? '*';
+    let user = this.userCosts.get(key);
     if (!user) {
       user = makeFreshUser();
-      this.userCosts.set('*', user);
+      this.userCosts.set(key, user);
     }
     copyInto(user, this.requestCost);
   }
@@ -330,12 +358,14 @@ export class CostGovernor {
   }
 
   private currentUserCost(): UserCost {
-    const user = this.userCosts.get('*');
+    const key = this.userId ?? '*';
+    const user = this.userCosts.get(key);
     return user ? { ...user } : makeFreshUser();
   }
 
   private currentJobCost(jobId?: string): JobCost {
-    const job = this.jobCosts.get(jobId ?? '*');
+    const id = jobId ?? '*';
+    const job = this.jobCosts.get(id);
     return job ? { ...job } : makeFreshUser();
   }
 }

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import {
   InMemoryRateLimitStore,
+  FirestoreRateLimitStore,
   resolveStoreKind,
   throwRedisNotProvisioned,
   type RateLimitStore,
@@ -105,14 +106,12 @@ let rateLimitStore: RateLimitStore | null = null;
 function getRateLimitStore(): RateLimitStore {
   if (rateLimitStore) return rateLimitStore;
   const kind = resolveStoreKind(process.env.RATE_LIMIT_STORE, 'memory');
-  // Firestore-backed buckets land here when replicas>1 (atomic increment
-  // docs); for now the only provisioned backend is the in-memory one.
-  if (kind === 'redis') throwRedisNotProvisioned('rateLimiterByCategory');
+  if (kind === 'redis') {
+    throwRedisNotProvisioned('rateLimiterByCategory');
+  }
   if (kind === 'firestore') {
-    throw new Error(
-      '[rateLimiterByCategory] RATE_LIMIT_STORE=firestore selected but the ' +
-        'Firestore bucket store is not wired yet. Use memory (single replica).',
-    );
+    rateLimitStore = new FirestoreRateLimitStore();
+    return rateLimitStore;
   }
   rateLimitStore = new InMemoryRateLimitStore();
   return rateLimitStore;
