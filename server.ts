@@ -46,6 +46,52 @@ import { BENCHMARKS } from './src/server/benchmarks.js';
 
 dotenv.config();
 
+// ── Bootstrap Google ADC from env var ────────────────────────────────────────
+// On non-GCP platforms (Render, Railway, Fly, etc.) there are no Application
+// Default Credentials. If the deployer sets FIREBASE_SERVICE_ACCOUNT (raw JSON
+// or base64-encoded JSON), we write it to a temp file and point
+// GOOGLE_APPLICATION_CREDENTIALS at it. This makes ALL Google Cloud client
+// libraries (firebase-admin, google-gax, google-auth-library) pick up the
+// credential automatically — including Firestore's gRPC transport.
+// Must execute BEFORE any Firebase / Google Cloud import triggers init.
+(function bootstrapGoogleADC() {
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) return; // already set
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (!raw) return;
+
+  let json: string | undefined;
+
+  // Try raw JSON first
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.type === 'service_account') {
+      json = JSON.stringify(parsed);
+    }
+  } catch { /* not valid JSON, try base64 */ }
+
+  // Try base64-encoded JSON
+  if (!json) {
+    try {
+      const decoded = Buffer.from(raw, 'base64').toString('utf8');
+      const parsed = JSON.parse(decoded);
+      if (parsed && parsed.type === 'service_account') {
+        json = JSON.stringify(parsed);
+      }
+    } catch { /* not base64 either */ }
+  }
+
+  if (json) {
+    const fs = require('fs');
+    const tmpPath = '/tmp/firebase-service-account.json';
+    fs.writeFileSync(tmpPath, json, { mode: 0o600 });
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = tmpPath;
+    console.log('[bootstrap] GOOGLE_APPLICATION_CREDENTIALS written to', tmpPath);
+  } else {
+    console.warn('[bootstrap] FIREBASE_SERVICE_ACCOUNT is set but could not be parsed as JSON or base64-encoded JSON.');
+    console.warn('[bootstrap] First 80 chars:', raw.substring(0, 80));
+  }
+})();
+
 function getUserId(req: Request): string {
   // Identity comes ONLY from the verified Firebase ID token. There is no
   // X-User-Id fallback, no default user, and no default tenant — a missing
