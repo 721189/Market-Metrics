@@ -1,8 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
-import admin from 'firebase-admin';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+// firebase-admin@14 uses the modular API: the v10 `app.auth()` accessor was
+// removed. Auth must be obtained via getAuth(app). Importing it here (rather
+// than the namespace default import) is what makes verifyIdToken available.
+import { getAuth } from 'firebase-admin/auth';
 import { getAdminApp } from './firebase_admin.js';
 import { logger } from './logger.js';
 import { FieldValue } from 'firebase-admin/firestore';
@@ -126,7 +129,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   try {
     const adminApp = getAdminApp();
     if (adminApp) {
-      const decodedToken = await adminApp.auth().verifyIdToken(token);
+      const decodedToken = await getAuth(adminApp).verifyIdToken(token);
       (req as any).user = decodedToken;
       return next();
     } else {
