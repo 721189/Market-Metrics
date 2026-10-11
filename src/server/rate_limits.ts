@@ -77,6 +77,7 @@ export type RateLimitCategory =
   | 'export'
   | 'admin'
   | 'authentication'
+  | 'stream'
   | 'default';
 
 export interface CategoryBudget {
@@ -91,6 +92,12 @@ const DEFAULT_BUDGETS: Record<RateLimitCategory, CategoryBudget> = {
   export: { category: 'export', maxRequests: 20, windowSec: 60 },
   admin: { category: 'admin', maxRequests: 30, windowSec: 60 },
   authentication: { category: 'authentication', maxRequests: 20, windowSec: 60 },
+  // Live progress plumbing. Minting a stream ticket and reopening the SSE
+  // stream are NOT "creating a research job" — they must not share the tight
+  // 10/min research_creation budget. A single job legitimately reconnects its
+  // stream many times (network blips, single-use ticket expiry, resume), so
+  // this needs a generous budget of its own.
+  stream: { category: 'stream', maxRequests: 120, windowSec: 60 },
   default: { category: 'default', maxRequests: 120, windowSec: 60 },
 };
 
@@ -129,6 +136,16 @@ function bucketKey(ip: string, uid: string, category: RateLimitCategory): string
 function defaultCategoryClassifier(req: Request): RateLimitCategory {
   const method = req.method.toUpperCase();
   const path = req.path.toLowerCase();
+
+  // Live progress plumbing MUST be classified before the generic research
+  // rules below. Otherwise POST .../stream-ticket falls into 'research_creation'
+  // (10/min) and the SSE stream (GET .../events) into 'report_read'. Opening a
+  // progress view then burns the job-creation budget and 429s after a handful
+  // of reconnects — which is exactly the "RATE_LIMIT_EXCEEDED on start" symptom.
+  if (path.startsWith('/api/v1/research') &&
+      (path.endsWith('/stream-ticket') || path.endsWith('/events'))) {
+    return 'stream';
+  }
 
   if (path.startsWith('/api/v1/research') && method === 'POST') {
     return 'research_creation';

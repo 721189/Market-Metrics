@@ -40,6 +40,10 @@ export default function App() {
   const [signingIn, setSigningIn] = useState<boolean>(false);
   const [signInError, setSignInError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  // Per-job SSE reconnect backoff (ms). Grows on repeated failures so a
+  // persistently failing stream can't hammer the server with 1.5s retries;
+  // resets to the base delay as soon as a real event arrives.
+  const reconnectDelayRef = useRef<Map<string, number>>(new Map());
 
   // Auth Listener
   useEffect(() => {
@@ -213,6 +217,8 @@ export default function App() {
     es.onmessage = async (e) => {
       try {
         const evt: ResearchEvent = JSON.parse(e.data);
+        // A real event means the stream is healthy again — reset any backoff.
+        reconnectDelayRef.current.set(jobId, 1500);
         if (typeof evt.sequence === 'number' && evt.sequence > lastSequence) {
           lastSequence = evt.sequence;
         }
@@ -249,11 +255,17 @@ export default function App() {
       if (terminal) return;
       es.close();
       if (eventSourceRef.current !== es) return; // superseded by a newer call
+      // Exponential backoff (1.5s -> 3s -> 6s -> ... capped at 30s) so a
+      // stream that keeps failing backs off instead of retrying every 1.5s
+      // and re-tripping the server's rate limiter.
+      const current = reconnectDelayRef.current.get(jobId) ?? 1500;
+      const nextDelay = Math.min(current * 2, 30000);
+      reconnectDelayRef.current.set(jobId, nextDelay);
       setTimeout(() => {
         if (eventSourceRef.current === es) {
           subscribeToEvents(jobId, lastSequence);
         }
-      }, 1500);
+      }, current);
     };
   };
 
