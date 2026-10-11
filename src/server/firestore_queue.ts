@@ -3,6 +3,7 @@ import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { canTransition } from './job_state.js';
 import { recordLeaseRecovery, recordQueueDepth } from './observability.js';
+import { stripUndefined } from './firestore_sanitize.js';
 import { logger } from './logger.js';
 
 export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
@@ -26,13 +27,17 @@ export class FirestoreQueue {
 
     async add(name: string, data: any) {
         const docRef = adminDb.collection(this.collectionName).doc();
-        await docRef.set({
+        await docRef.set(stripUndefined({
             name,
             data,
             status: 'QUEUED',
             created_at: FieldValue.serverTimestamp(),
             updated_at: FieldValue.serverTimestamp(),
-        });
+            // `data` embeds the full ResearchJob, whose optional fields
+            // (target_company, competitors_input) are `undefined` when left
+            // blank. Firestore rejects `undefined` values, so drop them here
+            // too — otherwise enqueueing a job throws before it can run.
+        }));
         return docRef;
     }
 

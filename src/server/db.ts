@@ -5,6 +5,7 @@
 import { adminDb } from '../lib/firebase-admin.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { logger } from './logger.js';
+import { stripUndefined } from './firestore_sanitize.js';
 import type { 
   ResearchJob, 
   ResearchEvent, 
@@ -17,9 +18,14 @@ export class DatabaseRepository {
     try {
       const jobRef = adminDb.collection('jobs').doc(job.id);
       await jobRef.set({
-        ...job,
+        ...stripUndefined(job),
         user_id: userId,
         updated_at: FieldValue.serverTimestamp(),
+        // Optional job fields (target_company, competitors_input) are `undefined`
+        // when the user leaves them blank. Firestore rejects `undefined` as a
+        // value ("Cannot use undefined as a Firestore value"), which threw and
+        // aborted job creation. stripUndefined drops those keys instead of
+        // rejecting the whole document (SetOptions has no ignore-flag in v14).
       }, { merge: true });
     } catch (err) {
       logger.error('db.save_job_failed', `Error saving job ${job.id}`, {
@@ -72,11 +78,13 @@ export class DatabaseRepository {
   public static async addEvent(jobId: string, event: ResearchEvent): Promise<void> {
     try {
       const eventRef = adminDb.collection(`jobs/${jobId}/events`).doc(`evt-${event.id}`);
-      await eventRef.set({
+      await eventRef.set(stripUndefined({
         ...event,
         job_id: jobId,
         created_at: event.created_at || new Date().toISOString(),
-      });
+        // `metadata` is optional on ResearchEvent; when absent it is `undefined`
+        // and Firestore would reject the whole event. stripUndefined drops it.
+      }));
     } catch (err) {
       logger.error('db.add_event_failed', `Error adding event to job ${jobId}`, {
         job_id: jobId,
