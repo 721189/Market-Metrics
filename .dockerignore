@@ -9,6 +9,9 @@ README.md
 .env
 .env.*
 !.env.example
+# Public Firebase WEB config (not a secret) — needed at `vite build` time so the
+# client bundle has a working default. Real env vars / build args still override.
+!.env.production
 .vscode
 .idea
 *.md

@@ -21,6 +21,11 @@ RUN npm ci --no-audit --no-fund
 COPY src ./src
 COPY index.html ./
 COPY server.ts ./
+# Public Firebase WEB config for the client build (see .env.production). Vite
+# inlines these at `npm run build`; without them the SPA shows a configuration
+# error. Real build-time env vars override this file. Not copied to the runtime
+# stage, so no config leaks into the final image beyond the inlined bundle.
+COPY .env.production ./
 
 # Emits dist/ (client assets) + dist/server.cjs (node bundle).
 RUN npm run build
