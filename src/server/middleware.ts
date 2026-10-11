@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { getAdminApp } from './firebase_admin.js';
 import { logger } from './logger.js';
 import { FieldValue } from 'firebase-admin/firestore';
+import { adminDb } from '../lib/firebase-admin.js';
 
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
@@ -23,7 +24,10 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   const coll = 'idempotency_keys';
   const storeKind = (process.env.IDEMPOTENCY_STORE || 'memory').trim().toLowerCase();
   if (storeKind === 'memory') {
-    const cache = (globalThis.__idempotencyCache as Map<string, { status: number; body: any; ts: number }> | undefined) || new Map();
+    if (!globalThis.__idempotencyCache) {
+      globalThis.__idempotencyCache = new Map();
+    }
+    const cache = globalThis.__idempotencyCache as Map<string, { status: number; body: any; ts: number }>;
     const entry = cache.get(docKey);
     if (entry && Date.now() - entry.ts < 24 * 3600 * 1000) {
       return res.status(entry.status).json(entry.body);
@@ -44,9 +48,9 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
       const d = snap.data() as { status?: number; body?: any } | undefined;
       if (d?.body !== undefined) {
         res.status(d.status ?? 200).json(d.body);
-        throw new adminDb.TransactionTerminated('hit');
+        throw new Error('TX_HIT');
       }
-      throw new adminDb.TransactionTerminated('inflight');
+      throw new Error('TX_INFLIGHT');
     }
     tx.set(ref, { method, path, user_id: userId, key_hash: docKey, createdAt: FieldValue.serverTimestamp() });
   }).then(() => {
@@ -62,8 +66,8 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
       return orig(body);
     };
     next();
-  }, (err: any) => {
-    if (err?.message === 'hit') return;
+  }).catch((err: any) => {
+    if (err?.message === 'TX_HIT' || err?.message === 'TX_INFLIGHT') return;
     next();
   });
 }
@@ -71,7 +75,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
 function persistToFirestore(docKey: string, status: number, body: any): Promise<void> {
   return adminDb.collection('idempotency_keys').doc(docKey).set({
     status, body, respondedAt: FieldValue.serverTimestamp(),
-  }, { merge: true }).catch(() => {});
+  }, { merge: true }).then(() => {}).catch(() => {});
 }
 
 export function rateLimiterMiddleware(opts: { maxRequests?: number; windowSec?: number } = {}) {

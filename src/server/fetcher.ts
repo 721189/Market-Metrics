@@ -234,14 +234,20 @@ export class RealDocumentFetcher {
       logger.warn('fetcher.non_200', 'Non-200 response', { url, status });
       return null;
     }
-    const contentType = (headers['content-type'] || '').toLowerCase();
+    const ct = headers['content-type'];
+    const contentType = (Array.isArray(ct) ? ct[0] : ct || '').toLowerCase();
     // MIME-aware extraction
     const extractedText = await this.detectAndExtract(url, contentType, body);
     if (extractedText === null) {
       logger.warn('fetcher.extract_failed', 'Failed to extract text (unsupported format or empty)', { url, contentType });
       return null;
     }
-    const publishedAt = this.extractPublicationDate(extractedText, headers);
+    const fetchHeaders = new Headers();
+    Object.entries(headers).forEach(([k, v]) => {
+      if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
+      else if (v !== undefined) fetchHeaders.append(k, v);
+    });
+    const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
     const title = this.extractTitle(extractedText, url);
     const contentHash = this.computeSha256(extractedText);
     const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
@@ -260,6 +266,14 @@ export class RealDocumentFetcher {
       chunks,
       retrievedAt: new Date().toISOString(),
     };
+  }
+
+  private static extractPublisher(text: string, url: string): string {
+    try { return new URL(url).hostname; } catch { return 'Unknown'; }
+  }
+
+  private static splitParagraphs(text: string): string[] {
+    return text.split(/\n\s*\n/).map(p => p.trim()).filter(p => p.length > 0);
   }
 
   public static extractTextFromHtml(html: string, url: string, domain: string): { title: string; publisher: string; text: string; paragraphs: string[] } {

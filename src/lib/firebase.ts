@@ -1,4 +1,4 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
@@ -61,14 +61,42 @@ function resolveFirebaseConfig() {
   };
 }
 
-const firebaseConfig = resolveFirebaseConfig();
+// Initialise Firebase WITHOUT ever throwing at module-evaluation time.
+//
+// A throw here is fatal for the SPA: this module is imported by main.tsx ->
+// App.tsx, so an exception during evaluation aborts the whole bundle before
+// React ever mounts. The visible result is an empty #root on the dark page
+// background — a "black screen" with no diagnostic. That is exactly what a
+// Render/Vercel deploy produced when the build-time VITE_FIREBASE_* variables
+// were missing.
+//
+// Instead we capture the configuration error, expose it as
+// `firebaseConfigError`, and let the UI render an explicit, actionable message.
+// This still fails CLOSED: there is deliberately no silent fallback to the AI
+// Studio applet project — a misconfigured deployment simply cannot authenticate
+// until the operator supplies the variables. See render.yaml / .env.example.
+let firebaseApp: FirebaseApp | null = null;
+export const firebaseConfigError: string | null = (() => {
+  try {
+    const config = resolveFirebaseConfig();
+    firebaseApp = initializeApp(config);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+})();
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-export const googleProvider = new GoogleAuthProvider();
+export const auth = firebaseApp ? getAuth(firebaseApp) : null;
+export const db = firebaseApp ? getFirestore(firebaseApp) : null;
+export const googleProvider = firebaseApp ? new GoogleAuthProvider() : null;
 
 export const loginWithGoogle = async () => {
+  if (!auth || !googleProvider) {
+    throw new Error(
+      firebaseConfigError ||
+        'Firebase is not configured for this deployment. Set the VITE_FIREBASE_* build-time variables and redeploy.',
+    );
+  }
   try {
     return await signInWithPopup(auth, googleProvider);
   } catch (error: any) {
@@ -79,4 +107,4 @@ export const loginWithGoogle = async () => {
     throw error;
   }
 };
-export const logout = () => signOut(auth);
+export const logout = () => (auth ? signOut(auth) : Promise.resolve());

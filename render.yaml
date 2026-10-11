@@ -1,0 +1,95 @@
+# =============================================================================
+# Render Blueprint — Market-Metrics (single-service full-stack deploy)
+# =============================================================================
+# This project ships as ONE service: the Express server (dist/server.cjs) both
+# serves the API and, in production, serves the built Vite SPA from dist/ as
+# static files (see server.ts -> allowViteDevServer === false branch).
+#
+# THE #1 CAUSE OF A "BLACK SCREEN" ON RENDER
+# ------------------------------------------
+# The client bundle reads Firebase config from VITE_FIREBASE_* variables, which
+# Vite INLINES AT BUILD TIME (they are NOT read at runtime). If they are absent
+# during `npm run build`, the bundle still builds but throws the moment it loads
+# in the browser, before React mounts — leaving an empty #root on the dark page
+# background. src/lib/firebase.ts now surfaces that as an explicit
+# "Configuration Required" screen instead of a black screen, but the real fix is
+# to provide the variables below in the BUILD environment.
+#
+# On Render, environment variables set on the service ARE available at build
+# time, so defining them here (Blueprint) or in the dashboard is sufficient.
+# After changing any VITE_FIREBASE_* value you MUST redeploy so the client
+# bundle is rebuilt with the new inlined values.
+#
+# Docs: https://render.com/docs/blueprint-spec
+# =============================================================================
+
+services:
+  - type: web
+    name: market-metrics
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    # Build the client bundle (inlines VITE_FIREBASE_*) + server bundle, then
+    # start the production server which serves dist/ statically.
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      # --- Runtime environment ------------------------------------------------
+      # Forces production isolation (static SPA serving, info log level, and the
+      # fail-closed budget gate). An unset APP_ENV would resolve to development.
+      - key: NODE_ENV
+        value: production
+      - key: APP_ENV
+        value: production
+
+      # --- Server-side Firebase identifiers (RUNTIME) ------------------------
+      # Required by validateEnvironmentOrThrow() for production; the server will
+      # fail closed at boot if any is missing. sync:false => Render prompts for
+      # the value in the dashboard instead of committing it.
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIRESTORE_DATABASE_ID
+        sync: false
+      - key: STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_AUTH_DOMAIN
+        sync: false
+
+      # Service-account JSON (raw or base64) so firebase-admin can authenticate
+      # on Render, which has no GCP metadata/ADC. See the bootstrap block at the
+      # top of server.ts and src/lib/firebase-admin.ts.
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+
+      # Gemini credential for research runs (required in production).
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # --- Client-side Firebase config (BUILD TIME — inlined by Vite) --------
+      # These MUST match the same Firebase project as the server identifiers
+      # above, otherwise the browser cannot verify ID tokens against the API.
+      - key: VITE_FIREBASE_API_KEY
+        sync: false
+      - key: VITE_FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: VITE_FIREBASE_PROJECT_ID
+        sync: false
+      - key: VITE_FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: VITE_FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: VITE_FIREBASE_APP_ID
+        sync: false
+
+      # --- Optional / operational --------------------------------------------
+      # Same-origin deploy, so no absolute API URL or CORS allowlist is needed.
+      # Left empty so localhost origins are reflected only in non-production.
+      - key: FRONTEND_ORIGIN
+        sync: false
+      # Comma-separated Firebase UIDs allowed to reach admin/system endpoints.
+      # Empty = nobody (fail closed).
+      - key: ADMIN_UIDS
+        sync: false

@@ -270,6 +270,8 @@ export class ResearchPipelineManager {
       });
     }
 
+    const userId = (job as any).user_id || 'unknown';
+    const requestId = (job as any).request_id || `req-${job.id}`;
     const costGovernor = new CostGovernor({ userId });
     let artifactStorage: import('./artifacts.js').ArtifactStorage;
     try {
@@ -280,17 +282,15 @@ export class ResearchPipelineManager {
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
-    const requestId = (job as any).request_id || `req-${job.id}`;
-    const workerUserId = (job as any).user_id || 'unknown';
     // Wall-clock start, so job_duration_ms measures the whole pipeline rather
     // than only the stages that remember to report a duration.
     const pipelineStartedAt = Date.now();
-    recordJobStarted({ job_id: job.id, user_id: workerUserId });
+    recordJobStarted({ job_id: job.id, user_id: userId });
 
     function logStage(event: string, stage: string, status: string, message: string, durationMs?: number): void {
       logEnvelope(event, {
         request_id: requestId,
-        user_id: workerUserId,
+        user_id: userId,
         job_id: job.id,
         stage,
         status,
@@ -408,7 +408,7 @@ export class ResearchPipelineManager {
     for (const src of sources) {
       if (isCancelled(job, signal)) return;
       try {
-        const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
+        const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000);
         if (!fetchedDoc.extractedText || fetchedDoc.extractedText.trim().length === 0) {
           throw new Error('Document body was empty after text extraction');
         }
@@ -969,8 +969,7 @@ export class ResearchPipelineManager {
       throw new Error(`Citation graph validation failed (${graphValidation.errors.length} errors). Report withheld to preserve citation integrity. ${summary}`);
     }
 
-    const userId = (job as any).user_id;
-    if (!userId) throw new Error('Missing user_id for report saving');
+    if (!userId || userId === 'unknown') throw new Error('Missing user_id for report saving');
 
     // Save final report to persistent DatabaseRepository
     await DatabaseRepository.saveReport(finalReport, userId);

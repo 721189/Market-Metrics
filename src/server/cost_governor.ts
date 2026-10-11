@@ -177,13 +177,21 @@ export class CostGovernor {
    */
   async canStartJob(userId: string): Promise<string | null> {
     if (!userId) return "User id is required for budget check";
-    // In-memory (single replica, no persistence): the in-process counters are
-    // the only source of truth. This is the beta-safe default.
-    if (getCostStore().kind === 'memory') {
-      return this.canStartJobInMemory(userId);
-    }
-    // Persistent store (Firestore): read the real totals. In production,
-    // any failure to read the store is treated as 'budget exhausted'.
+    // The CostStore is the single source of truth for recorded spend — both
+    // recordJobCost() and getUserCostBreakdown() read/write it. The pre-queue
+    // gate MUST read the same totals, otherwise a user over budget can keep
+    // queueing jobs forever.
+    //
+    // A previous version special-cased the in-memory store and read
+    // `this.globalCost.actual_cost_usd` instead. That counter is only mutated
+    // by the per-request accounting methods (recordModelCall/recordFetch/...),
+    // NEVER by recordJobCost(), so a freshly constructed governor (which is how
+    // the gate is always called — see pipeline.ts) always saw 0 and the budget
+    // gate could never trip. Reading the store fixes that for both backends.
+    //
+    // In production, any failure to read the store is treated as 'budget
+    // exhausted' (fail closed). Outside production we fail open (cost control
+    // must never become an availability gate).
     try {
       return await this.canStartJobPersistent(userId);
     } catch (err) {
@@ -201,20 +209,6 @@ export class CostGovernor {
       });
       return null;
     }
-  }
-
-  private canStartJobInMemory(userId: string): string | null {
-    const daily = this.globalCost.actual_cost_usd;
-    if (daily >= this.persistent.userDailyBudgetUsd) {
-      return `BUDGET_EXCEEDED: user daily budget $${this.persistent.userDailyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)} today)`;
-    }
-    if (daily >= this.persistent.userMonthlyBudgetUsd) {
-      return `BUDGET_EXCEEDED: user monthly budget $${this.persistent.userMonthlyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)} this month)`;
-    }
-    if (daily >= this.persistent.globalDailyBudgetUsd) {
-      return `BUDGET_EXCEEDED: platform daily budget $${this.persistent.globalDailyBudgetUsd} reached (in-memory estimate $${daily.toFixed(2)}) — try again tomorrow`;
-    }
-    return null;
   }
 
   private async canStartJobPersistent(userId: string): Promise<string | null> {

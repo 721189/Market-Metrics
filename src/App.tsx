@@ -23,7 +23,7 @@ import type {
   Claim 
 } from './types.js';
 
-import { auth, loginWithGoogle, logout } from './lib/firebase.js';
+import { auth, loginWithGoogle, logout, firebaseConfigError } from './lib/firebase.js';
 import { onAuthStateChanged, User } from 'firebase/auth';
 
 export default function App() {
@@ -41,6 +41,14 @@ export default function App() {
 
   // Auth Listener
   useEffect(() => {
+    // When Firebase failed to initialise (missing build-time VITE_FIREBASE_*
+    // config) there is no auth instance to observe. Clear the loading state so
+    // the configuration-error screen below can render instead of an infinite
+    // spinner on an otherwise black page.
+    if (!auth) {
+      setLoading(false);
+      return;
+    }
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
@@ -308,6 +316,41 @@ export default function App() {
       console.error('JSON export failed:', err);
     }
   };
+
+  // A missing build-time Firebase configuration used to throw at module load,
+  // which aborted the bundle before React mounted and left a black screen.
+  // Now surface it explicitly so the operator can see exactly what to fix.
+  if (firebaseConfigError) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <div className="w-full max-w-lg bg-slate-900 border border-red-900/50 rounded-2xl p-8 shadow-2xl">
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center justify-center">
+                <Cpu className="h-5 w-5 text-red-400" />
+              </div>
+              <h1 className="text-xl font-bold text-white tracking-tight">Configuration Required</h1>
+            </div>
+            <p className="text-slate-400 text-sm">
+              This deployment is missing its build-time Firebase configuration, so the
+              application cannot start. This is a deployment misconfiguration — not a
+              code error.
+            </p>
+            <pre className="text-[11px] leading-relaxed text-red-300 bg-red-950/30 border border-red-900/40 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-words">
+{firebaseConfigError}
+            </pre>
+            <p className="text-slate-500 text-xs">
+              Set the <code className="text-cyan-400">VITE_FIREBASE_*</code> variables in your
+              host&rsquo;s <strong>build</strong> environment — Vite inlines them at build time, so they
+              are not read at runtime — then redeploy. See{' '}
+              <code className="text-cyan-400">.env.example</code> and{' '}
+              <code className="text-cyan-400">render.yaml</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
