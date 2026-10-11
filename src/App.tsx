@@ -168,7 +168,31 @@ export default function App() {
         const data = await res.json();
         ticket = data.ticket;
       } else {
-        console.error('Could not obtain stream ticket:', res.status);
+        // A failed ticket means no live progress. Previously this returned
+        // silently, so the progress view just hung with no explanation. Read the
+        // server's real reason (401 token failure, 404 missing job, etc.) and
+        // push it into the visible event feed so the user sees WHY.
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error?.message) detail = body.error.message;
+          if (body?.error?.code) detail = `[${body.error.code}] ${detail}`;
+        } catch {
+          /* non-JSON body */
+        }
+        console.error('Could not obtain stream ticket:', detail);
+        const nowMs = Date.now();
+        setEvents(prev => [...prev, {
+          id: `client-ticket-err-${nowMs}`,
+          sequence: nowMs,
+          job_id: jobId,
+          event_type: 'error',
+          stage: 'PLANNING',
+          message: `Could not open the live progress stream: ${detail}. The job may still be running — reopen it to resume.`,
+          progress: 0,
+          created_at: new Date(nowMs).toISOString(),
+          created_at_ms: nowMs,
+        }]);
         return;
       }
     } catch (err) {
@@ -247,7 +271,21 @@ export default function App() {
       });
 
       if (!res.ok) {
-        throw new Error('Failed to create research job');
+        // Surface the server's REAL reason instead of a generic string. The API
+        // returns { error: { code, message } } — e.g. 401 UNAUTHORIZED (token
+        // verification failed / server-vs-client project mismatch), 402
+        // BUDGET_EXCEEDED, or 500 (Firestore "Could not load the default
+        // credentials"). Swallowing this is why "research can't start" looked
+        // mysterious on a Render deploy missing FIREBASE_SERVICE_ACCOUNT.
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error?.message) detail = body.error.message;
+          if (body?.error?.code) detail = `[${body.error.code}] ${detail}`;
+        } catch {
+          // Non-JSON error body (proxy/CDN HTML) — keep the status-based detail.
+        }
+        throw new Error(detail);
       }
 
       const created = await res.json();
