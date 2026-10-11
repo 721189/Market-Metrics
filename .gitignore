@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+# The production client config (public Firebase web keys) is committed on
+# purpose so `vite build` has a working default with no dashboard setup. Real
+# environment variables still override it. Do NOT commit service-account keys.
+!.env.production

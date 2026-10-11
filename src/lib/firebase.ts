@@ -48,7 +48,7 @@ function resolveFirebaseConfig() {
   if (missing.length > 0) {
     throw new Error(
       `[firebase] production build missing required env: ${missing.join(', ')}. ` +
-        'Set VITE_FIREBASE_* in the Vercel project (staging and production values must differ).'
+        'Set the VITE_FIREBASE_* variables in your host build environment (see .env.production and render.yaml) and redeploy.'
     );
   }
   return {
