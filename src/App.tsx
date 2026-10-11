@@ -37,6 +37,8 @@ export default function App() {
   const [isNewModalOpen, setIsNewModalOpen] = useState<boolean>(false);
   
   const [inspectedClaim, setInspectedClaim] = useState<Claim | null>(null);
+  const [signingIn, setSigningIn] = useState<boolean>(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Auth Listener
@@ -77,6 +79,21 @@ export default function App() {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`
     };
+  };
+
+  const handleGoogleSignIn = async () => {
+    setSignInError(null);
+    setSigningIn(true);
+    try {
+      const result = await loginWithGoogle();
+      // On success the onAuthStateChanged listener sets the user; nothing to do.
+      // On a benign close (user closed the popup) there is no message to show.
+      if (!result.ok && result.message) {
+        setSignInError(result.message);
+      }
+    } finally {
+      setSigningIn(false);
+    }
   };
 
   const fetchJobsList = async () => {
@@ -376,12 +393,21 @@ export default function App() {
               <p className="text-slate-400 mt-2">Institutional-grade research for strategic decision makers.</p>
             </div>
             <button
-              onClick={loginWithGoogle}
-              className="w-full flex items-center justify-center gap-3 bg-white text-slate-950 font-bold py-3.5 px-6 rounded-xl hover:bg-slate-100 transition-all active:scale-[0.98]"
+              onClick={handleGoogleSignIn}
+              disabled={signingIn}
+              className="w-full flex items-center justify-center gap-3 bg-white text-slate-950 font-bold py-3.5 px-6 rounded-xl hover:bg-slate-100 transition-all active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
-              Sign in with Google
+              {signingIn ? 'Opening Google…' : 'Sign in with Google'}
             </button>
+            {signInError && (
+              <div
+                role="alert"
+                className="w-full text-left text-[12px] leading-relaxed text-red-300 bg-red-950/40 border border-red-900/50 rounded-lg p-3 break-words"
+              >
+                {signInError}
+              </div>
+            )}
             <p className="text-[11px] text-slate-500 uppercase tracking-widest font-semibold">Protected by Firebase Auth</p>
           </div>
         </div>

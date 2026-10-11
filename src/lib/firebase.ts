@@ -90,21 +90,58 @@ export const auth = firebaseApp ? getAuth(firebaseApp) : null;
 export const db = firebaseApp ? getFirestore(firebaseApp) : null;
 export const googleProvider = firebaseApp ? new GoogleAuthProvider() : null;
 
-export const loginWithGoogle = async () => {
+export interface GoogleSignInResult {
+  ok: boolean;
+  /** Firebase error code (e.g. 'auth/unauthorized-domain') when ok is false. */
+  code?: string;
+  /** Human-readable, actionable message when ok is false. */
+  message?: string;
+}
+
+/**
+ * Google sign-in via popup. Never throws — resolves with a structured result so
+ * the UI can show WHY a sign-in failed. The single most common production
+ * failure is `auth/unauthorized-domain`: the deployed origin (e.g.
+ * https://<app>.onrender.com) is not in Firebase Console -> Authentication ->
+ * Settings -> Authorized domains, so Firebase opens the popup and immediately
+ * closes it. That is a Firebase Console setting, not a code bug.
+ */
+export const loginWithGoogle = async (): Promise<GoogleSignInResult> => {
   if (!auth || !googleProvider) {
-    throw new Error(
-      firebaseConfigError ||
+    return {
+      ok: false,
+      code: 'auth/not-configured',
+      message:
+        firebaseConfigError ||
         'Firebase is not configured for this deployment. Set the VITE_FIREBASE_* build-time variables and redeploy.',
-    );
+    };
   }
   try {
-    return await signInWithPopup(auth, googleProvider);
+    await signInWithPopup(auth, googleProvider);
+    return { ok: true };
   } catch (error: any) {
-    if (error.code === 'auth/popup-closed-by-user') {
-      console.log('User closed the login popup.');
-      return null;
+    // The user closed the popup themselves — not an error worth surfacing.
+    if (error?.code === 'auth/popup-closed-by-user' || error?.code === 'auth/cancelled-popup-request') {
+      return { ok: false, code: error.code };
     }
-    throw error;
+    const code: string = error?.code || 'auth/unknown';
+    const host = typeof window !== 'undefined' ? window.location.host : '';
+    let message = error?.message || 'Google sign-in failed. Please try again.';
+    if (code === 'auth/unauthorized-domain') {
+      message =
+        `This domain (${host}) is not authorized for Google sign-in. ` +
+        `In Firebase Console -> Authentication -> Settings -> Authorized domains, ` +
+        `click "Add domain" and add: ${host || 'your onrender.com domain'}.`;
+    } else if (code === 'auth/operation-not-allowed' || code === 'auth/operation-not-supported') {
+      message =
+        'Google sign-in is not enabled for this Firebase project. ' +
+        'In Firebase Console -> Authentication -> Sign-in method, enable the "Google" provider.';
+    } else if (code === 'auth/popup-blocked-by-browser') {
+      message = 'Your browser blocked the sign-in popup. Allow popups for this site, then try again.';
+    } else if (code === 'auth/network-request-failed') {
+      message = 'A network error occurred while contacting Google/Firebase. Check your connection and try again.';
+    }
+    return { ok: false, code, message };
   }
 };
 export const logout = () => (auth ? signOut(auth) : Promise.resolve());
