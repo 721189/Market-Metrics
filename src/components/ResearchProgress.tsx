@@ -1,4 +1,5 @@
 import React from 'react';
+import { AnimatedNumber } from './motion.js';
 import { 
   CheckCircle2, 
   Clock, 
@@ -211,7 +212,10 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
             Evidence Score
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-cyan-300">
-            {job.stats.evidence_score || (isFinished ? 88 : '--')}/100
+            <AnimatedNumber
+              value={job.stats.evidence_score || (isFinished ? 88 : 0)}
+            />
+            {job.stats.evidence_score || isFinished ? '/100' : '--/100'}
           </div>
           <div className="text-[10px] text-cyan-400/80 mt-0.5">Confidence Metric</div>
         </div>

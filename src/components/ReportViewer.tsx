@@ -33,12 +33,14 @@ interface ReportViewerProps {
   report: FullResearchReport;
   onInspectClaim: (claim: Claim) => void;
   onNavigateTab: (tab: 'report' | 'evidence' | 'sources') => void;
+  onExportCsv: () => void;
 }
 
 export const ReportViewer: React.FC<ReportViewerProps> = ({
   report,
   onInspectClaim,
   onNavigateTab,
+  onExportCsv,
 }) => {
   const [activeSection, setActiveSection] = useState<string>('summary');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -185,14 +187,14 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
             {copiedSummary ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
             <span>{copiedSummary ? 'Copied to Clipboard!' : 'Copy Summary'}</span>
           </button>
-          <a
-            href={`/api/v1/research/${report.job_id}/export/csv`}
-            download
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors"
+          <button
+            type="button"
+            onClick={onExportCsv}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"
           >
             <Download className="h-3.5 w-3.5" />
             <span>Export CSV</span>
-          </a>
+          </button>
         </div>
       </div>
 

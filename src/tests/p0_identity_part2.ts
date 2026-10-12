@@ -47,14 +47,21 @@ export const p0IdentityStaticChecks: Check[] = [
     name: 'client never places a Firebase ID token in a URL',
     fn: async () => {
       const app = readSource('src/App.tsx');
+      // The export flow now lives in a shared helper (src/lib/download.ts); read
+      // it too so the guard covers where the token is actually consumed.
+      const download = readSource('src/lib/download.ts');
+      const sources = [app, download];
       // Precise check: a token must never be interpolated into a query string
       // (?token=${...}). Prose that mentions the old behaviour is not a defect.
-      const tokenInterpolatedIntoUrl = /[?&]token=\$\{/.test(app);
+      const tokenInterpolatedIntoUrl = sources.some((s) => /[?&]token=\$\{/.test(s));
       const usesTicket =
         /stream-ticket/.test(app) && /events\?ticket=\$\{ticket\}/.test(app);
+      // Exports must go through the authenticated blob download (Bearer header +
+      // createObjectURL), never a cookieless <a href download>.
       const exportUsesBlob =
-        /fetch\(`\/api\/v1\/research\/\$\{currentJob\.id\}\/export\/json`,\s*\{\s*headers\s*\}\)/.test(app) &&
-        /createObjectURL/.test(app);
+        download.includes('Authorization') &&
+        download.includes('createObjectURL') &&
+        /authenticatedDownload\(/.test(app);
       return !tokenInterpolatedIntoUrl && usesTicket && exportUsesBlob;
     },
   },

@@ -11,6 +11,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import type { Claim, Evidence, Source } from '../types.js';
+import { motion, AnimatePresence } from './motion.js';
 
 interface CitationModalProps {
   claim: Claim | null;
@@ -23,11 +24,23 @@ export const CitationModal: React.FC<CitationModalProps> = ({
   onClose,
   onViewSource,
 }) => {
-  if (!claim) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-      <div className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl text-slate-100">
+    <AnimatePresence>
+      {claim && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+        >
+          <motion.div
+            className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl text-slate-100"
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+          >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-4">
           <div className="flex items-center gap-2.5">
@@ -162,7 +175,9 @@ export const CitationModal: React.FC<CitationModalProps> = ({
             Close Inspector
           </button>
         </div>
-      </div>
-    </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 };

@@ -20,6 +20,7 @@ import {
   Activity
 } from 'lucide-react';
 import type { ResearchJobRequest, ResearchJob } from '../types.js';
+import { motion, AnimatePresence, listStagger, listItem } from './motion.js';
 
 interface HomeWorkspaceProps {
   onLaunchResearch: (data: ResearchJobRequest) => void;
@@ -222,7 +223,16 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
             </button>
 
             {isAdvancedOpen && (
-              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-4 animate-in fade-in">
+              <AnimatePresence initial={false}>
+                <motion.div
+                  key="advanced"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.25, ease: 'easeOut' }}
+                  className="overflow-hidden"
+                >
+                  <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-400 mb-1 flex items-center gap-1">
@@ -278,7 +288,9 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
                     })}
                   </div>
                 </div>
-              </div>
+                </div>
+                </motion.div>
+              </AnimatePresence>
             )}
           </div>
 
@@ -354,10 +366,16 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
             </h3>
           </div>
 
-          <div className="space-y-2">
+          <motion.div
+            variants={listStagger}
+            initial="hidden"
+            animate="show"
+            className="space-y-2"
+          >
             {recentJobs.map(job => (
-              <div
+              <motion.div
                 key={job.id}
+                variants={listItem}
                 onClick={() => onOpenJob(job)}
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/50 p-4 hover:border-slate-700 hover:bg-slate-900 cursor-pointer transition-all"
               >
@@ -394,9 +412,9 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
                     View Report &rarr;
                   </button>
                 </div>
-              </div>
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
         </div>
       )}
 

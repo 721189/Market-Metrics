@@ -25,6 +25,8 @@ import type {
 
 import { auth, loginWithGoogle, logout, firebaseConfigError } from './lib/firebase.js';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { authenticatedDownload } from './lib/download.js';
+import { MotionConfig, motion, fadeInUp } from './components/motion.js';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -337,15 +339,35 @@ export default function App() {
     }
   };
 
-  const handleOpenExistingJob = (job: ResearchJob) => {
+  const handleOpenExistingJob = async (job: ResearchJob) => {
     setCurrentJob(job);
     if (job.report) {
       setReport(job.report);
       setActiveView('report');
-    } else {
-      setActiveView('progress');
-      subscribeToEvents(job.id);
+      return;
     }
+    // The list payload stores reports in a separate collection, so a COMPLETED
+    // job can arrive here with no embedded `report`. Fetch it explicitly from
+    // the dedicated report endpoint instead of dropping the user onto the
+    // progress view for a job that has actually finished.
+    if (job.status === 'COMPLETED') {
+      try {
+        const headers = await getHeaders();
+        const res = await fetch(`/api/v1/research/${job.id}/report`, { headers });
+        if (res.ok) {
+          const full = await res.json();
+          if (full && !full.message) {
+            setReport(full as FullResearchReport);
+            setActiveView('report');
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Could not fetch completed report:', err);
+      }
+    }
+    setActiveView('progress');
+    subscribeToEvents(job.id);
   };
 
   const handleCancelJob = async () => {
@@ -363,25 +385,20 @@ export default function App() {
     if (!currentJob) return;
     // Bearer header + programmatic download. The Firebase ID token is never
     // placed in a URL (previous behaviour used ?token=<idToken>).
-    try {
-      const headers = await getHeaders();
-      const res = await fetch(`/api/v1/research/${currentJob.id}/export/json`, { headers });
-      if (!res.ok) {
-        console.error('JSON export failed:', res.status);
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `research-${currentJob.id}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('JSON export failed:', err);
-    }
+    await authenticatedDownload(
+      `/api/v1/research/${currentJob.id}/export/json`,
+      `research-${currentJob.id}.json`,
+      async () => user?.getIdToken()
+    );
+  };
+
+  const handleExportCsv = async () => {
+    if (!currentJob) return;
+    await authenticatedDownload(
+      `/api/v1/research/${currentJob.id}/export/csv`,
+      `research-${currentJob.id}.csv`,
+      async () => user?.getIdToken()
+    );
   };
 
   // A missing build-time Firebase configuration used to throw at module load,
@@ -475,75 +492,84 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
-      {/* Top Navbar Header */}
-      <Header
-        user={user}
-        currentJob={currentJob}
-        report={report}
-        onNewResearch={() => setIsNewModalOpen(true)}
-        onSelectBenchmark={loadBenchmark}
-        activeView={activeView === 'print' ? 'report' : activeView}
-        setActiveView={(v) => setActiveView(v)}
-        onExportJson={handleExportJson}
-        onPrintReport={() => setActiveView('print')}
-      />
+    <MotionConfig reducedMotion="user">
+      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
+        {/* Top Navbar Header */}
+        <Header
+          user={user}
+          currentJob={currentJob}
+          report={report}
+          onNewResearch={() => setIsNewModalOpen(true)}
+          onSelectBenchmark={loadBenchmark}
+          activeView={activeView === 'print' ? 'report' : activeView}
+          setActiveView={(v) => setActiveView(v)}
+          onExportJson={handleExportJson}
+          onPrintReport={() => setActiveView('print')}
+        />
 
-      {/* Main Body View */}
-      <main className="flex-1 pb-16">
-        {activeView === 'workspace' && (
-          <HomeWorkspace
-            onLaunchResearch={handleLaunchResearch}
-            recentJobs={recentJobs}
-            onOpenJob={handleOpenExistingJob}
-          />
-        )}
+        {/* Main Body View — keyed so switching tabs cross-fades. */}
+        <motion.main
+          key={activeView}
+          variants={fadeInUp}
+          initial="hidden"
+          animate="show"
+          className="flex-1 pb-16"
+        >
+          {activeView === 'workspace' && (
+            <HomeWorkspace
+              onLaunchResearch={handleLaunchResearch}
+              recentJobs={recentJobs}
+              onOpenJob={handleOpenExistingJob}
+            />
+          )}
 
-        {activeView === 'progress' && currentJob && (
-          <ResearchProgress
-            job={currentJob}
-            events={events}
-            onCancel={handleCancelJob}
-            onViewReport={() => setActiveView('report')}
-          />
-        )}
+          {activeView === 'progress' && currentJob && (
+            <ResearchProgress
+              job={currentJob}
+              events={events}
+              onCancel={handleCancelJob}
+              onViewReport={() => setActiveView('report')}
+            />
+          )}
 
-        {activeView === 'report' && report && (
-          <ReportViewer
-            report={report}
-            onInspectClaim={(claim) => setInspectedClaim(claim)}
-            onNavigateTab={(tab) => setActiveView(tab)}
-          />
-        )}
+          {activeView === 'report' && report && (
+            <ReportViewer
+              report={report}
+              onInspectClaim={(claim) => setInspectedClaim(claim)}
+              onNavigateTab={(tab) => setActiveView(tab)}
+              onExportCsv={handleExportCsv}
+            />
+          )}
 
-        {activeView === 'evidence' && report && (
-          <EvidenceExplorer
-            report={report}
-            onInspectClaim={(claim) => setInspectedClaim(claim)}
-          />
-        )}
+          {activeView === 'evidence' && report && (
+            <EvidenceExplorer
+              report={report}
+              onInspectClaim={(claim) => setInspectedClaim(claim)}
+            />
+          )}
 
-        {activeView === 'sources' && report && (
-          <SourcesAppendix report={report} />
-        )}
-      </main>
+          {activeView === 'sources' && report && (
+            <SourcesAppendix report={report} />
+          )}
+        </motion.main>
 
-      {/* New Research Form Modal */}
-      <NewResearchModal
-        isOpen={isNewModalOpen}
-        onClose={() => setIsNewModalOpen(false)}
-        onSubmit={handleLaunchResearch}
-        onLoadBenchmark={loadBenchmark}
-      />
+        {/* New Research Form Modal */}
+        <NewResearchModal
+          isOpen={isNewModalOpen}
+          onClose={() => setIsNewModalOpen(false)}
+          onSubmit={handleLaunchResearch}
+          onLoadBenchmark={loadBenchmark}
+        />
 
-      {/* Citation / Provenance Drilldown Modal */}
-      <CitationModal
-        claim={inspectedClaim}
-        onClose={() => setInspectedClaim(null)}
-      />
+        {/* Citation / Provenance Drilldown Modal */}
+        <CitationModal
+          claim={inspectedClaim}
+          onClose={() => setInspectedClaim(null)}
+        />
 
-      {/* System Health, Diagnostics & Test Suite Modal */}
-      
-    </div>
+        {/* System Health, Diagnostics & Test Suite Modal */}
+
+      </div>
+    </MotionConfig>
   );
 }
