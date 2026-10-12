@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Sparkles, 
   Search, 
@@ -18,7 +18,9 @@ import {
   Clock,
   Zap,
   Activity,
-  Trash2
+  Trash2,
+  RotateCcw,
+  Filter
 } from 'lucide-react';
 import type { ResearchJobRequest, ResearchJob } from '../types.js';
 import { motion, AnimatePresence, listStagger, listItem } from './motion.js';
@@ -106,6 +108,46 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
   const [targetCompany, setTargetCompany] = useState('');
   const [selectedObjectives, setSelectedObjectives] = useState<string[]>(ANALYSIS_DIMENSIONS);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+
+  // --- Research library: search / filter / sort ---
+  const [libraryQuery, setLibraryQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'COMPLETED' | 'ACTIVE'>('all');
+  const [sortBy, setSortBy] = useState<'recent' | 'score'>('recent');
+
+  const filteredJobs = useMemo(() => {
+    const q = libraryQuery.trim().toLowerCase();
+    const matches = recentJobs.filter(job => {
+      if (statusFilter === 'COMPLETED' && job.status !== 'COMPLETED') return false;
+      if (statusFilter === 'ACTIVE' && job.status === 'COMPLETED') return false;
+      if (!q) return true;
+      return (
+        job.question.toLowerCase().includes(q) ||
+        job.industry.toLowerCase().includes(q) ||
+        job.geography.toLowerCase().includes(q)
+      );
+    });
+    const sorted = [...matches];
+    if (sortBy === 'score') {
+      sorted.sort((a, b) => (b.stats?.evidence_score || 0) - (a.stats?.evidence_score || 0));
+    } else {
+      // Most-recent first. Fall back to a stable secondary key on missing dates.
+      sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    }
+    return sorted;
+  }, [recentJobs, libraryQuery, statusFilter, sortBy]);
+
+  const handleRerun = (job: ResearchJob) => {
+    // Re-run this research with the same inputs, creating a fresh job.
+    onLaunchResearch({
+      question: job.question,
+      industry: job.industry || 'Software & Technology',
+      geography: job.geography || 'Global',
+      time_horizon: job.time_horizon || '2026-2030',
+      objectives: Array.isArray(job.objectives) && job.objectives.length > 0 ? job.objectives : ANALYSIS_DIMENSIONS,
+      target_company: job.target_company || undefined,
+      competitors: Array.isArray(job.competitors_input) ? job.competitors_input : undefined,
+    });
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -369,13 +411,57 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
             </h3>
           </div>
 
+          {/* Search / filter / sort toolbar */}
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+              <input
+                type="text"
+                value={libraryQuery}
+                onChange={e => setLibraryQuery(e.target.value)}
+                placeholder="Search by question, domain, or region…"
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Filter className="h-3.5 w-3.5 text-slate-500 flex-shrink-0" />
+              {(['all', 'COMPLETED', 'ACTIVE'] as const).map(opt => (
+                <button
+                  key={opt}
+                  onClick={() => setStatusFilter(opt)}
+                  className={`rounded-md px-2 py-1 text-[10px] font-bold uppercase tracking-wide border transition-colors ${
+                    statusFilter === opt
+                      ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                      : 'bg-slate-800/50 text-slate-400 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  {opt === 'all' ? 'All' : opt === 'COMPLETED' ? 'Completed' : 'Active'}
+                </button>
+              ))}
+              <select
+                value={sortBy}
+                onChange={e => setSortBy(e.target.value as 'recent' | 'score')}
+                aria-label="Sort reports"
+                className="ml-1 rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-[10px] font-bold text-slate-300 focus:border-cyan-500 focus:outline-none"
+              >
+                <option value="recent">Newest</option>
+                <option value="score">Top Score</option>
+              </select>
+            </div>
+          </div>
+
           <motion.div
             variants={listStagger}
             initial="hidden"
             animate="show"
             className="space-y-2"
           >
-            {recentJobs.map(job => (
+            {filteredJobs.length === 0 ? (
+              <p className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">
+                No reports match your filters.
+              </p>
+            ) : (
+            filteredJobs.map(job => (
               <motion.div
                 key={job.id}
                 variants={listItem}
@@ -415,6 +501,14 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
                     View Report &rarr;
                   </button>
                   <button
+                    onClick={(e) => { e.stopPropagation(); handleRerun(job); }}
+                    title="Re-run with the same inputs"
+                    aria-label={`Re-run research: ${job.question}`}
+                    className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:border-cyan-500/50 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                  <button
                     onClick={(e) => { e.stopPropagation(); onDeleteJob(job); }}
                     title="Delete report"
                     aria-label={`Delete report: ${job.question}`}
@@ -424,7 +518,8 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
                   </button>
                 </div>
               </motion.div>
-            ))}
+            ))
+          )}
           </motion.div>
         </div>
       )}
