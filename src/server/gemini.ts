@@ -48,6 +48,38 @@ export function getGemini(): GoogleGenAI | null {
 }
 
 /**
+ * Model selection (configurable per deployment, no code change).
+ *
+ * Every stage defaults to gemini-2.5-flash — the strongest cheap model on the
+ * Gemini free tier. Override via env vars:
+ *   GEMINI_MODEL            -> applies to every stage
+ *   GEMINI_MODEL_<ROLE>     -> per-stage override, wins over GEMINI_MODEL
+ * where <ROLE> is PLANNER, DISCOVERY, EXTRACTION, COMPETITORS, FORECAST or
+ * SYNTHESIS. Example: set GEMINI_MODEL=gemini-2.5-flash-lite to run the whole
+ * pipeline on the model with the highest free-tier request quota, or scope it
+ * to the hottest stage with GEMINI_MODEL_EXTRACTION=gemini-2.5-flash-lite.
+ */
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+
+export type GeminiModelRole =
+  | 'PLANNER'
+  | 'DISCOVERY'
+  | 'EXTRACTION'
+  | 'COMPETITORS'
+  | 'FORECAST'
+  | 'SYNTHESIS';
+
+export function resolveModel(role?: GeminiModelRole): string {
+  if (role) {
+    const perRole = process.env[`GEMINI_MODEL_${role}`];
+    if (perRole && perRole.trim()) return perRole.trim();
+  }
+  const global = process.env.GEMINI_MODEL;
+  if (global && global.trim()) return global.trim();
+  return DEFAULT_GEMINI_MODEL;
+}
+
+/**
  * Retry taxonomy (production hardening, item 13).
  *
  * Retrying every failure is wrong: a malformed request or an authorization
@@ -220,7 +252,7 @@ Return a strict JSON object matching:
         if (signal?.aborted) throw new Error('Operation aborted');
 
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: resolveModel('PLANNER'),
           contents: prompt,
           config: {
             responseMimeType: 'application/json',
@@ -259,7 +291,7 @@ Return a strict JSON object matching:
         if (signal?.aborted) throw new Error('Operation aborted');
 
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: resolveModel('DISCOVERY'),
           contents: prompt,
           config: {
             tools: [{ googleSearch: {} }],
@@ -339,7 +371,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: resolveModel('COMPETITORS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
           responseMimeType: 'application/json',
@@ -499,7 +531,7 @@ Documents: `;
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: resolveModel('EXTRACTION'),
         contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
         config: {
           responseMimeType: 'application/json',
@@ -556,7 +588,7 @@ Return a strict JSON object:
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: resolveModel('FORECAST'),
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -624,7 +656,7 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: resolveModel('SYNTHESIS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
           responseMimeType: 'application/json',
