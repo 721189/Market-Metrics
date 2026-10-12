@@ -1,0 +1,745 @@
+import type {
+  FullResearchReport,
+  Evidence,
+  Claim,
+} from '../types.js';
+
+/**
+ * A self-contained, realistic sample report used by the public `/demo` page.
+ *
+ * This is illustrative demo content only — it is NOT produced by the live
+ * pipeline and is never served through the authenticated API. It mirrors the
+ * exact `FullResearchReport` shape so the demo renders with the same viewer
+ * components as real output, giving prospects an honest preview of what the
+ * engine produces.
+ *
+ * Subject: B2B AI Agent / Workflow-Automation SaaS — North America, 2026-2030.
+ */
+
+// Reusable evidence provenance for demo items.
+const prov = (
+  text: string,
+  url: string,
+  start: number,
+  end: number,
+  quote: string
+): Evidence['provenance'] => ({
+  document_text: text,
+  document_hash: 'demo',
+  source_url: url,
+  retrieved_at: '2026-01-10T00:00:00.000Z',
+  parser_version: 'demo-1.0',
+  normalizer_version: 'demo-1.0',
+  start_offset: start,
+  end_offset: end,
+  quote,
+  exact_normalized_match: true,
+});
+
+const REPORT_BASE: Omit<FullResearchReport, 'claims'> = {
+  id: 'demo-report-0001',
+  job_id: 'demo-job-0001',
+  version: 1,
+  title: 'B2B AI Agent Workflow SaaS — North America Market Entry',
+  generated_at: '2026-01-12T09:24:00.000Z',
+  question:
+    'Analyze the B2B AI Agent Workflow SaaS market in North America for a startup entering the space.',
+  geography: 'North America',
+  industry: 'Enterprise AI & Workflow Automation',
+  time_horizon: '2026-2030',
+  executive_summary:
+    'The North American B2B AI-agent and workflow-automation market is entering its steepest growth phase, expanding from roughly $8.4B in 2025 to a forecast $41.2B by 2030 (a 37.4% CAGR). Demand is pulled forward by board-level mandates to cut operating cost and by the rapid commoditization of frontier LLMs, which dropped the barrier to building domain-specific agents from months to weeks. Yet the space is crowded: category-defining incumbents (Salesforce, Microsoft, UiPath) bundle agents into existing suites, while a long tail of vertical point-solutions competes on workflow depth. A new entrant wins not by building a better general model — those are commoditized — but by owning a high-friction, compliance-heavy vertical workflow end-to-end and proving measurable ROI within one billing cycle. Evidence quality is strong (overall score 84/100), corroborated by Tier-A filings and primary vendor pricing pages.',
+  evidence_score_breakdown: {
+    overall_score: 84,
+    source_quality_score: 17,
+    evidence_relevance_score: 18,
+    directness_score: 12,
+    corroboration_score: 13,
+    recency_score: 8,
+    consistency_score: 9,
+    extraction_quality_score: 7,
+    gates_passed: {
+      has_primary_evidence: true,
+      no_unresolved_contradictions: true,
+      high_tier_sources_present: true,
+      citations_fully_intact: true,
+    },
+  },
+  sections: [
+    {
+      id: 'sec-1',
+      title: 'Market Size & Growth',
+      order: 1,
+      summary:
+        'The market more than quadruples over the horizon, with enterprise software the dominant, fastest-growing segment.',
+      content:
+        'The North American B2B AI-agent workflow-automation market is valued at approximately **$8.4B in 2025**, projected to reach **$41.2B by 2030** [1] — a compound annual growth rate of **37.4%** [1]. Growth concentrates in enterprise segments, where agentic automation replaces multi-step back-office processes [2]. The 2025-2027 window is characterized by pilot-to-production conversion as early adopters graduate from proofs-of-concept to scaled deployments [2].',
+      cited_claim_ids: ['claim-1', 'claim-2'],
+    },
+    {
+      id: 'sec-2',
+      title: 'Competitive Landscape',
+      order: 2,
+      summary:
+        'Incumbent suites bundle agents cheaply; vertical specialists win on workflow depth and compliance.',
+      content:
+        'The competitive field splits into three tiers [3]. Suite incumbents (Salesforce Agentforce, Microsoft Copilot Studio) distribute agents through existing seat contracts, compressing standalone pricing [3]. Automation-native platforms (UiPath, Workato) lead on orchestration depth and enterprise connectors. A long tail of vertical specialists (legal, insurance, revenue operations) competes on domain accuracy and auditability [4].',
+      cited_claim_ids: ['claim-3', 'claim-4'],
+    },
+    {
+      id: 'sec-3',
+      title: 'Go-To-Market Strategy',
+      order: 3,
+      summary:
+        'Product-led growth anchored to a single high-friction vertical, with land-and-expand into adjacent workflows.',
+      content:
+        'Recommended GTM is a vertical-first wedge: pick one compliance-heavy workflow (revenue-operations lead qualification or insurance claims intake), deliver measurable ROI inside a single billing cycle, then expand horizontally [5]. Pricing should be outcome-anchored (per-resolved-task or per-workflow-run) rather than per-seat, aligning value capture with the cost the buyer avoids [6].',
+      cited_claim_ids: ['claim-5', 'claim-6'],
+    },
+  ],
+  market_metrics: [
+    {
+      id: 'mm-1',
+      job_id: 'demo-job-0001',
+      metric_name: 'Total Addressable Market (2025)',
+      value: 8.4,
+      formatted_value: '$8.4B',
+      unit: 'USD',
+      currency: 'USD',
+      geography: 'North America',
+      period_start: '2025-01-01',
+      period_end: '2025-12-31',
+      source_claim_id: 'claim-1',
+      confidence: 88,
+    },
+    {
+      id: 'mm-2',
+      job_id: 'demo-job-0001',
+      metric_name: 'Forecast Market Size (2030)',
+      value: 41.2,
+      formatted_value: '$41.2B',
+      unit: 'USD',
+      currency: 'USD',
+      geography: 'North America',
+      period_start: '2030-01-01',
+      period_end: '2030-12-31',
+      source_claim_id: 'claim-2',
+      confidence: 74,
+    },
+    {
+      id: 'mm-3',
+      job_id: 'demo-job-0001',
+      metric_name: 'Compound Annual Growth Rate',
+      value: 37.4,
+      formatted_value: '37.4%',
+      unit: 'percent',
+      currency: 'USD',
+      geography: 'North America',
+      period_start: '2025-01-01',
+      period_end: '2030-12-31',
+      source_claim_id: 'claim-2',
+      confidence: 72,
+    },
+  ],
+  financial_models: {
+    cagr_pct: 37.4,
+    tam_current: 8400000000,
+    tam_forecast: 41200000000,
+    sam: 6100000000,
+    som: 285000000,
+    currency: 'USD',
+    year_start: 2026,
+    year_end: 2030,
+    scenario_conservative: {
+      year_3_revenue: 4800000,
+      gross_margin_pct: 71,
+      break_even_month: 34,
+      cac: 980,
+      ltv: 11400,
+      ltv_to_cac: 11.6,
+    },
+    scenario_base: {
+      year_3_revenue: 8600000,
+      gross_margin_pct: 76,
+      break_even_month: 26,
+      cac: 860,
+      ltv: 15200,
+      ltv_to_cac: 17.7,
+    },
+    scenario_aggressive: {
+      year_3_revenue: 16400000,
+      gross_margin_pct: 78,
+      break_even_month: 19,
+      cac: 740,
+      ltv: 20100,
+      ltv_to_cac: 27.2,
+    },
+  },
+  competitors: [
+    {
+      id: 'comp-1',
+      name: 'UiPath',
+      website: 'https://www.uipath.com',
+      category: 'Automation Platform',
+      description:
+        'Enterprise automation-native platform extending from RPA into agentic AI with strong governance and connectors.',
+      market_position: 'LEADER',
+      strengths: ['Deep enterprise connectors', 'Mature orchestration & governance', 'Large installed base'],
+      weaknesses: ['Higher total cost of ownership', 'Heavier implementation cycle', 'Agent features lag pure-plays'],
+      pricing_summary: 'Per-robot licensing plus platform tiers; enterprise quotes typically $50k-$500k/yr.',
+      target_customer: 'Large enterprise IT & operations teams',
+      verified_claims_count: 6,
+      supporting_claim_ids: ['claim-3'],
+    },
+    {
+      id: 'comp-2',
+      name: 'Salesforce Agentforce',
+      website: 'https://www.salesforce.com/agentforce/',
+      category: 'CRM Suite / Agents',
+      description:
+        'Agentic layer bundled into the Salesforce CRM suite, distributed through existing seat contracts.',
+      market_position: 'LEADER',
+      strengths: ['Bundled distribution', 'CRM data moat', 'Low incremental price for existing customers'],
+      weaknesses: ['Best value locked to Salesforce ecosystem', 'Weaker for non-CRM workflows', 'Portability limits'],
+      pricing_summary: '$2 per Agentforce conversation bundled; add-on to existing seats.',
+      target_customer: 'Existing Salesforce enterprise customers (service & sales)',
+      verified_claims_count: 5,
+      supporting_claim_ids: ['claim-3'],
+    },
+    {
+      id: 'comp-3',
+      name: 'Workato',
+      website: 'https://www.workato.com',
+      category: 'Integration & Automation',
+      description:
+        'Integration-led automation platform with recipe-based agentic orchestration and broad app connectors.',
+      market_position: 'CHALLENGER',
+      strengths: ['Excellent connector breadth', 'Recipe reusability', 'Strong mid-market traction'],
+      weaknesses: ['Complexity for non-technical users', 'Pricing scales steeply with volume'],
+      pricing_summary: 'Tiered workspace plans from ~$10k/yr upward, scaled by recipes & runs.',
+      target_customer: 'Mid-market to enterprise operations teams',
+      verified_claims_count: 4,
+      supporting_claim_ids: ['claim-4'],
+    },
+  ],
+  pricing_tiers: [
+    {
+      competitor_name: 'UiPath',
+      tier_name: 'Enterprise',
+      amount: 500000,
+      currency: 'USD',
+      billing_period: 'YEAR',
+      unit: 'ACCOUNT',
+      annualized_amount: 500000,
+      features: ['Unlimited robots', 'Advanced governance', 'Dedicated support'],
+      target_segment: 'Large enterprise',
+      supporting_claim_ids: ['claim-3'],
+    },
+    {
+      competitor_name: 'Salesforce Agentforce',
+      tier_name: 'Per-conversation',
+      amount: 2,
+      currency: 'USD',
+      billing_period: 'ONE_TIME',
+      unit: 'API_CALL',
+      annualized_amount: 2,
+      features: ['Grounded in CRM data', 'Bundled with seats'],
+      target_segment: 'Salesforce customers',
+      supporting_claim_ids: ['claim-3'],
+    },
+    {
+      competitor_name: 'Workato',
+      tier_name: 'Business',
+      amount: 15000,
+      currency: 'USD',
+      billing_period: 'YEAR',
+      unit: 'ACCOUNT',
+      annualized_amount: 15000,
+      features: ['Shared recipes', 'Standard connectors', 'Community support'],
+      target_segment: 'Mid-market',
+      supporting_claim_ids: ['claim-4'],
+    },
+  ],
+  customer_segments: [
+    {
+      id: 'seg-1',
+      name: 'Revenue Operations Teams',
+      segment_type: 'OBSERVED',
+      description:
+        'Teams owning lead routing, qualification, and CRM hygiene adopting agents for high-volume triage.',
+      estimated_tam_share_pct: 22,
+      willingness_to_pay: 'HIGH',
+      decision_makers: ['VP Revenue Operations', 'RevOps Manager'],
+      pain_points: ['Manual lead qualification', 'CRM data decay', 'Slow follow-up'],
+      key_buying_criteria: ['Time-to-value', 'CRM integration depth', 'Measurable pipeline lift'],
+      churn_risk: 'Medium — depends on proven pipeline impact',
+      supporting_claim_ids: ['claim-5'],
+    },
+    {
+      id: 'seg-2',
+      name: 'Insurance Claims Operations',
+      segment_type: 'INFERRED',
+      description:
+        'High-volume, compliance-heavy claims intake and first-notice-of-loss processing.',
+      estimated_tam_share_pct: 14,
+      willingness_to_pay: 'HIGH',
+      decision_makers: ['COO', 'Head of Claims'],
+      pain_points: ['Manual intake', 'Regulatory audit burden', 'Cycle-time cost'],
+      key_buying_criteria: ['Auditability', 'Accuracy', 'Compliance certification'],
+      churn_risk: 'Low — sticky once embedded in claims flow',
+      supporting_claim_ids: ['claim-6'],
+    },
+  ],
+  trends: [
+    {
+      title: 'Commoditization of frontier models',
+      description:
+        'Rapidly falling inference costs and open-weight parity have turned model capability into a commodity, shifting differentiation to workflow depth and data.',
+      impact: 'Lowers barriers to entry but compresses pricing on generic agents.',
+      claim_ids: ['claim-7'],
+    },
+    {
+      title: 'From pilots to production',
+      description:
+        'Enterprises are graduating agent pilots into scaled, governed deployments, accelerating spend in 2026-2027.',
+      impact: 'Expands the addressable window but raises the bar for reliability and audit.',
+      claim_ids: ['claim-2'],
+    },
+  ],
+  regulatory_factors: [
+    {
+      policy_name: 'EU AI Act (extraterritorial reach)',
+      authority: 'European Union',
+      impact_summary:
+        'Risk-based obligations apply to high-risk AI systems, influencing design even for North American vendors serving EU customers.',
+      compliance_req: 'Documented risk management, transparency, and human oversight for high-risk uses.',
+      claim_ids: ['claim-6'],
+    },
+    {
+      policy_name: 'State privacy laws (e.g., CCPA/CPRA)',
+      authority: 'California / US States',
+      impact_summary:
+        'Governs automated decision-making and personal data use in agentic workflows handling customer data.',
+      compliance_req: 'Data minimization, opt-out of automated decisions, access controls.',
+      claim_ids: ['claim-6'],
+    },
+  ],
+  opportunities: [
+    {
+      title: 'Own a compliance-heavy vertical workflow',
+      description:
+        'Win a regulated, high-friction workflow (claims, KYC, contract review) where auditability and accuracy matter more than breadth.',
+      value_pool: '$1.5B - $3.0B addressable within focus verticals',
+      claim_ids: ['claim-5', 'claim-6'],
+    },
+    {
+      title: 'Outcome-based pricing wedge',
+      description:
+        'Price per resolved task or workflow run to undercut per-seat incumbents while aligning to buyer ROI.',
+      value_pool: 'Higher gross margin and faster sales cycles',
+      claim_ids: ['claim-6'],
+    },
+  ],
+  risks: [
+    {
+      id: 'risk-1',
+      category: 'COMPETITIVE',
+      title: 'Incumbent bundling compresses pricing',
+      probability: 'HIGH',
+      impact: 'SEVERE',
+      mitigation:
+        'Compete on vertical depth, integration switching costs, and measurable ROI rather than head-on feature parity.',
+      supporting_claim_ids: ['claim-3'],
+    },
+    {
+      id: 'risk-2',
+      category: 'TECHNOLOGICAL',
+      title: 'Model commoditization erodes differentiation',
+      probability: 'HIGH',
+      impact: 'MODERATE',
+      mitigation:
+        'Build defensibility in proprietary workflow data, evaluations, and governance rather than the model itself.',
+      supporting_claim_ids: ['claim-7'],
+    },
+    {
+      id: 'risk-3',
+      category: 'REGULATORY',
+      title: 'Evolving AI compliance raises cost of serving regulated buyers',
+      probability: 'MEDIUM',
+      impact: 'MODERATE',
+      mitigation:
+        'Invest early in audit trails, human-in-the-loop controls, and certifications that become table stakes.',
+      supporting_claim_ids: ['claim-6'],
+    },
+  ],
+  recommendations: [
+    {
+      id: 'rec-1',
+      title: 'Enter via a single compliance-heavy vertical',
+      priority: 'CRITICAL',
+      timeframe: 'IMMEDIATE',
+      rationale:
+        'A narrow wedge lets a startup reach ROI within one billing cycle and build auditability that generalist incumbents under-invest in.',
+      risk_factors: ['Narrow initial TAM', 'Requires deep domain hiring'],
+      supporting_claim_ids: ['claim-5', 'claim-6'],
+    },
+    {
+      id: 'rec-2',
+      title: 'Anchor pricing to outcomes, not seats',
+      priority: 'HIGH',
+      timeframe: '6_MONTHS',
+      rationale:
+        'Outcome-anchored pricing (per resolved task) undercuts per-seat suites and aligns revenue to demonstrated value.',
+      risk_factors: ['Buyer budget categorization', 'Requires robust metering'],
+      supporting_claim_ids: ['claim-6'],
+    },
+    {
+      id: 'rec-3',
+      title: 'Build a governed evaluation harness before scaling sales',
+      priority: 'HIGH',
+      timeframe: '6_MONTHS',
+      rationale:
+        'Reliability and audit are the top blockers to production; an eval harness becomes both a moat and a sales asset.',
+      risk_factors: ['Engineering investment ahead of revenue'],
+      supporting_claim_ids: ['claim-7'],
+    },
+  ],
+  limitations: [
+    'Forecast figures are analyst-model estimates and vary by methodology across sources.',
+    'Incumbent pricing is list-based; realized enterprise pricing is often negotiated and confidential.',
+    'Growth projections assume no major macroeconomic contraction affecting enterprise software budgets.',
+  ],
+  sources: [
+    {
+      id: 'src-001',
+      job_id: 'demo-job-0001',
+      url: 'https://www.gartner.com/en/newsroom/press-releases/2025-11-ai-agents-forecast',
+      canonical_url: 'https://www.gartner.com/en/newsroom/press-releases/2025-11-ai-agents-forecast',
+      domain: 'gartner.com',
+      title: 'Gartner Forecasts AI Agent Market Trajectory Through 2030',
+      publisher: 'Gartner',
+      published_at: '2025-11-18T00:00:00.000Z',
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      source_type: 'TIER_A',
+      language: 'en',
+      http_status: 200,
+      discovery_method: 'SEARCH_API',
+      content_hash: 'a1demo0001',
+      fetch_status: 'FETCHED',
+      reliability_score: 92,
+      snippet:
+        'Gartner projects the enterprise AI-agent and automation-adjacent software market to reach $41.2B by 2030, growing at a 37.4% CAGR from a 2025 base of $8.4B.',
+    },
+    {
+      id: 'src-002',
+      job_id: 'demo-job-0001',
+      url: 'https://www.salesforce.com/agentforce/pricing/',
+      canonical_url: 'https://www.salesforce.com/agentforce/pricing/',
+      domain: 'salesforce.com',
+      title: 'Agentforce Pricing',
+      publisher: 'Salesforce',
+      published_at: null,
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      source_type: 'TIER_A',
+      language: 'en',
+      http_status: 200,
+      discovery_method: 'SEED_URL',
+      content_hash: 'b2demo0002',
+      fetch_status: 'FETCHED',
+      reliability_score: 90,
+      snippet:
+        'Agentforce 2 Flex Credits are billed at $0.10 per action; the Team Edition list price is $2 per user per month.',
+    },
+    {
+      id: 'src-003',
+      job_id: 'demo-job-0001',
+      url: 'https://investor.microsoft.com/sec-filings/default.aspx',
+      canonical_url: 'https://investor.microsoft.com/sec-filings/default.aspx',
+      domain: 'microsoft.com',
+      title: 'Microsoft 10-K: Intelligent Cloud & Copilot Adoption',
+      publisher: 'Microsoft (SEC Filing)',
+      published_at: '2025-07-29T00:00:00.000Z',
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      source_type: 'TIER_A',
+      language: 'en',
+      http_status: 200,
+      discovery_method: 'CROSS_REFERENCE',
+      content_hash: 'c3demo0003',
+      fetch_status: 'FETCHED',
+      reliability_score: 95,
+      snippet:
+        'Microsoft reported that Copilot is now used by 70% of the Fortune 500, with agentic workflows embedded across Microsoft 365 and Azure.',
+    },
+    {
+      id: 'src-004',
+      job_id: 'demo-job-0001',
+      url: 'https://www.uipath.com/pricing',
+      canonical_url: 'https://www.uipath.com/pricing',
+      domain: 'uipath.com',
+      title: 'UiPath Pricing & Automation Licensing',
+      publisher: 'UiPath',
+      published_at: null,
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      source_type: 'TIER_B',
+      language: 'en',
+      http_status: 200,
+      discovery_method: 'SEARCH_API',
+      content_hash: 'd4demo0004',
+      fetch_status: 'FETCHED',
+      reliability_score: 82,
+      snippet:
+        'UiPath offers per-robot and per-user automation licensing, with enterprise agentic bundles priced against automation task volume.',
+    },
+  ],
+
+  evidence_pool: [
+    {
+      id: 'ev-001',
+      job_id: 'demo-job-0001',
+      document_id: 'src-001',
+      source_id: 'src-001',
+      evidence_type: 'MARKET_SIZE',
+      text: 'The AI-agent and automation-adjacent software market is projected to reach $41.2B by 2030 from $8.4B in 2025.',
+      quote:
+        'the enterprise AI-agent and automation-adjacent software market to reach $41.2B by 2030, growing at a 37.4% CAGR from a 2025 base of $8.4B',
+      start_offset: 412,
+      end_offset: 520,
+      section: 'Forecast',
+      extraction_confidence: 94,
+      provenance_type: 'OBSERVED',
+      created_at: '2026-01-11T00:00:00.000Z',
+      source_url: 'https://www.gartner.com/en/newsroom/press-releases/2025-11-ai-agents-forecast',
+      source_domain: 'gartner.com',
+      citation_number: 1,
+      statement: 'NA B2B AI-agent market grows from $8.4B (2025) to $41.2B (2030) at a 37.4% CAGR.',
+      extracted_quote:
+        'reach $41.2B by 2030, growing at a 37.4% CAGR from a 2025 base of $8.4B',
+      relevance_score: 96,
+      verification_status: 'SUPPORTED',
+      confidence: 92,
+      provenance: prov(
+        'The AI-agent and automation-adjacent software market is projected to reach $41.2B by 2030 from $8.4B in 2025.',
+        'https://www.gartner.com/en/newsroom/press-releases/2025-11-ai-agents-forecast',
+        412,
+        520,
+        'reach $41.2B by 2030, growing at a 37.4% CAGR from a 2025 base of $8.4B'
+      ),
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      parser_version: 'demo-1.0',
+      normalizer_version: 'demo-1.0',
+      supporting_claim_ids: ['cl-001'],
+      contradicting_claim_ids: [],
+    },
+    {
+      id: 'ev-002',
+      job_id: 'demo-job-0001',
+      document_id: 'src-002',
+      source_id: 'src-002',
+      evidence_type: 'PRICING',
+      text: 'Agentforce Flex Credits are billed at $0.10 per action on list pricing.',
+      quote: 'Agentforce 2 Flex Credits are billed at $0.10 per action',
+      start_offset: 88,
+      end_offset: 140,
+      section: 'Pricing',
+      extraction_confidence: 91,
+      provenance_type: 'OBSERVED',
+      created_at: '2026-01-11T00:00:00.000Z',
+      source_url: 'https://www.salesforce.com/agentforce/pricing/',
+      source_domain: 'salesforce.com',
+      citation_number: 2,
+      statement: 'Salesforce Agentforce charges $0.10 per Flex Credit action on list pricing.',
+      extracted_quote: 'Flex Credits are billed at $0.10 per action',
+      relevance_score: 93,
+      verification_status: 'SUPPORTED',
+      confidence: 90,
+      provenance: prov(
+        'Agentforce Flex Credits are billed at $0.10 per action on list pricing.',
+        'https://www.salesforce.com/agentforce/pricing/',
+        88,
+        140,
+        'Flex Credits are billed at $0.10 per action'
+      ),
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      parser_version: 'demo-1.0',
+      normalizer_version: 'demo-1.0',
+      supporting_claim_ids: ['cl-002'],
+      contradicting_claim_ids: [],
+    },
+    {
+      id: 'ev-003',
+      job_id: 'demo-job-0001',
+      document_id: 'src-003',
+      source_id: 'src-003',
+      evidence_type: 'COMPETITOR',
+      text: 'Copilot is now used by 70% of the Fortune 500 with agentic workflows embedded across Microsoft 365.',
+      quote: 'Copilot is now used by 70% of the Fortune 500',
+      start_offset: 2510,
+      end_offset: 2550,
+      section: 'Business Highlights',
+      extraction_confidence: 89,
+      provenance_type: 'OBSERVED',
+      created_at: '2026-01-11T00:00:00.000Z',
+      source_url: 'https://investor.microsoft.com/sec-filings/default.aspx',
+      source_domain: 'microsoft.com',
+      citation_number: 3,
+      statement: 'Microsoft Copilot is used by 70% of the Fortune 500.',
+      extracted_quote: 'Copilot is now used by 70% of the Fortune 500',
+      relevance_score: 90,
+      verification_status: 'SUPPORTED',
+      confidence: 88,
+      provenance: prov(
+        'Copilot is now used by 70% of the Fortune 500 with agentic workflows embedded across Microsoft 365.',
+        'https://investor.microsoft.com/sec-filings/default.aspx',
+        2510,
+        2550,
+        'Copilot is now used by 70% of the Fortune 500'
+      ),
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      parser_version: 'demo-1.0',
+      normalizer_version: 'demo-1.0',
+      supporting_claim_ids: ['cl-003'],
+      contradicting_claim_ids: [],
+    },
+    {
+      id: 'ev-004',
+      job_id: 'demo-job-0001',
+      document_id: 'src-004',
+      source_id: 'src-004',
+      evidence_type: 'PRICING',
+      text: 'UiPath prices per-robot and per-user automation licensing with enterprise agentic bundles against task volume.',
+      quote: 'per-robot and per-user automation licensing, with enterprise agentic bundles priced against automation task volume',
+      start_offset: 300,
+      end_offset: 392,
+      section: 'Licensing',
+      extraction_confidence: 87,
+      provenance_type: 'OBSERVED',
+      created_at: '2026-01-11T00:00:00.000Z',
+      source_url: 'https://www.uipath.com/pricing',
+      source_domain: 'uipath.com',
+      citation_number: 4,
+      statement: 'UiPath licenses automation per-robot/per-user with task-volume agentic bundles.',
+      extracted_quote:
+        'per-robot and per-user automation licensing, with enterprise agentic bundles priced against automation task volume',
+      relevance_score: 85,
+      verification_status: 'SUPPORTED',
+      confidence: 86,
+      provenance: prov(
+        'UiPath prices per-robot and per-user automation licensing with enterprise agentic bundles against task volume.',
+        'https://www.uipath.com/pricing',
+        300,
+        392,
+        'per-robot and per-user automation licensing, with enterprise agentic bundles priced against automation task volume'
+      ),
+      retrieved_at: '2026-01-10T00:00:00.000Z',
+      parser_version: 'demo-1.0',
+      normalizer_version: 'demo-1.0',
+      supporting_claim_ids: ['cl-004'],
+      contradicting_claim_ids: [],
+    },
+  ],
+
+  // __CONTINUE_CL__
+};
+
+// Hydrate each claim's supporting evidence from the shared evidence pool so the
+// demo's provenance panel can render the exact quote + byte offsets. Evidence is
+// authored once above; claims simply reference it by id.
+const ev = (id: string): Evidence => {
+  const found = REPORT_BASE.evidence_pool.find((e) => e.id === id);
+  if (!found) throw new Error(`demo evidence ${id} not found`);
+  return found;
+};
+
+const DEMO_CLAIMS: Claim[] = [
+  {
+    id: 'cl-001',
+    job_id: 'demo-job-0001',
+    statement:
+      'The North America B2B AI-agent / workflow-automation market is projected to reach $41.2B by 2030 from an $8.4B base in 2025.',
+    claim_type: 'MARKET_GROWTH',
+    entity: 'North America AI-agent automation market',
+    metric: 'TAM 2030',
+    geography: 'North America',
+    time_period: '2025-2030',
+    verification_status: 'SUPPORTED',
+    confidence: 92,
+    reasoning:
+      'Directly corroborated by the Gartner forecast quote with exact text offsets (ev-001); no contradicting evidence found.',
+    provenance_type: 'OBSERVED',
+    created_at: '2026-01-11T00:00:00.000Z',
+    supporting_evidence_ids: ['ev-001'],
+    contradicting_evidence_ids: [],
+    citation_number: 1,
+    supporting_evidence: [ev('ev-001')],
+  },
+  {
+    id: 'cl-002',
+    job_id: 'demo-job-0001',
+    statement:
+      'Salesforce Agentforce charges $0.10 per Flex Credit action on list pricing.',
+    claim_type: 'PRICING',
+    entity: 'Salesforce Agentforce',
+    metric: 'List price per action',
+    geography: 'North America',
+    time_period: '2026',
+    verification_status: 'SUPPORTED',
+    confidence: 90,
+    reasoning:
+      'Extracted verbatim from the official Agentforce pricing page (ev-002) with an exact byte-offset match.',
+    provenance_type: 'OBSERVED',
+    created_at: '2026-01-11T00:00:00.000Z',
+    supporting_evidence_ids: ['ev-002'],
+    contradicting_evidence_ids: [],
+    citation_number: 2,
+    supporting_evidence: [ev('ev-002')],
+  },
+  {
+    id: 'cl-003',
+    job_id: 'demo-job-0001',
+    statement:
+      'Microsoft Copilot is used by 70% of the Fortune 500, entrenching an incumbent distribution advantage.',
+    claim_type: 'COMPETITOR',
+    entity: 'Microsoft Copilot',
+    metric: 'Fortune 500 adoption',
+    geography: 'Global',
+    time_period: '2025',
+    verification_status: 'SUPPORTED',
+    confidence: 88,
+    reasoning:
+      'Sourced from a Microsoft investor-filings quote (ev-003); consistent with reported enterprise agent rollouts.',
+    provenance_type: 'OBSERVED',
+    created_at: '2026-01-11T00:00:00.000Z',
+    supporting_evidence_ids: ['ev-003'],
+    contradicting_evidence_ids: [],
+    citation_number: 3,
+    supporting_evidence: [ev('ev-003')],
+  },
+  {
+    id: 'cl-004',
+    job_id: 'demo-job-0001',
+    statement:
+      'UiPath licenses automation per-robot and per-user, with enterprise agentic bundles priced against task volume.',
+    claim_type: 'PRICING',
+    entity: 'UiPath',
+    metric: 'Licensing model',
+    geography: 'Global',
+    time_period: '2026',
+    verification_status: 'SUPPORTED',
+    confidence: 86,
+    reasoning:
+      'Derived from the UiPath pricing page description of per-robot / per-user licensing with task-volume bundles (ev-004).',
+    provenance_type: 'OBSERVED',
+    created_at: '2026-01-11T00:00:00.000Z',
+    supporting_evidence_ids: ['ev-004'],
+    contradicting_evidence_ids: [],
+    citation_number: 4,
+    supporting_evidence: [ev('ev-004')],
+  },
+];
+
+/** The complete, type-checked demo report served to the public `/demo` page. */
+export const DEMO_REPORT: FullResearchReport = {
+  ...REPORT_BASE,
+  claims: DEMO_CLAIMS,
+};
+
