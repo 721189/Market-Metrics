@@ -156,4 +156,44 @@ export class DatabaseRepository {
       return null;
     }
   }
+
+  /**
+   * Permanently deletes a job and ALL of its persisted artifacts — the job
+   * document, the compiled report, and the per-job telemetry event
+   * subcollection. Tenant-scoped: ownership is verified through getJob (which
+   * fails closed on a user_id mismatch), so one tenant can never delete
+   * another's job. Returns false when the job does not exist or belongs to a
+   * different tenant (so the caller cannot distinguish "missing" from "forbidden").
+   */
+  public static async deleteJob(jobId: string, userId: string): Promise<boolean> {
+    if (!userId) throw new Error('[DB] userId is required for deleteJob');
+    try {
+      // Verify existence + ownership first (fail closed — never delete another
+      // tenant's job). getJob already enforces the user_id check.
+      const existing = await this.getJob(jobId, userId);
+      if (!existing) return false;
+
+      const batch = adminDb.batch();
+      batch.delete(adminDb.collection('jobs').doc(jobId));
+      batch.delete(adminDb.collection('reports').doc(jobId));
+
+      // Events live in a subcollection; Firestore does not cascade-delete, so
+      // remove them explicitly to avoid orphaning the job's telemetry.
+      const eventsSnap = await adminDb.collection(`jobs/${jobId}/events`).get();
+      eventsSnap.forEach(doc => batch.delete(doc.ref));
+
+      await batch.commit();
+      logger.info('db.job_deleted', `Deleted job ${jobId} and its artifacts`, {
+        user_id: userId,
+        events_removed: eventsSnap.size,
+      });
+      return true;
+    } catch (err) {
+      logger.error('db.delete_job_failed', `Error deleting job ${jobId}`, {
+        user_id: userId,
+        status: (err as Error)?.message || String(err),
+      });
+      throw err;
+    }
+  }
 }

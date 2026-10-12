@@ -358,6 +358,36 @@ async function startServer() {
     }
   });
 
+  // Permanently delete a terminal job and all of its artifacts (tenant-scoped).
+  // Only COMPLETED / FAILED / CANCELLED jobs may be deleted — an active job
+  // must be cancelled first (see ResearchPipelineManager.deleteJob).
+  app.delete('/api/v1/research/:id', async (req: Request, res: Response) => {
+    try {
+      const tenantId = getUserId(req);
+      const outcome = await ResearchPipelineManager.deleteJob(req.params.id, tenantId);
+      if (outcome === 'not_found') {
+        return res.status(404).json({
+          error: { code: 'RESEARCH_NOT_FOUND', message: `Research job ${req.params.id} not found` },
+        });
+      }
+      if (outcome === 'not_terminal') {
+        return res.status(409).json({
+          error: {
+            code: 'JOB_NOT_TERMINAL',
+            message: 'Only completed, failed, or cancelled jobs can be deleted. Cancel the job first if it is still running.',
+          },
+        });
+      }
+      res.json({ status: 'DELETED', job_id: req.params.id });
+    } catch (err: any) {
+      logger.error('research.delete_failed', 'Error deleting research job', {
+        user_id: (req as any).user?.uid,
+        status: 500,
+      });
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+    }
+  });
+
   // Server-Sent Events (SSE): EventSource cannot send Authorization headers and
   // query-string Firebase tokens are rejected by authMiddleware, so live
   // progress uses short-lived single-use stream tickets (see the

@@ -43,7 +43,7 @@ import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
-import { canTransition, cancellationRegistry } from './job_state.js';
+import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
@@ -187,6 +187,41 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'error', job.current_stage, 'Job cancellation requested. Halting all worker processes.', job.progress);
     await DatabaseRepository.saveJob(job, userId);
     return true;
+  }
+
+  /**
+   * Permanently delete a job and all of its persisted artifacts (job doc,
+   * compiled report, and telemetry events). Tenant-scoped through the DB layer.
+   *
+   * Only TERMINAL jobs (COMPLETED / FAILED / CANCELLED) may be deleted:
+   * removing an in-flight job would race the worker, whose next merge-write
+   * (saveJob / saveReport / addEvent) would simply re-create the deleted doc.
+   * A stuck active job must be cancelled first, which moves it to CANCELLED
+   * (a terminal state) and aborts the worker — after which it can be deleted.
+   *
+   * @returns 'deleted' | 'not_found' | 'not_terminal'
+   */
+  public static async deleteJob(
+    jobId: string,
+    userId: string
+  ): Promise<'deleted' | 'not_found' | 'not_terminal'> {
+    if (!userId) throw new Error('userId is required for deleteJob');
+    const job = await DatabaseRepository.getJob(jobId, userId);
+    if (!job) return 'not_found';
+
+    // Compare as plain strings: JobStatus includes stage-prefixed values
+    // (PLANNING..) that are not part of the terminal QueueExecutionStatus union.
+    if (!(TERMINAL_JOB_STATUSES as readonly string[]).includes(job.status)) {
+      return 'not_terminal';
+    }
+
+    // Defensive: ensure no lingering worker keeps writing to this job while
+    // (or after) its documents are removed.
+    cancellationRegistry.abort(jobId, 'USER_CANCEL');
+
+    await DatabaseRepository.deleteJob(jobId, userId);
+    logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
+    return 'deleted';
   }
 
   /**

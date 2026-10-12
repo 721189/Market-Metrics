@@ -17,7 +17,8 @@ import {
   FileText,
   Clock,
   Zap,
-  Activity
+  Activity,
+  Trash2
 } from 'lucide-react';
 import type { ResearchJobRequest, ResearchJob } from '../types.js';
 import { motion, AnimatePresence, listStagger, listItem } from './motion.js';
@@ -26,6 +27,7 @@ interface HomeWorkspaceProps {
   onLaunchResearch: (data: ResearchJobRequest) => void;
   recentJobs: ResearchJob[];
   onOpenJob: (job: ResearchJob) => void;
+  onDeleteJob: (job: ResearchJob) => void;
 }
 
 const INDUSTRY_STARTERS = [
@@ -94,6 +96,7 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
   onLaunchResearch,
   recentJobs,
   onOpenJob,
+  onDeleteJob,
 }) => {
   const [question, setQuestion] = useState('');
   const [industry, setIndustry] = useState('');
@@ -410,6 +413,14 @@ export const HomeWorkspace: React.FC<HomeWorkspaceProps> = ({
                   )}
                   <button className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 transition-colors">
                     View Report &rarr;
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDeleteJob(job); }}
+                    title="Delete report"
+                    aria-label={`Delete report: ${job.question}`}
+                    className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:border-red-500/50 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 </div>
               </motion.div>

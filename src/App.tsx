@@ -381,6 +381,42 @@ export default function App() {
     }
   };
 
+  const handleDeleteJob = async (job: ResearchJob) => {
+    if (!job?.id) return;
+    const confirmed = window.confirm(
+      `Permanently delete this research report?\n\n"${job.question}"\n\nThis removes the report, its evidence, and all citations. This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const headers = await getHeaders();
+      const res = await fetch(`/api/v1/research/${job.id}`, { method: 'DELETE', headers });
+      if (!res.ok) {
+        // Surface the server's real reason (404 missing, 409 still running, 401…).
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error?.message) detail = body.error.message;
+        } catch {
+          /* non-JSON error body */
+        }
+        alert(`Could not delete report: ${detail}`);
+        return;
+      }
+      // Drop it from the library; if we were viewing it, return to the workspace.
+      setRecentJobs(prev => prev.filter(j => j.id !== job.id));
+      if (currentJob?.id === job.id) {
+        setCurrentJob(null);
+        setReport(null);
+        eventSourceRef.current?.close();
+        setActiveView('workspace');
+      }
+    } catch (err) {
+      console.error('Delete job failed:', err);
+      alert('Could not delete report. Please try again.');
+    }
+  };
+
   const handleExportJson = async () => {
     if (!currentJob) return;
     // Bearer header + programmatic download. The Firebase ID token is never
@@ -520,6 +556,7 @@ export default function App() {
               onLaunchResearch={handleLaunchResearch}
               recentJobs={recentJobs}
               onOpenJob={handleOpenExistingJob}
+              onDeleteJob={handleDeleteJob}
             />
           )}
 
