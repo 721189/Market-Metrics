@@ -111,6 +111,13 @@ export function rateLimiterMiddleware(opts: { maxRequests?: number; windowSec?: 
 }
 
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  // SSE /events route uses short-lived stream tickets instead of Bearer tokens,
+  // because EventSource cannot send Authorization: Bearer headers. Skip
+  // authMiddleware here; the route handler performs ticket-based auth.
+  if (typeof req.path === 'string' && req.path.endsWith('/events')) {
+    return next();
+  }
+
   // Reject query token parameters explicitly for security
   if (req.query && (req.query.token || req.query.auth)) {
     return res.status(401).json({

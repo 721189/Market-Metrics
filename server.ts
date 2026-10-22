@@ -8,6 +8,7 @@
 import './src/server/telemetry.js';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
@@ -81,7 +82,6 @@ dotenv.config();
   }
 
   if (json) {
-    const fs = require('fs');
     const tmpPath = '/tmp/firebase-service-account.json';
     fs.writeFileSync(tmpPath, json, { mode: 0o600 });
     process.env.GOOGLE_APPLICATION_CREDENTIALS = tmpPath;
@@ -91,6 +91,32 @@ dotenv.config();
     console.warn('[bootstrap] First 80 chars:', raw.substring(0, 80));
   }
 })();
+
+// ── Export sanitization helpers ─────────────────────────────────────────
+// All report values (LLM output + scraped web text) are treated as
+// untrusted before they are interpolated into HTML/CSV exports.
+
+/** Escape HTML special characters so attacker-controlled text cannot
+ *  inject scripts or break out of attributes in the PDF dossier HTML. */
+function escapeHtml(value: unknown): string {
+  const s = value === null || value === undefined ? '' : String(value);
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/** CSV cell guard: quote-escape and prefix formula characters (= + - @)
+ *  with an apostrophe so Excel/LibreOffice never interpret a cell as a formula. */
+function csvCell(value: unknown): string {
+  const s = value === null || value === undefined ? '' : String(value);
+  const escaped = s.replace(/"/g, '""');
+  const needsFormulaGuard = /^[=+\-@]/.test(escaped);
+  const body = needsFormulaGuard ? `'${escaped}` : escaped;
+  return `"${body}"`;
+}
 
 function getUserId(req: Request): string {
   // Identity comes ONLY from the verified Firebase ID token. There is no
@@ -293,7 +319,7 @@ async function startServer() {
         status: 500,
       });
       res.status(500).json({
-        error: { code: 'INTERNAL_ERROR', message: err.message || 'Failed to initialize research job' },
+        error: { code: 'INTERNAL_ERROR', message: 'Failed to initialize research job' },
       });
     }
   });
@@ -305,7 +331,7 @@ async function startServer() {
       const jobs = await ResearchPipelineManager.listJobs(tenantId);
       res.json({ jobs, total: jobs.length });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -316,7 +342,7 @@ async function startServer() {
       const breakdown = await new CostGovernor().getUserCostBreakdown(tenantId);
       res.json(breakdown);
     } catch (err: any) {
-      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -338,7 +364,7 @@ async function startServer() {
       
       res.json({ ...job, queue_position: queuePosition });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -354,7 +380,7 @@ async function startServer() {
       }
       res.json({ status: 'CANCELLED', job_id: req.params.id });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -384,7 +410,7 @@ async function startServer() {
         user_id: (req as any).user?.uid,
         status: 500,
       });
-      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -480,7 +506,7 @@ async function startServer() {
       const ticket = await getStreamTicketStore().issue(req.params.id, tenantId, STREAM_TICKET_TTL_MS);
       res.json({ ticket: ticket.ticket, expires_at: ticket.expiresAt });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -494,7 +520,7 @@ async function startServer() {
       }
       res.json({ sources: job.report.sources, count: job.report.sources.length });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -508,7 +534,7 @@ async function startServer() {
       }
       res.json({ evidence: report.evidence_pool, count: report.evidence_pool.length });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -522,7 +548,7 @@ async function startServer() {
       }
       res.json({ claims: report.claims, count: report.claims.length });
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
   app.get('/api/v1/research/:id/report', async (req: Request, res: Response) => {
@@ -543,7 +569,7 @@ async function startServer() {
       }
       res.json(report);
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -559,7 +585,7 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/json');
       res.send(JSON.stringify(report, null, 2));
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -575,19 +601,19 @@ async function startServer() {
       const lines: string[] = [];
 
       // Header metadata
-      lines.push(`"MARKET RESEARCH REPORT","${report.title.replace(/"/g, '""')}"`);
-      lines.push(`"Question","${report.question.replace(/"/g, '""')}"`);
-      lines.push(`"Industry","${report.industry}"`);
-      lines.push(`"Geography","${report.geography}"`);
-      lines.push(`"Time Horizon","${report.time_horizon}"`);
-      lines.push(`"Evidence Score","${report.evidence_score_breakdown.overall_score}/100"`);
+      lines.push(`"MARKET RESEARCH REPORT",${csvCell(report.title)}`);
+      lines.push(`"Question",${csvCell(report.question)}`);
+      lines.push(`"Industry",${csvCell(report.industry)}`);
+      lines.push(`"Geography",${csvCell(report.geography)}`);
+      lines.push(`"Time Horizon",${csvCell(report.time_horizon)}`);
+      lines.push(`"Evidence Score",${csvCell(`${report.evidence_score_breakdown.overall_score}/100`)}`);
       lines.push('');
 
       // Claims section
       lines.push('"CLAIMS AND PROVENANCE"');
       lines.push('"Citation #","Claim Type","Statement","Status","Confidence Score","Reasoning"');
       report.claims.forEach(c => {
-        lines.push(`"[${c.citation_number}]","${c.claim_type}","${c.statement.replace(/"/g, '""')}","${c.verification_status}","${c.confidence}%","${c.reasoning.replace(/"/g, '""')}"`);
+        lines.push(`"[${c.citation_number}]",${csvCell(c.claim_type)},${csvCell(c.statement)},${csvCell(c.verification_status)},${csvCell(c.confidence + '%')},${csvCell(c.reasoning)}`);
       });
       lines.push('');
 
@@ -595,14 +621,14 @@ async function startServer() {
       lines.push('"SOURCES APPENDIX"');
       lines.push('"ID","Tier","Domain","Publisher","URL","Reliability Score","Fetch Status","Published"');
       report.sources.forEach(s => {
-        lines.push(`"${s.id}","${s.source_type}","${s.domain}","${(s.publisher || 'Unknown').replace(/"/g, '""')}","${s.url}","${s.reliability_score}%","${s.fetch_status || 'NOT_FETCHED'}","${s.published_at || 'Unknown'}"`);
+        lines.push(`${csvCell(s.id)},${csvCell(s.source_type)},${csvCell(s.domain)},${csvCell(s.publisher || 'Unknown')},${csvCell(s.url)},${csvCell(s.reliability_score + '%')},${csvCell(s.fetch_status || 'NOT_FETCHED')},${csvCell(s.published_at || 'Unknown')}`);
       });
 
       res.setHeader('Content-Disposition', `attachment; filename="market-intelligence-${req.params.id}.csv"`);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.send(lines.join('\n'));
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -620,7 +646,7 @@ async function startServer() {
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>${rep.title}</title>
+  <title>${escapeHtml(rep.title)}</title>
   <style>
     @page { size: letter; margin: 18mm 16mm; }
     body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.6; font-size: 11pt; }
@@ -637,24 +663,24 @@ async function startServer() {
 </head>
 <body>
   <div class="header-bar">
-    <h1>${rep.title}</h1>
+    <h1>${escapeHtml(rep.title)}</h1>
     <div style="color: #64748b; font-size: 10pt;">
-      Scope: ${rep.industry} | Geography: ${rep.geography} | Horizon: ${rep.time_horizon} | Evidence Score: <span class="score-badge">${rep.evidence_score_breakdown.overall_score}/100</span>
+      Scope: ${escapeHtml(rep.industry)} | Geography: ${escapeHtml(rep.geography)} | Horizon: ${escapeHtml(rep.time_horizon)} | Evidence Score: <span class="score-badge">${escapeHtml(rep.evidence_score_breakdown.overall_score)}/100</span>
     </div>
   </div>
 
   <h2>1. Executive Strategic Summary</h2>
-  <p>${rep.executive_summary}</p>
+  <p>${escapeHtml(rep.executive_summary)}</p>
 
   <h2>2. Key Macro Intelligence Sections</h2>
-  ${rep.sections.map(s => `<h3>${s.title}</h3><p>${s.content}</p>`).join('')}
+  ${rep.sections.map(s => `<h3>${escapeHtml(s.title)}</h3><p>${escapeHtml(s.content)}</p>`).join('')}
 
   <h2>3. Verified Claims & Provenance Registry</h2>
   ${rep.claims.map(c => `
     <div class="claim-box">
-      <strong>[${c.citation_number}] ${c.statement}</strong><br/>
-      <small style="color: #64748b;">Type: ${c.claim_type} | Status: ${c.verification_status} | Confidence: ${c.confidence}%</small><br/>
-      <small><em>Reasoning: ${c.reasoning}</em></small>
+      <strong>[${escapeHtml(c.citation_number)}] ${escapeHtml(c.statement)}</strong><br/>
+      <small style="color: #64748b;">Type: ${escapeHtml(c.claim_type)} | Status: ${escapeHtml(c.verification_status)} | Confidence: ${escapeHtml(c.confidence)}%</small><br/>
+      <small><em>Reasoning: ${escapeHtml(c.reasoning)}</em></small>
     </div>
   `).join('')}
 
@@ -666,12 +692,12 @@ async function startServer() {
     <tbody>
       ${rep.sources.map(s => `
         <tr>
-          <td>${s.id}</td>
-          <td>${s.source_type}</td>
-          <td>${s.publisher || 'Unknown'}</td>
-          <td>${s.domain}</td>
-          <td>${s.reliability_score}%</td>
-          <td>${s.fetch_status || 'NOT_FETCHED'}</td>
+          <td>${escapeHtml(s.id)}</td>
+          <td>${escapeHtml(s.source_type)}</td>
+          <td>${escapeHtml(s.publisher || 'Unknown')}</td>
+          <td>${escapeHtml(s.domain)}</td>
+          <td>${escapeHtml(s.reliability_score)}%</td>
+          <td>${escapeHtml(s.fetch_status || 'NOT_FETCHED')}</td>
         </tr>
       `).join('')}
     </tbody>
@@ -687,7 +713,7 @@ async function startServer() {
     res.setHeader('Content-Type', 'text/html');
     res.send(printHtml);
     } catch (err: any) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: err.message } });
+      res.status(500).json({ error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' } });
     }
   });
 
@@ -723,3 +749,4 @@ async function startServer() {
 }
 
 startServer();
+
