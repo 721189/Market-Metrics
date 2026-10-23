@@ -1,60 +1,165 @@
-Proprietary License — Market-Metrics ("Market Intelligence V2")
+MARKET-METRICS PROPRIETARY LICENSE
+===================================
 
-Copyright (c) 2026 721189. All rights reserved.
+Version 1.0 — October 2026
 
-1. Ownership. The software, including all source code, documentation,
-   diagrams, test corpora, prompts, schemas, and build/packaging
-   configuration in this repository (collectively, the "Software"), is the
-   exclusive property of the copyright holder named above ("Owner").
+This Market-Metrics Proprietary License (the "License") is a legal agreement
+between You ("Licensee") and Shivam Singh ("Licensor") governing the use,
+copying, modification, distribution, deployment, and commercial exploitation
+of the Market-Metrics software and all related materials (collectively, the
+"Software"), including without limitation all source code, object code,
+documentation, diagrams, test corpora, prompts, schemas, build and packaging
+configuration, artifacts, and derivatives thereof.
 
-2. Limited viewing permission. You may view the Software in this repository
-   for evaluation purposes only. No other right is granted by viewing.
+THE SOFTWARE IS PROPRIETARY AND CLOSED-SOURCE. IT IS NOT OPEN-SOURCE
+SOFTWARE. IT IS NOT FREE SOFTWARE. NO RIGHT, TITLE, OR INTEREST IN THE
+SOFTWARE IS GRANTED TO YOU EXCEPT AS EXPRESSLY STATED IN THIS LICENSE, AND
+ONLY AFTER YOU HAVE OBTAINED PRIOR WRITTEN PERMISSION FROM THE LICENSOR AND
+PAID ALL APPLICABLE FEES.
 
-3. No grant of rights. Except as expressly stated in Section 2, no right,
-   title, or interest in the Software is granted, whether by implication,
-   estoppel, or otherwise. Without limiting the foregoing, you may NOT:
+1. OWNERSHIP
 
-   (a) copy, reproduce, or republish the Software or any part of it;
-   (b) modify, adapt, translate, or create derivative works of the Software;
-   (c) distribute, sublicense, lease, lend, sell, or otherwise transfer the
+   The Software is and shall remain the exclusive property of Shivam Singh
+   (the "Licensor"). All right, title, and interest in and to the Software,
+   including all intellectual property rights, copyrights, patents, trade
+   secrets, trademarks, and other proprietary rights therein, are and shall
+   remain with the Licensor. This License does not transfer any ownership
+   interest in the Software to You.
+
+2. NO RIGHTS GRANTED EXCEPT BY EXPRESS WRITTEN AGREEMENT
+
+   Except as expressly provided in this License, no license or other right is
+   granted to You, whether by implication, estoppel, or otherwise. Without
+   limiting the generality of the foregoing, You may NOT:
+
+   2.1 copy, reproduce, clone, or republish the Software or any part of it;
+   2.2 modify, adapt, translate, or create Derivative Works of the Software;
+   2.3 distribute, sublicense, lease, lend, sell, or otherwise transfer the
        Software to any third party;
-   (d) deploy, host, or operate the Software (or any derivative) in any
-       environment, including development, staging, or production;
-   (e) use the Software, in whole or in part, to provide any service to any
-       third party, whether paid or unpaid;
-   (f) remove, alter, or obscure any copyright, attribution, or license
-       notice in the Software;
-   (g) use the Software to train, fine-tune, or evaluate any machine-learning
-       model, or to generate training data, without prior written consent.
+   2.4 deploy, host, install, or operate the Software (or any derivative) in
+       any environment, including development, staging, or production;
+   2.5 use the Software, in whole or in part, to provide any service to any
+       third party, whether paid or unpaid, including software-as-a-service
+       (SaaS), platform-as-a-service (PaaS), managed services, or any similar
+       offering;
+   2.6 remove, alter, obscure, or circumvent any copyright, attribution, or
+       license notice in the Software;
+   2.7 use the Software to train, fine-tune, or evaluate any machine-learning
+       model or artificial-intelligence system, or to generate training data,
+       without the prior written consent of the Licensor;
+   2.8 reverse engineer, decompile, disassemble, or otherwise attempt to
+       derive source code or trade secrets from the Software.
 
-4. Public repository notice. The fact that the Software is visible in a
-   public repository does not grant any license. Hosting-platform terms that
-   permit viewing and forking for platform functionality do not expand the
-   rights granted here, and any fork remains subject to this License.
+3. CONDITIONS FOR PERMISSION AND PAYMENT
 
-5. Third-party components. The Software depends on third-party packages
-   listed in package.json / package-lock.json. Those components remain
-   governed by their own licenses. Nothing in this License grants rights in
-   third-party components beyond what their licenses allow.
+   Any Use of the Software (as defined below) and any provision of a Service
+   (as defined below) based on or incorporating the Software is strictly
+   conditioned upon ALL of the following:
 
-6. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
-   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
-   IN NO EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
-   FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-   DEALINGS IN THE SOFTWARE.
+   3.1 You must obtain prior written permission from the Licensor, Shivam
+       Singh, in the form of a signed written commercial license agreement
+       (the "Commercial License");
 
-7. Limitation of liability. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE
-   OWNER SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
-   CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, REVENUE,
-   DATA, OR USE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+   3.2 You must pay all fees, royalties, license costs, or other
+       consideration specified in the Commercial License before any Use or
+       Service commences;
 
-8. Termination. Any use of the Software outside the scope of this License
-   automatically terminates the limited permission in Section 2. Sections 1,
-   3, and 5 through 9 survive termination.
+   3.3 You must comply with all terms, restrictions, and obligations set
+       forth in the Commercial License, including permitted users, permitted
+       environments, term, territory, scope of Use, reporting, and audit
+       obligations.
 
-9. Contact. To request a license (evaluation, commercial, or otherwise),
-   contact the Owner via the repository owner's GitHub profile (@721189).
+   For purposes of this License, "Use" means any installation, execution,
+   deployment, hosting, access, integration, linking, embedding, or operation
+   of the Software, in whole or in part, for any purpose whatsoever,
+   including internal, commercial, personal, evaluation, or research
+   purposes. "Service" means offering the Software, or any functionality
+   derived from the Software, to any third party on a hosted, managed,
+   subscription, pay-per-use, or service basis.
+
+   WITHOUT A DULY EXECUTED COMMERCIAL LICENSE SIGNED BY YOU AND SHIVAM
+   SINGH, YOU HAVE NO RIGHT TO USE THE SOFTWARE OR TO OFFER ANY SERVICE
+   DERIVING FROM IT.
+
+4. PUBLIC REPOSITORY NOTICE
+
+   The fact that the Software is visible in a public source-code repository
+   does not grant any license or right to use the Software. Any rights
+   granted by a hosting platform's terms of service (including viewing,
+   forking, or cloning for platform functionality) do not expand the rights
+   granted under this License, and any fork, mirror, or copy of the Software
+   remains subject to this License and the restrictions herein.
+
+5. THIRD-PARTY COMPONENTS
+
+   The Software may depend on third-party packages and components. Those
+   components remain governed by their own respective licenses. Nothing in
+   this License grants any rights in third-party components beyond what their
+   individual licenses permit. Your Use of third-party components is your own
+   responsibility.
+
+6. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NONINFRINGEMENT,
+   OR ABSENCE OF DEFECTS. THE LICENSOR DOES NOT WARRANT THAT THE SOFTWARE
+   WILL MEET YOUR REQUIREMENTS OR THAT ITS OPERATION WILL BE UNINTERRUPTED,
+   SECURE, OR ERROR-FREE.
+
+7. LIMITATION OF LIABILITY
+
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   LICENSOR, SHIVAM SINGH, OR THEIR AFFILIATES, AGENTS, EMPLOYEES, OR
+   LICENSORS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL,
+   PUNITIVE, OR EXEMPLARY DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE,
+   DATA, GOODWILL, OR USE, ARISING OUT OF OR RELATED TO THIS LICENSE, THE
+   SOFTWARE, OR THE USE OR INABILITY TO USE THE SOFTWARE, EVEN IF ADVISED OF
+   THE POSSIBILITY OF SUCH DAMAGES. THE LICENSOR'S TOTAL AGGREGATE LIABILITY
+   ARISING OUT OF OR RELATED TO THIS LICENSE SHALL NOT EXCEED THE AMOUNT
+   ACTUALLY PAID BY YOU TO THE LICENSOR UNDER A COMMERCIAL LICENSE.
+
+8. INDEMNIFICATION
+
+   You agree to indemnify, defend, and hold harmless the Licensor, Shivam
+   Singh, and their Affiliates, officers, directors, employees, and agents
+   from and against any and all claims, damages, liabilities, costs, losses,
+   and expenses (including reasonable attorneys' fees) arising out of or
+   related to your Use of the Software, your breach of this License, or your
+   provision of any Service deriving from the Software.
+
+9. TERM AND TERMINATION
+
+   This License is effective until terminated. The Licensor may terminate
+   this License immediately upon written notice if You breach any term or
+   condition. Upon termination, You must immediately cease all Use of the
+   Software, destroy all copies of the Software in your possession or
+   control, and certify such destruction to the Licensor upon request.
+   Termination does not extinguish accrued payment obligations, indemnity
+   obligations, or liabilities incurred prior to termination. Sections 1,
+   2, 5, 6, 7, 8, and 10 survive termination.
+
+10. GOVERNING LAW AND DISPUTES
+
+    This License shall be governed by and construed in accordance with the
+    laws of India, without regard to conflict-of-law principles. Any dispute
+    arising out of or relating to this License shall be subject to the
+    exclusive jurisdiction of the courts located in India.
+
+11. CONTACT AND LICENSE INQUIRIES
+
+    To request a Commercial License, obtain permission to Use the Software,
+    or inquire about paid services, contact:
+
+    Shivam Singh
+    Owner, Market-Metrics
+
+    No permission or license is implied by mere access to, viewing of, or
+    cloning of the Software. All inquiries must be made in writing and must
+    receive a signed written response from the Licensor before any Use or
+    Service is commenced.
+
+    THIS IS NOT OPEN-SOURCE SOFTWARE. THIS IS NOT A PERMISSIVE LICENSE.
+    ALL RIGHTS ARE RESERVED BY SHIVAM SINGH.
 
 END OF LICENSE
