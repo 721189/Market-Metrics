@@ -11,7 +11,7 @@
  */
 
 import { adminDb } from '../lib/firebase-admin.js';
-import { getStorage } from 'firebase-admin/storage';
+import { getStorageInstance, getStorageBucket } from '../lib/firebase-admin.js';
 export interface RetrievalArtifact {
   source_id: string;
   job_id: string;
@@ -109,23 +109,21 @@ export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'no
 // Falls back to InMemoryArtifactStorage when STORAGE_BUCKET is not configured.
 // ---------------------------------------------------------------------------
 
-const STORAGE_BUCKET_ENV = process.env.STORAGE_BUCKET || process.env.FIREBASE_STORAGE_BUCKET || '';
-
-function getStorageBucketName(): string | null {
-  const name = STORAGE_BUCKET_ENV.trim();
-  return name || null;
-}
-
 export class FirestoreArtifactStorage implements ArtifactStorage {
   readonly kind = 'firestore';
 
-  async putBlob(storageRef: string, contentType: string, bytes: Buffer): Promise<void> {
-    const bucketName = getStorageBucketName();
-    if (!bucketName) {
-      throw new Error('[FirestoreArtifactStorage] STORAGE_BUCKET is not configured.');
+  constructor() {
+    getStorageBucket();
+    if (!getStorageBucket()) {
+      throw new Error(
+        '[FirestoreArtifactStorage] STORAGE_BUCKET is not configured for this environment. ' +
+          'Set STORAGE_BUCKET (or FIREBASE_STORAGE_BUCKET) or run with InMemoryArtifactStorage.',
+      );
     }
-    const storage = getStorage();
-    const bucket = storage.bucket(bucketName);
+  }
+
+  async putBlob(storageRef: string, contentType: string, bytes: Buffer): Promise<void> {
+    const bucket = getStorageInstance();
     await bucket.file(storageRef).save(bytes, {
       contentType,
       metadata: {
@@ -152,11 +150,8 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
   }
 
   async getRaw(storageRef: string): Promise<Buffer | null> {
-    const bucketName = getStorageBucketName();
-    if (!bucketName) return null;
     try {
-      const storage = getStorage();
-      const bucket = storage.bucket(bucketName);
+      const bucket = getStorageInstance();
       const file = bucket.file(storageRef);
       const [exists] = await file.getMetadata();
       if (!exists) return null;
@@ -174,11 +169,8 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
   }
 
   async delete(source_id: string, job_id: string): Promise<void> {
-    const bucketName = getStorageBucketName();
-    if (!bucketName) return;
     try {
-      const storage = getStorage();
-      const bucket = storage.bucket(bucketName);
+      const bucket = getStorageInstance();
       const rawRef = artifactRef(source_id, job_id, 'raw');
       const normRef = artifactRef(source_id, job_id, 'normalized');
       await Promise.all([

@@ -509,7 +509,7 @@ export class RealDocumentFetcher {
   }
 
 
-  private static async safeFetch(url: string, maxBytes: number, timeoutMs: number): Promise<{
+  private static async safeFetch(url: string, maxBytes: number, timeoutMs: number, pinnedIp: string | null = null): Promise<{
     status: number;
     headers: Record<string, string | string[] | undefined>;
     body: Buffer;
@@ -520,6 +520,19 @@ export class RealDocumentFetcher {
     try {
       this.validateUrl(url);
       const parsed = new URL(url);
+
+      // DNS pinning: resolve the hostname before opening the socket, then pin
+      // that IP. On redirects we re-resolve and require an exact IP match —
+      // this prevents DNS rebinding where the first resolution returns a public
+      // IP but a later one (after a redirect) returns an internal address.
+      let resolvedIp: string | null = pinnedIp;
+      if (!resolvedIp) {
+        resolvedIp = await this.resolveIp(parsed.hostname);
+        if (resolvedIp && this.isPrivateIp(resolvedIp)) {
+          throw new Error(`SSRF blocked: \"${parsed.hostname}\" resolves to private IP \"${resolvedIp}\"`);
+        }
+      }
+
       const isHttps = parsed.protocol === 'https:';
       const mod = isHttps ? require('https') : require('http');
       const res = await new Promise<{
@@ -540,13 +553,12 @@ export class RealDocumentFetcher {
         const redirectedParsed = new URL(redirectUrl);
         const redirectedIp = await this.resolveIp(redirectedParsed.hostname);
         if (redirectedIp && !this.isPrivateIp(redirectedIp)) {
-          const originalIp = await this.resolveIp(parsed.hostname);
-          if (originalIp && redirectedIp !== originalIp) {
-            throw new Error(`SSRF blocked: DNS rebinding detected (${originalIp} -> ${redirectedIp})`);
+          if (resolvedIp && redirectedIp !== resolvedIp) {
+            throw new Error(`SSRF blocked: DNS rebinding detected (${resolvedIp} -> ${redirectedIp})`);
           }
         }
         clearTimeout(timer);
-        return this.safeFetch(redirectUrl, maxBytes, timeoutMs);
+        return this.safeFetch(redirectUrl, maxBytes, timeoutMs, resolvedIp);
       }
       const chunks: Buffer[] = [];
       let total = 0;
@@ -554,6 +566,9 @@ export class RealDocumentFetcher {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         total += buf.length;
         if (total > maxBytes) throw new Error(`Response exceeded size limit of ${maxBytes} bytes`);
+        if (total > RealDocumentFetcher.MAX_DECOMPRESSED_BYTES) {
+          throw new Error(`Decompression bomb: response exceeded ${RealDocumentFetcher.MAX_DECOMPRESSED_BYTES} bytes`);
+        }
         chunks.push(buf);
       }
       return { status: res.status, headers: res.headers, body: Buffer.concat(chunks, total), contentLength: total };

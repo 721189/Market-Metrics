@@ -20,17 +20,24 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   }
   const user = (req as any).user;
   const userId = user?.uid || 'anonymous';
-  const method = req.method;
   const path = req.path;
-  const payload = `${userId}|${method}|${path}|${idempotencyKey}`;
+  // sha256(user_id + endpoint + key) — per-key, per-user, per-endpoint scoping.
+  // Method is deliberately excluded so idempotency is keyed on the resource,
+  // not the HTTP verb.
+  const payload = `${userId}|${path}|${idempotencyKey}`;
   const docKey = crypto.createHash('sha256').update(payload).digest('hex');
   const coll = 'idempotency_keys';
+
+  // IDEMPOTENCY_STORE=firestore persists keys across restarts and replicas.
+  // Defaults to memory for single-replica/dev; set IDEMPOTENCY_STORE=firestore
+  // for production durability.
   const storeKind = (process.env.IDEMPOTENCY_STORE || 'memory').trim().toLowerCase();
+
   if (storeKind === 'memory') {
     if (!globalThis.__idempotencyCache) {
-      globalThis.__idempotencyCache = new Map();
+      globalThis.__idempotencyCache = new Map<string, { status: number; body: any; ts: number }>();
     }
-    const cache = globalThis.__idempotencyCache as Map<string, { status: number; body: any; ts: number }>;
+    const cache = globalThis.__idempotencyCache;
     const entry = cache.get(docKey);
     if (entry && Date.now() - entry.ts < 24 * 3600 * 1000) {
       return res.status(entry.status).json(entry.body);
@@ -44,6 +51,8 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     next();
     return;
   }
+
+  // Firestore transactional path: atomic check-then-act across replicas.
   adminDb.runTransaction(async (tx) => {
     const ref = adminDb.collection(coll).doc(docKey);
     const snap = await tx.get(ref);
@@ -55,7 +64,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
       }
       throw new Error('TX_INFLIGHT');
     }
-    tx.set(ref, { method, path, user_id: userId, key_hash: docKey, createdAt: FieldValue.serverTimestamp() });
+    tx.set(ref, { path, user_id: userId, key_hash: docKey, createdAt: FieldValue.serverTimestamp() });
   }).then(() => {
     const orig = res.json.bind(res);
     res.json = (body: any) => {
@@ -75,10 +84,10 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   });
 }
 
-function persistToFirestore(docKey: string, status: number, body: any): Promise<void> {
-  return adminDb.collection('idempotency_keys').doc(docKey).set({
+async function persistToFirestore(docKey: string, status: number, body: any): Promise<void> {
+  await adminDb.collection('idempotency_keys').doc(docKey).set({
     status, body, respondedAt: FieldValue.serverTimestamp(),
-  }, { merge: true }).then(() => {}).catch(() => {});
+  }, { merge: true });
 }
 
 export function rateLimiterMiddleware(opts: { maxRequests?: number; windowSec?: number } = {}) {

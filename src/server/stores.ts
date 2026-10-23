@@ -160,18 +160,13 @@ export class FirestoreCostStore implements CostStore {
     // naturally stop receiving writes. A cleanup job (not implemented here)
     // can delete stale docs.
     const ref = adminDb.collection(COST_COLLECTION).doc(key);
-    await adminDb.runTransaction(async (tx) => {
+    return adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       const existing = snap.exists ? (snap.data()?.total_usd ?? 0) : 0;
-      tx.set(ref, { total_usd: existing + costUsd, updated_at: FieldValue.serverTimestamp() }, { merge: true });
+      const next = existing + costUsd;
+      tx.set(ref, { total_usd: next, updated_at: FieldValue.serverTimestamp() }, { merge: true });
+      return next;
     });
-    // Read back the new total. In the common case the increment is atomic and
-    // this read is consistent; under extreme contention the read may lag by
-    // one increment, which is acceptable for cost accounting (never under-
-    // charges a user, and the per-request budget gate uses a separate pre-
-    // check + allow path).
-    const after = await adminDb.collection(COST_COLLECTION).doc(key).get();
-    return (after.data()?.total_usd ?? 0);
   }
 
   async get(key: string): Promise<number> {
