@@ -62,6 +62,51 @@ import {
 export const pipelineEmitter = new EventEmitter();
 pipelineEmitter.setMaxListeners(500);
 
+/** Overall wall-clock timeout for the entire pipeline (30 minutes). */
+export const PIPELINE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Runs an async operation with a hard deadline. Rejects with a TimeoutError
+ * if the operation does not settle before `ms` milliseconds. The returned
+ * promise is tied to `signal` so an external abort also rejects it.
+ */
+function withTimeout<T>(
+  operation: () => Promise<T>,
+  ms: number,
+  label: string,
+  signal?: AbortSignal
+): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  const abort = (err: Error) => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    throw err;
+  };
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timer = null;
+      reject(new Error(`Pipeline timeout exceeded (${ms}ms) at ${label}`));
+    }, ms);
+  });
+
+  const signalPromise = signal
+    ? new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(new Error(`Aborted at ${label}`));
+          return;
+        }
+        const onAbort = () => reject(new Error(`Aborted at ${label}`));
+        signal.addEventListener('abort', onAbort, { once: true });
+      })
+    : null;
+
+  return Promise.race([operation(), timeoutPromise, signalPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  });
+}
+
 let eventCounter = Date.now();
 
 let eventSequence = 0;
@@ -343,12 +388,17 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'PLANNING', 'Deconstructing research request into orthogonal search dimensions...', 5);
     
-    const plan = await GeminiResearchEngine.planResearch(
-      job.question,
-      job.industry,
-      job.geography,
-      job.time_horizon,
-      job.objectives,
+    const plan = await withTimeout(
+      () => GeminiResearchEngine.planResearch(
+        job.question,
+        job.industry,
+        job.geography,
+        job.time_horizon,
+        job.objectives,
+        signal
+      ),
+      5 * 60 * 1000,
+      'PLANNING',
       signal
     );
 
@@ -365,7 +415,12 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
 
-    const liveDiscovered = await GeminiResearchEngine.discoverLiveSources(plan.search_query_families, signal);
+    const liveDiscovered = await withTimeout(
+      () => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, signal),
+      5 * 60 * 1000,
+      'DISCOVERING',
+      signal
+    );
     
     const sources: Source[] = [];
     const sourceTexts: Map<string, string> = new Map();
@@ -613,17 +668,23 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'BUILDING_CLAIMS', 'Structuring atomic claims and binding citation provenance graphs...', 60);
 
     const analyzableSourceIds = new Set(analyzableSources.map(s => s.id));
-    const extractedLLMClaims = (await GeminiResearchEngine.extractClaimsFromText({
-      industry: job.industry,
-      geography: job.geography,
-      sourceDocuments: analyzableSources.map(s => ({
-        id: s.id,
-        domain: s.domain,
-        title: s.title || s.domain,
-        text: sourceTexts.get(s.id) || '',
-      })),
-      signal,
-    })).filter(item => analyzableSourceIds.has(item.source_id));
+    const extractedLLMClaimsRaw = await withTimeout(
+      () => GeminiResearchEngine.extractClaimsFromText({
+        industry: job.industry,
+        geography: job.geography,
+        sourceDocuments: analyzableSources.map(s => ({
+          id: s.id,
+          domain: s.domain,
+          title: s.title || s.domain,
+          text: sourceTexts.get(s.id) || '',
+        })),
+        signal,
+      }),
+      5 * 60 * 1000,
+      'EXTRACTING',
+      signal
+    );
+    const extractedLLMClaims = extractedLLMClaimsRaw.filter(item => analyzableSourceIds.has(item.source_id));
 
     const claims: Claim[] = [];
     let claimIdx = 1;
@@ -710,17 +771,22 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'ANALYZING', 'Analyzing financial metrics and market sizing from verified source data...', 80);
 
-    const financials = await GeminiResearchEngine.extractFinancialMetrics({
-      industry: job.industry,
-      geography: job.geography,
-      sourceDocuments: analyzableSources.map(s => ({
-        id: s.id,
-        domain: s.domain,
-        title: s.title || s.domain,
-        text: sourceTexts.get(s.id) || '',
-      })),
-      signal,
-    });
+    const financials = await withTimeout(
+      () => GeminiResearchEngine.extractFinancialMetrics({
+        industry: job.industry,
+        geography: job.geography,
+        sourceDocuments: analyzableSources.map(s => ({
+          id: s.id,
+          domain: s.domain,
+          title: s.title || s.domain,
+          text: sourceTexts.get(s.id) || '',
+        })),
+        signal,
+      }),
+      5 * 60 * 1000,
+      'ANALYZING',
+      signal
+    );
 
     const isIndia = financials.currency === 'INR';
     const currency = financials.currency;
@@ -855,28 +921,38 @@ export class ResearchPipelineManager {
       .slice(0, 20)
       .map(e => ({ id: e.id, source_id: e.source_id, quote: e.quote.slice(0, 300) }));
 
-    const narrative = await GeminiResearchEngine.synthesizeReportOverview({
-      question: job.question,
-      industry: job.industry,
-      geography: job.geography,
-      timeHorizon: job.time_horizon,
-      tamForecast: sizing.tam_forecast,
-      cagr: sizing.cagr_pct,
-      claims: verifiedClaimRegistry,
-      evidence: synthesisEvidence,
-      signal,
-    });
+    const narrative = await withTimeout(
+      () => GeminiResearchEngine.synthesizeReportOverview({
+        question: job.question,
+        industry: job.industry,
+        geography: job.geography,
+        timeHorizon: job.time_horizon,
+        tamForecast: sizing.tam_forecast,
+        cagr: sizing.cagr_pct,
+        claims: verifiedClaimRegistry,
+        evidence: synthesisEvidence,
+        signal,
+      }),
+      5 * 60 * 1000,
+      'SYNTHESIZING',
+      signal
+    );
 
-    const details = await GeminiResearchEngine.synthesizeReportDetails({
-      question: job.question,
-      industry: job.industry,
-      geography: job.geography,
-      timeHorizon: job.time_horizon,
-      isIndia,
-      currency,
-      claims: verifiedClaimRegistry,
-      signal,
-    });
+    const details = await withTimeout(
+      () => GeminiResearchEngine.synthesizeReportDetails({
+        question: job.question,
+        industry: job.industry,
+        geography: job.geography,
+        timeHorizon: job.time_horizon,
+        isIndia,
+        currency,
+        claims: verifiedClaimRegistry,
+        signal,
+      }),
+      5 * 60 * 1000,
+      'SYNTHESIZING',
+      signal
+    );
 
     // Ground the synthesis: every strategic entity must reference at least one
     // VERIFIED claim id. Dangling references are stripped; entities left with
@@ -1007,7 +1083,12 @@ export class ResearchPipelineManager {
     if (!userId || userId === 'unknown') throw new Error('Missing user_id for report saving');
 
     // Save final report to persistent DatabaseRepository
-    await DatabaseRepository.saveReport(finalReport, userId);
+    await withTimeout(
+      () => DatabaseRepository.saveReport(finalReport, userId),
+      2 * 60 * 1000,
+      'SAVE_REPORT',
+      signal
+    );
 
     // The cached entry (if any) predates this report — drop it so the next
     // read serves the freshly validated dossier, never a stale copy.
@@ -1037,6 +1118,21 @@ export class ResearchPipelineManager {
 export async function startWorker() {
   logger.info('queue.worker_started', 'Worker started with transactional claiming, lease verification, and real cancellation');
   const workerId = `worker-${Math.random().toString(36).substring(2, 8)}`;
+
+  // Recover any stale RUNNING jobs left over from a previous worker instance
+  // (e.g. Render spin-down, crash, or restart). This ensures jobs that were
+  // RUNNING with an expired lease are returned to QUEUED and can be reclaimed.
+  try {
+    const recovered = await researchQueue.recoverStaleJobs();
+    if (recovered > 0) {
+      logger.info('queue.startup_recovery', `Recovered ${recovered} stale job(s) at worker boot`);
+    }
+  } catch (err) {
+    logger.error('queue.startup_recovery_failed', 'Failed to recover stale jobs at worker boot', {
+      status: (err as Error)?.message || String(err),
+    });
+  }
+
   while (true) {
     let job: QueueJob | null = null;
     try {
@@ -1078,7 +1174,16 @@ export async function startWorker() {
       }, 60000); // 1 min heartbeat against a 3-min lease
 
       try {
-        await ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal, workerId);
+        // Overall pipeline wall-clock deadline: if the pipeline hangs beyond
+        // PIPELINE_TIMEOUT_MS (30 min) the job is failed rather than left
+        // stuck in RUNNING indefinitely. The AbortSignal propagates to every
+        // Gemini/fetch call inside the pipeline.
+        await withTimeout(
+          () => ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal, workerId),
+          PIPELINE_TIMEOUT_MS,
+          `pipeline:${job.id}`,
+          controller.signal
+        );
         if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
           logger.info('queue.job_cancelled', `Job ${job.id} cancelled by user; preserving CANCELLED state.`, { job_id: job.id });
         } else if (!leaseOwned) {
