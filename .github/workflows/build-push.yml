@@ -75,12 +75,31 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${REPO}:main-${SHA}"
           echo "Smoke-testing $IMAGE"
           docker pull "$IMAGE"
+          # firebase-admin needs a credential to initialise, even for /health.
+          # Generate a throwaway, syntactically valid service account so the
+          # container can boot in CI; no Google API is ever called by /health.
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/sa.pem 2>/dev/null
+          python3 - <<'PY' > /tmp/sa.json
+          import json
+          key = open('/tmp/sa.pem').read()
+          print(json.dumps({
+              "type": "service_account",
+              "project_id": "ci-project",
+              "private_key_id": "ci",
+              "private_key": key,
+              "client_email": "ci@ci-project.iam.gserviceaccount.com",
+              "client_id": "1",
+              "token_uri": "https://oauth2.googleapis.com/token",
+          }))
+          PY
+          SA_B64=$(base64 -w0 /tmp/sa.json)
           docker run -d --name smoke -p 3100:3000 \
             -e PORT=3000 -e APP_ENV=test -e NODE_ENV=test \
             -e FIREBASE_PROJECT_ID=ci-project \
             -e FIRESTORE_DATABASE_ID=ci-db \
             -e STORAGE_BUCKET=ci-bucket \
             -e FIREBASE_AUTH_DOMAIN=ci.firebaseapp.com \
+            -e FIREBASE_SERVICE_ACCOUNT="$SA_B64" \
             "$IMAGE"
           ok=0
           for i in $(seq 1 40); do
