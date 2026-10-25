@@ -216,6 +216,40 @@ export default function App() {
     let lastSequence = resumeAfter;
     let terminal = false;
 
+    // Watchdog (stuck-job guard). SSE only emits heartbeats while a job sits in
+    // QUEUED, so if the background worker is not running the UI spins forever
+    // with no error and no timeout. Poll the authoritative job document and
+    // reconcile: close the stream as soon as the job is terminal, and stop
+    // holding the connection open when a job is never picked up.
+    const subscribeStartedAt = Date.now();
+    const watchdog = window.setInterval(async () => {
+      if (eventSourceRef.current !== es) {
+        window.clearInterval(watchdog);
+        return;
+      }
+      try {
+        const headers = await getHeaders();
+        const resp = await fetch(`/api/v1/research/${jobId}`, { headers });
+        if (!resp.ok) return;
+        const latest: ResearchJob = await resp.json();
+        setCurrentJob(latest);
+        if (latest.report) setReport(latest.report);
+
+        const finished = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(latest.status));
+        const neverPickedUp =
+          latest.status === 'QUEUED' && Date.now() - subscribeStartedAt > 120_000;
+
+        if (finished || neverPickedUp) {
+          window.clearInterval(watchdog);
+          es.close();
+          if (eventSourceRef.current === es) eventSourceRef.current = null;
+          fetchJobsList();
+        }
+      } catch {
+        // transient network error — the next tick retries
+      }
+    }, 10_000);
+
     es.onmessage = async (e) => {
       try {
         const evt: ResearchEvent = JSON.parse(e.data);

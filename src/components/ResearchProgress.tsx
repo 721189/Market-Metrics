@@ -46,8 +46,27 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
   const isFinished = job.status === 'COMPLETED';
   const isFailed = job.status === 'FAILED' || job.status === 'CANCELLED';
 
+  // A job that never leaves QUEUED means no worker claimed it (worker not
+  // running, queue misconfigured, Firestore unreachable). Surface that instead
+  // of pulsing a spinner forever with no explanation.
+  const queuedForMs =
+    job.status === 'QUEUED' && job.created_at
+      ? Date.now() - new Date(job.created_at).getTime()
+      : 0;
+  const isStuckQueued = queuedForMs > 120_000;
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+      {isStuckQueued && (
+        <div
+          role="alert"
+          className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-relaxed text-amber-200"
+        >
+          This job has been queued for {Math.round(queuedForMs / 60000)} min and no worker has
+          claimed it. Verify the background queue worker is running and that Firestore is
+          reachable — the research cannot start until the job is claimed.
+        </div>
+      )}
       {/* Top Status Banner */}
       <div className="rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 p-6 shadow-xl">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">

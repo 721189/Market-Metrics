@@ -50,34 +50,48 @@ export class FirestoreQueue {
             // constant-cost server-side count — never a full collection scan.
             await this.observeQueueDepth();
 
-            return await adminDb.runTransaction(async (transaction) => {
-                const snap = await adminDb.collection(this.collectionName)
-                    .where('status', '==', 'QUEUED')
-                    .orderBy('created_at', 'asc')
-                    .limit(10)
-                    .get();
+            // IMPORTANT: the candidate query runs OUTSIDE the transaction and
+            // without orderBy().
+            //
+            //  * `status ==` + `orderBy('created_at')` requires a COMPOSITE
+            //    Firestore index. A fresh project has none, so the query fails
+            //    with FAILED_PRECONDITION, claimNextJob swallows it and returns
+            //    null — every job then sits in QUEUED forever while the UI
+            //    streams heartbeats and never finishes. That is the "search
+            //    never completes" failure.
+            //  * Running a query inside runTransaction() is also not portable
+            //    across SDK versions.
+            //
+            // So: fetch a bounded page of QUEUED docs, sort in memory, and let
+            // the transaction claim exactly one document by id.
+            const snap = await adminDb.collection(this.collectionName)
+                .where('status', '==', 'QUEUED')
+                .limit(25)
+                .get();
 
-                if (snap.empty) return null;
+            if (snap.empty) return null;
 
-                const docs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as QueueJob }));
-                docs.sort((a, b) => {
+            const candidates = snap.docs
+                .map(doc => ({ id: doc.id, ...(doc.data() as QueueJob) }))
+                .sort((a, b) => {
                     const ta = a.created_at?.toMillis ? a.created_at.toMillis() : 0;
                     const tb = b.created_at?.toMillis ? b.created_at.toMillis() : 0;
                     return ta - tb;
                 });
 
-                for (const target of docs) {
-                    const jobRef = adminDb.collection(this.collectionName).doc(target.id);
+            for (const target of candidates) {
+                const jobRef = adminDb.collection(this.collectionName).doc(target.id);
 
-                    // Re-check inside the transaction: status must still be QUEUED.
+                const claimed = await adminDb.runTransaction(async (transaction) => {
                     const freshDoc = await transaction.get(jobRef);
-                    if (!freshDoc.exists) continue;
-                    const current = freshDoc.data() as QueueJob | undefined;
-                    if (!current || current.status !== 'QUEUED') continue;
+                    if (!freshDoc.exists) return null;
 
-                    // Guard: if this job already has a live worker lease, skip it
-                    // (another worker claimed it between the snapshot and now).
-                    if (current.worker_id) continue;
+                    const current = freshDoc.data() as QueueJob | undefined;
+                    if (!current || current.status !== 'QUEUED') return null;
+
+                    // Guard: another worker may have claimed it between the
+                    // snapshot and this transaction.
+                    if (current.worker_id) return null;
 
                     const leaseId = crypto.randomUUID();
                     const leaseVersion = 1;
@@ -93,22 +107,24 @@ export class FirestoreQueue {
                     });
 
                     return {
-                        ...freshDoc.data(),
+                        ...current,
                         id: target.id,
-                        status: 'RUNNING',
+                        status: 'RUNNING' as const,
                         worker_id: workerId,
                         lease_id: leaseId,
                         lease_version: leaseVersion,
                         leased_until: leasedUntil,
-                        name: freshDoc.data()?.name ?? '',
-                        data: freshDoc.data()?.data ?? {},
-                        created_at: freshDoc.data()?.created_at ?? FieldValue.serverTimestamp(),
+                        name: current.name ?? '',
+                        data: current.data ?? {},
+                        created_at: current.created_at ?? FieldValue.serverTimestamp(),
                         updated_at: FieldValue.serverTimestamp(),
                     };
-                }
+                });
 
-                return null;
-            });
+                if (claimed) return claimed;
+            }
+
+            return null;
         } catch (err: any) {
             logger.error('queue.claim_failed', 'Error claiming next job', { status: (err as Error)?.message || String(err) });
             return null;
@@ -196,15 +212,30 @@ export class FirestoreQueue {
     async recoverStaleJobs(): Promise<number> {
         try {
             const now = Date.now();
-            const staleSnap = await adminDb.collection(this.collectionName)
+            // Single-field filter only. `status ==` combined with a
+            // `leased_until <=` range ALSO requires a composite index, which a
+            // fresh project does not have — recovery would then never run and
+            // jobs orphaned by a Render restart would stay RUNNING forever.
+            // The expiry check is done in JS; _recoverStaleJobTransaction()
+            // re-reads the live document, so a heartbeat that lands in between
+            // still wins and the lease is not stolen.
+            const runningSnap = await adminDb.collection(this.collectionName)
                 .where('status', '==', 'RUNNING')
-                .where('leased_until', '<=', Timestamp.fromMillis(now))
+                .limit(100)
                 .get();
 
-            if (staleSnap.empty) return 0;
+            const staleDocs = runningSnap.docs.filter(doc => {
+                const until = (doc.data() as QueueJob).leased_until;
+                const ms = until?.toMillis != null
+                    ? until.toMillis()
+                    : (typeof until === 'number' ? until : -1);
+                return ms <= now;
+            });
+
+            if (staleDocs.length === 0) return 0;
 
             let recovered = 0;
-            for (const doc of staleSnap.docs) {
+            for (const doc of staleDocs) {
                 const recoveredOk = await this._recoverStaleJobTransaction(doc.id);
                 if (recoveredOk) recovered++;
             }

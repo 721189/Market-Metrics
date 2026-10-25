@@ -465,6 +465,19 @@ async function startServer() {
       res.write(`id: ${evt.sequence}\ndata: ${JSON.stringify(evt)}\n\n`);
     });
 
+    // If the job already finished (or the log contains a terminal event), replay
+    // it and CLOSE. Previously the stream stayed open forever writing only
+    // heartbeats, which is exactly why a completed — or stuck — research looked
+    // like it was "still running" in the UI.
+    const terminalStatus = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(job.status));
+    const hasTerminalEvent = existingEvents.some(
+      evt => evt.event_type === 'completed' || evt.event_type === 'error'
+    );
+    if (terminalStatus || hasTerminalEvent) {
+      res.write(': stream complete\n\n');
+      return res.end();
+    }
+
     // Heartbeat to keep connection alive through any intermediate proxies
     const heartbeatInterval = setInterval(() => {
       res.write(': heartbeat\n\n');
