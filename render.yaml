@@ -67,6 +67,8 @@ services:
       # Gemini credential for research runs (required in production).
       - key: GEMINI_API_KEY
         sync: false
+      - key: WORKER_MODE
+        value: separate
 
       # --- Client-side Firebase config (BUILD TIME — inlined by Vite) --------
       # These MUST match the same Firebase project as the server identifiers
@@ -93,3 +95,41 @@ services:
       # Empty = nobody (fail closed).
       - key: ADMIN_UIDS
         sync: false
+
+  # ---------------------------------------------------------------------------
+  # Dedicated queue worker (SaaS topology).
+  # Research runs for minutes; an embedded worker dies with the web dyno on every
+  # restart/deploy/spin-down. This service drains the same Firestore queue
+  # (transactional lease + stale-lease recovery) and starts NO HTTP listener.
+  # Use a paid instance type: free instances sleep and stop draining.
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: market-metrics-worker
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeployTrigger: commit
+    envVars:
+      - key: WORKER_MODE
+        value: worker
+      - key: NODE_ENV
+        value: production
+      - key: APP_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIRESTORE_DATABASE_ID
+        sync: false
+      - key: STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WORKER_MODE
+        value: separate

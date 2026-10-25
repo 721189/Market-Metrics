@@ -747,12 +747,35 @@ async function startServer() {
     });
   }
 
-  // Start background queue worker
-  startWorker().catch(err =>
-    logger.error('worker.fatal', '[Queue Worker] Fatal error', {
-      status: (err as Error)?.message || String(err),
-    }),
-  );
+  // Worker topology.
+  //   embedded (default) : web + queue worker in one process — local dev and
+  //                        single-service deploys only; a Render restart or
+  //                        spin-down loses in-flight jobs until lease recovery.
+  //   separate           : this process serves HTTP only; a dedicated worker
+  //                        service (render.yaml `type: worker`) drains the queue.
+  //   worker             : start the queue worker and NO HTTP listener.
+  const WORKER_MODE = (process.env.WORKER_MODE || 'embedded').toLowerCase();
+
+  if (WORKER_MODE === 'worker') {
+    logger.info('boot.worker_only', 'Dedicated queue worker: no HTTP listener');
+    startWorker().catch(err => {
+      logger.error('worker.fatal', '[Queue Worker] Fatal error', {
+        status: (err as Error)?.message || String(err),
+      });
+      process.exitCode = 1;
+    });
+    return;
+  }
+
+  if (WORKER_MODE === 'embedded') {
+    startWorker().catch(err =>
+      logger.error('worker.fatal', '[Queue Worker] Fatal error', {
+        status: (err as Error)?.message || String(err),
+      }),
+    );
+  } else {
+    logger.info('boot.worker_external', 'WEB_ONLY: queue is drained by the dedicated worker service');
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
     logger.info('boot.listening', `Market Intelligence Agent V2 running`, {
