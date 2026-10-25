@@ -41,6 +41,9 @@ export default function App() {
   const [inspectedClaim, setInspectedClaim] = useState<Claim | null>(null);
   const [signingIn, setSigningIn] = useState<boolean>(false);
   const [signInError, setSignInError] = useState<string | null>(null);
+  // Surfaced to the user as a dismissible banner: 402 BUDGET_EXCEEDED, 401 auth,
+  // 500 misconfiguration. Without this a blocked user saw nothing happen.
+  const [runError, setRunError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   // Per-job SSE reconnect backoff (ms). Grows on repeated failures so a
   // persistently failing stream can't hammer the server with 1.5s retries;
@@ -333,7 +336,10 @@ export default function App() {
         } catch {
           // Non-JSON error body (proxy/CDN HTML) — keep the status-based detail.
         }
-        throw new Error(detail);
+        // Show the reason in-product instead of a silent failure or alert().
+        setRunError(detail);
+        setActiveView('workspace');
+        return;
       }
 
       const created = await res.json();
@@ -594,6 +600,22 @@ export default function App() {
             />
           )}
 
+          {runError && (
+            <div
+              role="alert"
+              className="mx-auto mt-4 max-w-7xl rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm leading-relaxed text-rose-200"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <span>{runError}</span>
+                <button
+                  onClick={() => setRunError(null)}
+                  className="shrink-0 text-xs font-semibold uppercase tracking-wide text-rose-300 hover:text-white"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
           {activeView === 'progress' && currentJob && (
             <ResearchProgress
               job={currentJob}
