@@ -1,0 +1,76 @@
+# Alerting contract — Market-Metrics
+#
+# The service emits structured JSON logs (logger.ts) with stable `event` keys,
+# and exports OTel traces (see src/server/telemetry.ts). Alert on the EVENTS
+# below through your log drain (Render log stream -> Better Stack / Datadog /
+# Grafana Loki). Event names are part of the app's contract: do not rename them
+# without updating this file.
+#
+# Severity / paging policy:
+#   page      -> wake someone, customer-visible
+#   ticket    -> next business day
+#   dashboard -> visible only
+
+alerts:
+
+  - id: queue-claim-failed
+    event: queue.claim_failed
+    severity: page
+    window: 10m
+    threshold: "> 3 occurrences"
+    why: >
+      The worker cannot claim jobs (Firestore permissions, credentials, or a
+      bad index/query). Every occurrence is a customer whose research never
+      starts. This exact failure caused the "search never finishes" incident.
+    runbook: >
+      Check FIREBASE_SERVICE_ACCOUNT validity, firestore.rules, and the
+      job_queue collection. Confirm the worker service is running and that
+      WORKER_MODE is not `separate` on the only deployed service.
+
+  - id: worker-fatal
+    event: worker.fatal
+    severity: page
+    window: 5m
+    threshold: ">= 1"
+    why: The queue worker loop died; nothing will process jobs.
+    runbook: Restart the worker service; check memory limits and unhandled rejections.
+
+  - id: job-failed
+    event: pipeline.job_failed
+    severity: ticket
+    window: 1h
+    threshold: "> 5% of started jobs"
+    why: Stage failures (fetch, extraction, verification) indicate provider or parsing regressions.
+    runbook: Inspect the failing stage in the job document; check Gemini quota and fetcher errors.
+
+  - id: job-duration-p95
+    metric: job_duration_ms
+    severity: ticket
+    window: 6h
+    threshold: "p95 > 25 min"
+    why: >
+      A deep research run should complete well inside the worker lease cycle.
+      Rising p95 is the leading indicator of timeouts and stuck RUNNING jobs.
+    runbook: Compare stage timings (job.events); look for retry storms in gemini.ts/fetcher.ts.
+
+  - id: job-stuck-queued
+    metric: job_queue_age_ms
+    severity: page
+    window: 15m
+    threshold: "max > 10 min while queue depth > 0"
+    why: Jobs are queued but no worker claims them (worker down, wrong WORKER_MODE, or lease recovery failing).
+    runbook: Verify the worker service is deployed and healthy; check queue.claim_failed.
+
+  - id: auth-failures
+    event: api.unauthorized
+    severity: ticket
+    window: 15m
+    threshold: "> 50"
+    why: Client/server Firebase project mismatch, expired tokens, or a credential-stuffing attempt.
+
+  - id: budget-exceeded
+    event: cost.budget_exceeded
+    severity: dashboard
+    window: 24h
+    threshold: "any"
+    why: A tenant is being refused work — the upgrade path should convert this, not surprise them.
