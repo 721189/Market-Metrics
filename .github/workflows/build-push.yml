@@ -69,7 +69,10 @@ jobs:
           # "invalid reference format ... must be lowercase". Lowercase the
           # derived name the same way metadata-action normalises the pushed tag.
           REPO=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE="${{ env.REGISTRY }}/${REPO}:main-${{ github.sha }}"
+          # metadata-action's type=sha tag is the SHORT sha (7 chars). Using the
+          # full github.sha produced a tag that was never pushed -> manifest unknown.
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE="${{ env.REGISTRY }}/${REPO}:main-${SHA}"
           echo "Smoke-testing $IMAGE"
           docker pull "$IMAGE"
           docker run -d --name smoke -p 3100:3000 \
