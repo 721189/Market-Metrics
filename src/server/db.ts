@@ -56,15 +56,23 @@ export class DatabaseRepository {
   public static async listJobs(maxLimit: number = 50, userId: string): Promise<ResearchJob[]> {
     if (!userId) throw new Error('[DB] userId is required for listJobs');
     try {
+      // No orderBy: `user_id ==` + `orderBy('created_at')` needs a composite
+      // index, and without it Firestore throws FAILED_PRECONDITION — this
+      // method then returned [] and the dashboard silently showed no history.
+      // Sort a bounded page in memory instead (default indexes only).
       const snap = await adminDb.collection('jobs')
         .where('user_id', '==', userId)
-        .orderBy('created_at', 'desc')
         .limit(maxLimit)
         .get();
-      
+
       const jobs: ResearchJob[] = [];
       snap.forEach(doc => {
         jobs.push(doc.data() as ResearchJob);
+      });
+      jobs.sort((a: any, b: any) => {
+        const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+        const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+        return tb - ta;
       });
       return jobs;
     } catch (err) {
