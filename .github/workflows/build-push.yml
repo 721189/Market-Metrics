@@ -64,7 +64,13 @@ jobs:
         # never pass.
         run: |
           set -e
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}"
+          # Docker image references MUST be lowercase; github.repository keeps the
+          # owner/repo casing ("721189/Market-Metrics"), which docker rejects with
+          # "invalid reference format ... must be lowercase". Lowercase the
+          # derived name the same way metadata-action normalises the pushed tag.
+          REPO=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${{ env.REGISTRY }}/${REPO}:main-${{ github.sha }}"
+          echo "Smoke-testing $IMAGE"
           docker pull "$IMAGE"
           docker run -d --name smoke -p 3100:3000 \
             -e PORT=3000 -e APP_ENV=test -e NODE_ENV=test \
@@ -73,10 +79,21 @@ jobs:
             -e STORAGE_BUCKET=ci-bucket \
             -e FIREBASE_AUTH_DOMAIN=ci.firebaseapp.com \
             "$IMAGE"
-          for i in $(seq 1 20); do
-            if curl -fsS http://localhost:3100/health > /dev/null; then break; fi
+          ok=0
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:3100/health > /dev/null 2>&1; then ok=1; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null)" != "true" ]; then
+              echo "container exited before becoming healthy"
+              break
+            fi
             sleep 3
           done
-          curl -fsS http://localhost:3100/health > /dev/null
+          if [ "$ok" != "1" ]; then
+            echo "::error::image failed its health smoke test; container logs follow"
+            docker logs smoke 2>&1 || true
+            docker stop smoke > /dev/null 2>&1 || true
+            docker rm smoke > /dev/null 2>&1 || true
+            exit 1
+          fi
           echo "Container smoke test passed: /health 200."
           docker stop smoke && docker rm smoke
