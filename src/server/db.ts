@@ -35,6 +35,39 @@ export class DatabaseRepository {
     }
   }
 
+  /**
+   * Atomically persist pipeline state only while the authoritative job remains
+   * non-terminal. Stale worker snapshots cannot resurrect finished jobs.
+   */
+  public static async saveJobIfNonTerminal(job: ResearchJob, userId: string): Promise<boolean> {
+    if (!userId) throw new Error('[DB] userId is required for saveJobIfNonTerminal');
+    try {
+      const jobRef = adminDb.collection('jobs').doc(job.id);
+      return await adminDb.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(jobRef);
+        if (snapshot.exists) {
+          const existing = snapshot.data() as (ResearchJob & { user_id?: string }) | undefined;
+          if (existing?.user_id && existing.user_id !== userId) {
+            throw new Error('[DB] refusing to update a job owned by another user');
+          }
+          if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(existing?.status))) return false;
+        }
+        transaction.set(jobRef, stripUndefined({
+          ...stripUndefined(job),
+          user_id: userId,
+          updated_at: FieldValue.serverTimestamp(),
+        }), { merge: true });
+        return true;
+      });
+    } catch (err) {
+      logger.error('db.save_job_guarded_failed', 'Could not persist guarded job progress', {
+        job_id: job.id,
+        status: (err as Error)?.message || String(err),
+      });
+      throw err;
+    }
+  }
+
   public static async getJob(jobId: string, userId: string): Promise<ResearchJob | null> {
     if (!userId) throw new Error('[DB] userId is required for getJob');
     try {

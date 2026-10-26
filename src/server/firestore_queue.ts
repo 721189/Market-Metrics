@@ -26,7 +26,14 @@ export class FirestoreQueue {
     private collectionName = 'job_queue';
 
     async add(name: string, data: any) {
-        const docRef = adminDb.collection(this.collectionName).doc();
+        const researchJobId = typeof data?.jobId === 'string' && data.jobId.trim()
+            ? data.jobId.trim()
+            : null;
+        // New queue rows share the research ID. The resolver below preserves
+        // cancellation/position support for older rows with generated IDs.
+        const docRef = researchJobId
+            ? adminDb.collection(this.collectionName).doc(researchJobId)
+            : adminDb.collection(this.collectionName).doc();
         await docRef.set(stripUndefined({
             name,
             data,
@@ -39,6 +46,19 @@ export class FirestoreQueue {
             // too — otherwise enqueueing a job throws before it can run.
         }));
         return docRef;
+    }
+
+    /**
+     * Resolve a research id to a queue row. New rows use the same document ID;
+     * legacy rows stored the research id in data.jobId under an auto-ID.
+     */
+    private async resolveQueueRef(jobId: string) {
+        const collection = adminDb.collection(this.collectionName);
+        const directRef = collection.doc(jobId);
+        const direct = await directRef.get();
+        if (direct.exists) return directRef;
+        const legacy = await collection.where('data.jobId', '==', jobId).limit(1).get();
+        return legacy.empty ? null : legacy.docs[0].ref;
     }
 
     async claimNextJob(workerId: string = 'worker-1'): Promise<QueueJob | null> {
@@ -376,7 +396,9 @@ export class FirestoreQueue {
 
     async getJobPosition(jobId: string): Promise<number | null> {
         try {
-            const jobDoc = await adminDb.collection(this.collectionName).doc(jobId).get();
+            const jobRef = await this.resolveQueueRef(jobId);
+            if (!jobRef) return null;
+            const jobDoc = await jobRef.get();
             if (!jobDoc.exists || jobDoc.data()?.status !== 'QUEUED') return null;
             const createdAt = jobDoc.data()?.created_at;
             if (!createdAt) return 1;
@@ -386,7 +408,7 @@ export class FirestoreQueue {
                 .get();
             let count = 1;
             snap.forEach(doc => {
-                if (doc.id !== jobId) {
+                if (doc.id !== jobRef.id) {
                     const data = doc.data() as QueueJob;
                     const ta = data.created_at?.toMillis ? data.created_at.toMillis() : 0;
                     const tb = createdAt?.toMillis ? createdAt.toMillis() : 0;
@@ -405,7 +427,8 @@ export class FirestoreQueue {
      */
     async cancel(jobId: string): Promise<boolean> {
         try {
-            const jobRef = adminDb.collection(this.collectionName).doc(jobId);
+            const jobRef = await this.resolveQueueRef(jobId);
+            if (!jobRef) return false;
             return await adminDb.runTransaction(async (transaction) => {
                 const doc = await transaction.get(jobRef);
                 if (!doc.exists) return false;
