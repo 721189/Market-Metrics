@@ -569,7 +569,9 @@ export class ResearchPipelineManager {
     for (const src of sources) {
       if (isCancelled(job, signal)) return;
       try {
-        const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000);
+        const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
+        if (isCancelled(job, signal)) return;
+        if (!fetchedDoc) throw new Error('Document fetch failed or timed out before a usable response was received');
         if (!fetchedDoc.extractedText || fetchedDoc.extractedText.trim().length === 0) {
           throw new Error('Document body was empty after text extraction');
         }
@@ -620,6 +622,8 @@ export class ResearchPipelineManager {
         sourceTexts.set(src.id, fetchedDoc.extractedText);
         fetchedCount++;
       } catch (err: any) {
+        // Cancellation ends the research run; it is not a failed source retrieval.
+        if (isCancelled(job, signal)) return;
         // Truthful failure accounting: the source is explicitly FETCH_FAILED,
         // excluded from analysis, and surfaced to the user — never silently dropped.
         src.fetch_status = 'FETCH_FAILED';

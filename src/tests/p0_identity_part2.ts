@@ -148,6 +148,32 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'production Gemini readiness ignores descriptive credential labels',
+    fn: async () => {
+      const environment = readSource('src/server/environment.ts');
+      const gemini = readSource('src/server/gemini.ts');
+      return /geminiCredentialSource:\s*env\.GEMINI_API_KEY\?\.trim\(\)/.test(environment) &&
+        /GEMINI_API_KEY must be configured/.test(environment) &&
+        !/geminiCredentialSource:\s*\(env\.GEMINI_CREDENTIAL_SOURCE/.test(environment) &&
+        /process\.env\.GEMINI_API_KEY\?\.trim\(\)/.test(gemini);
+    },
+  },
+  {
+    name: 'document fetch shares deadline across DNS, redirects, body and extraction',
+    fn: async () => {
+      const fetcher = readSource('src/server/fetcher.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      return /parentSignal\?: AbortSignal/.test(fetcher) &&
+        /DocumentFetchTimeoutError/.test(fetcher) &&
+        /awaitWithAbort\(this\.resolveIp/.test(fetcher) &&
+        /deadlineAt/.test(fetcher) &&
+        /lookup:\s*pinnedLookup/.test(fetcher) &&
+        /awaitWithAbort\(readBody\(\), controller\.signal\)/.test(fetcher) &&
+        /fetchUrl\(src\.url, 5000, signal\)/.test(pipeline) &&
+        /if \(isCancelled\(job, signal\)\) return;[\s\S]{0,140}FETCH_FAILED/.test(pipeline);
+    },
+  },
+  {
     name: 'production frontend build requires VITE_FIREBASE_* configuration',
     fn: async () => {
       const client = readSource('src/lib/firebase.ts');

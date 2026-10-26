@@ -7,6 +7,46 @@ import { URL } from 'url';
 import { logger } from './logger.js';
 import { DocumentChunk } from '../types.js';
 
+export class DocumentFetchAbortedError extends Error {
+  constructor(message = 'Document fetch was cancelled') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+export class DocumentFetchTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super('Document fetch timed out after ' + timeoutMs + 'ms');
+    this.name = 'DocumentFetchTimeoutError';
+  }
+}
+
+function asAbortError(signal?: AbortSignal): Error {
+  const reason = signal?.reason;
+  if (reason instanceof DocumentFetchTimeoutError) return reason;
+  if (reason instanceof DocumentFetchAbortedError) return reason;
+  return new DocumentFetchAbortedError(reason instanceof Error ? reason.message : undefined);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw asAbortError(signal);
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  if (!signal) return promise;
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(asAbortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export interface FetchedDocument {
   url: string;
   title: string;
@@ -219,56 +259,91 @@ export class RealDocumentFetcher {
     return chunks;
   }
 
-  public static async fetchUrl(url: string, timeoutMs = 6000): Promise<FetchedDocument | null> {
-    // Use safeFetch with SSRF protections (DNS pinning, redirect check, size cap, MIME validation)
-    let fetchResult: Awaited<ReturnType<typeof RealDocumentFetcher['safeFetch']>> | null = null;
+  public static async fetchUrl(
+    url: string,
+    timeoutMs = 6000,
+    parentSignal?: AbortSignal,
+  ): Promise<FetchedDocument | null> {
+    if (parentSignal?.aborted) throw asAbortError(parentSignal);
+
+    const effectiveTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? Math.floor(timeoutMs)
+      : this.FETCH_TIMEOUT_MS;
+    const deadlineAt = Date.now() + effectiveTimeoutMs;
+    const operationController = new AbortController();
+    const timeoutError = new DocumentFetchTimeoutError(effectiveTimeoutMs);
+    const timeoutTimer = setTimeout(() => operationController.abort(timeoutError), effectiveTimeoutMs);
+    const onParentAbort = () => operationController.abort(asAbortError(parentSignal));
+    parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    if (parentSignal?.aborted) onParentAbort();
+
     try {
-      fetchResult = await this.safeFetch(url, 10 * 1024 * 1024, timeoutMs);
+      throwIfAborted(operationController.signal);
+      const fetchResult = await this.safeFetch(
+        url, this.MAX_RESPONSE_BYTES, effectiveTimeoutMs, null,
+        operationController.signal, deadlineAt, 0,
+      );
+      throwIfAborted(operationController.signal);
+      if (!fetchResult) return null;
+
+      const { status, headers, body, contentLength } = fetchResult;
+      if (status !== 200) {
+        logger.warn('fetcher.non_200', 'Non-200 response', { url, status });
+        return null;
+      }
+
+      const ct = headers['content-type'];
+      const contentType = (Array.isArray(ct) ? ct[0] : ct || '').toLowerCase();
+      const extractedText = await awaitWithAbort(
+        this.detectAndExtract(url, contentType, body),
+        operationController.signal,
+      );
+      throwIfAborted(operationController.signal);
+      if (extractedText === null) {
+        logger.warn('fetcher.extract_failed', 'Failed to extract text (unsupported format or empty)', { url, contentType });
+        return null;
+      }
+
+      const fetchHeaders = new Headers();
+      Object.entries(headers).forEach(([k, v]) => {
+        if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
+        else if (v !== undefined) fetchHeaders.append(k, v);
+      });
+      const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
+      const title = this.extractTitle(extractedText, url);
+      const contentHash = this.computeSha256(extractedText);
+      const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
+      const chunks = this.chunkText(sourceId, title, extractedText);
+      return {
+        url, title, domain: new URL(url).hostname,
+        publisher: this.extractPublisher(extractedText, url),
+        httpStatus: status, extractedText,
+        paragraphs: this.splitParagraphs(extractedText),
+        contentLength, publishedAt, contentHash, chunks,
+        retrievedAt: new Date().toISOString(),
+      };
     } catch (err: any) {
-      logger.warn('fetcher.fetch_failed', 'HTTP fetch failed', { url, status: err.message, reason: err instanceof Error ? err.message : String(err) });
+      if (parentSignal?.aborted) throw asAbortError(parentSignal);
+      if (operationController.signal.aborted) {
+        const reason = asAbortError(operationController.signal);
+        if (reason instanceof DocumentFetchTimeoutError) {
+          logger.warn('fetcher.timeout', 'Document fetch exceeded its end-to-end deadline', { url, timeout_ms: effectiveTimeoutMs });
+          throw reason;
+        }
+        throw reason;
+      }
+      if (err instanceof DocumentFetchTimeoutError || err instanceof DocumentFetchAbortedError || err?.name === 'AbortError') throw err;
+      logger.warn('fetcher.fetch_failed', 'HTTP fetch failed', {
+        url, reason: err instanceof Error ? err.message : String(err),
+      });
       return null;
+    } finally {
+      clearTimeout(timeoutTimer);
+      parentSignal?.removeEventListener('abort', onParentAbort);
     }
-    if (!fetchResult) return null;
-    const { status, headers, body, contentLength } = fetchResult;
-    if (status !== 200) {
-      logger.warn('fetcher.non_200', 'Non-200 response', { url, status });
-      return null;
-    }
-    const ct = headers['content-type'];
-    const contentType = (Array.isArray(ct) ? ct[0] : ct || '').toLowerCase();
-    // MIME-aware extraction
-    const extractedText = await this.detectAndExtract(url, contentType, body);
-    if (extractedText === null) {
-      logger.warn('fetcher.extract_failed', 'Failed to extract text (unsupported format or empty)', { url, contentType });
-      return null;
-    }
-    const fetchHeaders = new Headers();
-    Object.entries(headers).forEach(([k, v]) => {
-      if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
-      else if (v !== undefined) fetchHeaders.append(k, v);
-    });
-    const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
-    const title = this.extractTitle(extractedText, url);
-    const contentHash = this.computeSha256(extractedText);
-    const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
-    const chunks = this.chunkText(sourceId, title, extractedText);
-    return {
-      url,
-      title,
-      domain: new URL(url).hostname,
-      publisher: this.extractPublisher(extractedText, url),
-      httpStatus: status,
-      extractedText,
-      paragraphs: this.splitParagraphs(extractedText),
-      contentLength,
-      publishedAt,
-      contentHash,
-      chunks,
-      retrievedAt: new Date().toISOString(),
-    };
   }
 
-  private static extractPublisher(text: string, url: string): string {
+  private static extractPublisher(text: string, url: string): string {  private static extractPublisher(text: string, url: string): string {
     try { return new URL(url).hostname; } catch { return 'Unknown'; }
   }
 
@@ -509,33 +584,51 @@ export class RealDocumentFetcher {
   }
 
 
-  private static async safeFetch(url: string, maxBytes: number, timeoutMs: number, pinnedIp: string | null = null): Promise<{
+  private static async safeFetch(
+    url: string,
+    maxBytes: number,
+    timeoutMs: number,
+    pinnedIp: string | null = null,
+    parentSignal?: AbortSignal,
+    deadlineAt = Date.now() + timeoutMs,
+    redirectCount = 0,
+  ): Promise<{
     status: number;
     headers: Record<string, string | string[] | undefined>;
     body: Buffer;
     contentLength: number;
   }> {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new DocumentFetchTimeoutError(timeoutMs);
+
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutError = new DocumentFetchTimeoutError(timeoutMs);
+    const timeoutTimer = setTimeout(() => controller.abort(timeoutError), remainingMs);
+    const onParentAbort = () => controller.abort(asAbortError(parentSignal));
+    parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    if (parentSignal?.aborted) onParentAbort();
+
     try {
+      throwIfAborted(controller.signal);
       this.validateUrl(url);
       const parsed = new URL(url);
-
-      // DNS pinning: resolve the hostname before opening the socket, then pin
-      // that IP. On redirects we re-resolve and require an exact IP match —
-      // this prevents DNS rebinding where the first resolution returns a public
-      // IP but a later one (after a redirect) returns an internal address.
-      let resolvedIp: string | null = pinnedIp;
-      if (!resolvedIp) {
-        resolvedIp = await this.resolveIp(parsed.hostname);
-        if (resolvedIp && this.isPrivateIp(resolvedIp)) {
-          throw new Error(`SSRF blocked: \"${parsed.hostname}\" resolves to private IP \"${resolvedIp}\"`);
-        }
+      const resolvedIp = pinnedIp || await awaitWithAbort(this.resolveIp(parsed.hostname), controller.signal);
+      if (!resolvedIp || this.isPrivateIp(resolvedIp)) {
+        throw new Error('SSRF blocked: destination did not resolve to a public IP address');
       }
 
-      const isHttps = parsed.protocol === 'https:';
-      const mod = isHttps ? require('https') : require('http');
-      const res = await new Promise<{
+      // Pin the connection's resolver to the exact IP already checked above.
+      const family = resolvedIp.includes(':') ? 6 : 4;
+      const pinnedLookup = (_hostname: string, optionsOrCallback: any, callbackArg?: any) => {
+        const options = typeof optionsOrCallback === 'function' ? {} : optionsOrCallback;
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : callbackArg;
+        if (controller.signal.aborted) return callback(asAbortError(controller.signal));
+        if (options?.all) return callback(null, [{ address: resolvedIp, family }]);
+        return callback(null, resolvedIp, family);
+      };
+
+      const mod = parsed.protocol === 'https:' ? require('https') : require('http');
+      const responsePromise = new Promise<{
         status: number;
         headers: Record<string, string | string[] | undefined>;
         body: NodeJS.ReadableStream;
@@ -543,47 +636,71 @@ export class RealDocumentFetcher {
         const req = mod.get(parsed.toString(), {
           headers: { 'User-Agent': this.USER_AGENT, 'Accept-Encoding': 'identity' },
           signal: controller.signal,
+          lookup: pinnedLookup,
         }, (resp: any) => resolve({ status: resp.statusCode, headers: resp.headers, body: resp }));
         req.on('error', reject);
         req.end();
       });
-      if (res.status >= 300 && res.status < 400 && res.headers['location']) {
-        const redirectUrl = new URL(res.headers['location']!, url).toString();
+      const response = await awaitWithAbort(responsePromise, controller.signal);
+      throwIfAborted(controller.signal);
+
+      if (response.status >= 300 && response.status < 400 && response.headers['location']) {
+        if (redirectCount >= this.MAX_REDIRECTS) throw new Error('Redirect limit exceeded (' + this.MAX_REDIRECTS + ')');
+        const redirectUrl = new URL(response.headers['location']!, url).toString();
         this.validateUrl(redirectUrl);
-        const redirectedParsed = new URL(redirectUrl);
-        const redirectedIp = await this.resolveIp(redirectedParsed.hostname);
-        if (redirectedIp && !this.isPrivateIp(redirectedIp)) {
-          if (resolvedIp && redirectedIp !== resolvedIp) {
-            throw new Error(`SSRF blocked: DNS rebinding detected (${resolvedIp} -> ${redirectedIp})`);
+        const redirectHost = new URL(redirectUrl).hostname;
+        const redirectedIp = await awaitWithAbort(this.resolveIp(redirectHost), controller.signal);
+        if (!redirectedIp || this.isPrivateIp(redirectedIp)) {
+          throw new Error('SSRF blocked: redirect target did not resolve to a public IP address');
+        }
+        if (redirectHost.toLowerCase() === parsed.hostname.toLowerCase() && redirectedIp !== resolvedIp) {
+          throw new Error('SSRF blocked: DNS rebinding detected for redirect host');
+        }
+        return await this.safeFetch(
+          redirectUrl, maxBytes, timeoutMs, redirectedIp,
+          controller.signal, deadlineAt, redirectCount + 1,
+        );
+      }
+
+      const readBody = async (): Promise<{ body: Buffer; contentLength: number }> => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        for await (const chunk of response.body) {
+          throwIfAborted(controller.signal);
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > maxBytes) throw new Error('Response exceeded size limit of ' + maxBytes + ' bytes');
+          if (total > RealDocumentFetcher.MAX_DECOMPRESSED_BYTES) {
+            throw new Error('Decompression bomb: response exceeded ' + RealDocumentFetcher.MAX_DECOMPRESSED_BYTES + ' bytes');
           }
+          chunks.push(buf);
         }
-        clearTimeout(timer);
-        return this.safeFetch(redirectUrl, maxBytes, timeoutMs, resolvedIp);
-      }
-      const chunks: Buffer[] = [];
-      let total = 0;
-      for await (const chunk of res.body) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        total += buf.length;
-        if (total > maxBytes) throw new Error(`Response exceeded size limit of ${maxBytes} bytes`);
-        if (total > RealDocumentFetcher.MAX_DECOMPRESSED_BYTES) {
-          throw new Error(`Decompression bomb: response exceeded ${RealDocumentFetcher.MAX_DECOMPRESSED_BYTES} bytes`);
-        }
-        chunks.push(buf);
-      }
-      return { status: res.status, headers: res.headers, body: Buffer.concat(chunks, total), contentLength: total };
+        throwIfAborted(controller.signal);
+        return { body: Buffer.concat(chunks, total), contentLength: total };
+      };
+      const { body, contentLength } = await awaitWithAbort(readBody(), controller.signal);
+      return { status: response.status, headers: response.headers, body, contentLength };
+    } catch (err) {
+      if (controller.signal.aborted) throw asAbortError(controller.signal);
+      if (parentSignal?.aborted) throw asAbortError(parentSignal);
+      throw err;
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timeoutTimer);
+      parentSignal?.removeEventListener('abort', onParentAbort);
     }
   }
 
-  private static async resolveIp(hostname: string): Promise<string | null> {
+  private static async resolveIp(hostname: string): Promise<string | null> {  private static async resolveIp(hostname: string): Promise<string | null> {
+    let results: Array<{ address: string }>;
     try {
-      const { lookup } = require('dns').promises;
-      if (!lookup) return null;
-      const results = await lookup(hostname, { all: true });
-      const ips = results.map((r: any) => r.address).filter((ip: string) => !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip));
-      return ips[0] || null;
-    } catch { return null; }
+      results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    } catch (err: any) {
+      throw new Error('DNS resolution failed for ' + hostname + ': ' + (err?.message || String(err)));
+    }
+    if (!results.length) throw new Error('DNS resolution returned no addresses for ' + hostname);
+    const addresses = results.map(record => record.address);
+    const privateAddress = addresses.find(address => this.isPrivateIp(address));
+    if (privateAddress) throw new Error('SSRF blocked: hostname ' + hostname + ' resolves to a private/internal address');
+    return addresses[0] || null;
   }
 }

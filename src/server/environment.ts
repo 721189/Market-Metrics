@@ -117,8 +117,9 @@ export function loadEnvironmentConfig(
     firestoreDatabaseId: firestoreDatabaseId || fallback?.firestoreDatabaseId || '',
     storageBucket: storageBucket || fallback?.storageBucket || '',
     authDomain: authDomain || fallback?.authDomain || '',
-    geminiCredentialSource: (env.GEMINI_CREDENTIAL_SOURCE || '').trim()
-      || (env.GEMINI_API_KEY ? 'env:GEMINI_API_KEY' : 'unset'),
+    // Derived only from the actual secret consumed by getGemini().
+    // GEMINI_CREDENTIAL_SOURCE is descriptive metadata, not a credential.
+    geminiCredentialSource: env.GEMINI_API_KEY?.trim() ? 'env:GEMINI_API_KEY' : 'unset',
     logLevel: (name === 'development' || name === 'test' ? 'debug' : 'info') as LogLevel,
     allowViteDevServer: name !== 'production',
   };
@@ -157,8 +158,8 @@ export function findEnvironmentViolations(cfg: EnvironmentConfig): string[] {
     );
   }
 
-  if (cfg.name === 'production' && cfg.geminiCredentialSource === 'unset') {
-    violations.push('[production] a Gemini credential must be provisioned for production.');
+  if (cfg.name === 'production' && cfg.geminiCredentialSource !== 'env:GEMINI_API_KEY') {
+    violations.push('[production] GEMINI_API_KEY must be configured with a non-empty value; GEMINI_CREDENTIAL_SOURCE is not a credential.');
   }
 
   if (cfg.name === 'production' && cfg.allowViteDevServer) {

@@ -6,11 +6,14 @@
  *  3. Mandatory citation graph validation (dangling refs are fatal)
  *  4. Exact normalized -> original quote mapping (verbatim slice guarantee)
  *  5. Unknown publication date = null (never fabricated)
+ *  6. Gemini readiness rejects descriptive-only configuration
+ *  7. Fetch cancellation and deadline errors
  */
 
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
-import { RealDocumentFetcher } from '../server/fetcher.js';
+import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -365,7 +368,44 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Excerpt-local coordinates, source offsets, hashes and storage refs are validated.');
 
-  // ===== 8. Golden benchmark fixture must itself satisfy the citation graph =====
+  // ===== 7. Production readiness requires the actual Gemini API key =====
+  const productionEnvBase = {
+    NODE_ENV: 'production',
+    FIREBASE_PROJECT_ID: 'market-metrics-production',
+    FIRESTORE_DATABASE_ID: '(default)',
+    STORAGE_BUCKET: 'market-metrics-production.appspot.com',
+    FIREBASE_AUTH_DOMAIN: 'market-metrics-production.firebaseapp.com',
+    GEMINI_CREDENTIAL_SOURCE: 'env:GEMINI_API_KEY',
+  } as NodeJS.ProcessEnv;
+  const descriptorOnly = loadEnvironmentConfig({ ...productionEnvBase, GEMINI_API_KEY: '' });
+  if (!findEnvironmentViolations(descriptorOnly).some(message => message.includes('GEMINI_API_KEY'))) {
+    return { passed: false, message: 'A descriptive source label must not satisfy production readiness without GEMINI_API_KEY' };
+  }
+  const keyPresent = loadEnvironmentConfig({ ...productionEnvBase, GEMINI_API_KEY: 'test-gemini-key' });
+  if (findEnvironmentViolations(keyPresent).some(message => message.includes('GEMINI_API_KEY'))) {
+    return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
+  }
+  console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+
+  // ===== 8. Pre-aborted document fetch rejects without starting network work =====
+  const cancelledFetch = new AbortController();
+  cancelledFetch.abort(new Error('test cancellation'));
+  let rejectedAsCancelled = false;
+  try {
+    await RealDocumentFetcher.fetchUrl('https://example.com/', 1000, cancelledFetch.signal);
+  } catch (error: any) {
+    rejectedAsCancelled = error instanceof DocumentFetchAbortedError || error?.name === 'AbortError';
+  }
+  if (!rejectedAsCancelled) {
+    return { passed: false, message: 'A pre-aborted document fetch must reject as cancellation, not a failed-source result' };
+  }
+  if (new DocumentFetchTimeoutError(10).name !== 'DocumentFetchTimeoutError') {
+    return { passed: false, message: 'Document timeout errors must have a distinguishable type' };
+  }
+  console.log('✔ Fetch cancellation and timeout errors are distinguishable.');
+
+  // ===== 9. Golden benchmark fixture must itself satisfy the citation graph =====
+
 
   const benchmarkResult = CitationGraphValidator.validate(BENCHMARK_EV_CHARGING);
   if (!benchmarkResult.valid) {
