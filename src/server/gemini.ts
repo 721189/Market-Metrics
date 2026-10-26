@@ -50,16 +50,14 @@ export function getGemini(): GoogleGenAI | null {
 /**
  * Model selection (configurable per deployment, no code change).
  *
- * Every stage defaults to gemini-2.5-flash — the strongest cheap model on the
- * Gemini free tier. Override via env vars:
+ * The default is Google's current stable Gemini 3.8 Flash model. Override via
+ * env vars:
  *   GEMINI_MODEL            -> applies to every stage
  *   GEMINI_MODEL_<ROLE>     -> per-stage override, wins over GEMINI_MODEL
  * where <ROLE> is PLANNER, DISCOVERY, EXTRACTION, COMPETITORS, FORECAST or
- * SYNTHESIS. Example: set GEMINI_MODEL=gemini-2.5-flash-lite to run the whole
- * pipeline on the model with the highest free-tier request quota, or scope it
- * to the hottest stage with GEMINI_MODEL_EXTRACTION=gemini-2.5-flash-lite.
+ * SYNTHESIS. Use a model id currently enabled for the deployment's API key.
  */
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 
 export type GeminiModelRole =
   | 'PLANNER'

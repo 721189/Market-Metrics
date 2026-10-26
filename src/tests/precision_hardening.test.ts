@@ -14,6 +14,7 @@ import { canTransition, assertTransition, cancellationRegistry } from '../server
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
+import { resolveModel } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -387,7 +388,32 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
 
-  // ===== 8. Pre-aborted document fetch rejects without starting network work =====
+  // ===== 8. Gemini model selection defaults to a currently supported stable model =====
+  const savedGlobalModel = process.env.GEMINI_MODEL;
+  const savedPlannerModel = process.env.GEMINI_MODEL_PLANNER;
+  try {
+    delete process.env.GEMINI_MODEL;
+    delete process.env.GEMINI_MODEL_PLANNER;
+    if (resolveModel('PLANNER') !== 'gemini-3.8-flash') {
+      return { passed: false, message: 'Planner default must use the supported gemini-3.8-flash model' };
+    }
+    process.env.GEMINI_MODEL = 'gemini-global-test';
+    if (resolveModel('PLANNER') !== 'gemini-global-test') {
+      return { passed: false, message: 'Global Gemini model override must still be honored' };
+    }
+    process.env.GEMINI_MODEL_PLANNER = 'gemini-planner-test';
+    if (resolveModel('PLANNER') !== 'gemini-planner-test') {
+      return { passed: false, message: 'Per-role Gemini model override must take precedence over the global override' };
+    }
+  } finally {
+    if (savedGlobalModel === undefined) delete process.env.GEMINI_MODEL;
+    else process.env.GEMINI_MODEL = savedGlobalModel;
+    if (savedPlannerModel === undefined) delete process.env.GEMINI_MODEL_PLANNER;
+    else process.env.GEMINI_MODEL_PLANNER = savedPlannerModel;
+  }
+  console.log('✔ Gemini model selection defaults to 3.8 Flash and preserves explicit overrides.');
+
+  // ===== 9. Pre-aborted document fetch rejects without starting network work =====
   const cancelledFetch = new AbortController();
   cancelledFetch.abort(new Error('test cancellation'));
   let rejectedAsCancelled = false;
@@ -404,7 +430,7 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Fetch cancellation and timeout errors are distinguishable.');
 
-  // ===== 9. Golden benchmark fixture must itself satisfy the citation graph =====
+  // ===== 10. Golden benchmark fixture must itself satisfy the citation graph =====
 
 
   const benchmarkResult = CitationGraphValidator.validate(BENCHMARK_EV_CHARGING);

@@ -67,6 +67,8 @@ services:
       # Gemini credential for research runs (required in production).
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
       - key: WORKER_MODE
         value: embedded
 
