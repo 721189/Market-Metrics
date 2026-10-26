@@ -497,7 +497,7 @@ async function startServer() {
 
     pipelineEmitter.on(`event:${jobId}`, eventHandler);
 
-    req.on('close', () => {
+    res.on('close', () => {
       clearInterval(heartbeatInterval);
       pipelineEmitter.off(`event:${jobId}`, eventHandler);
     });

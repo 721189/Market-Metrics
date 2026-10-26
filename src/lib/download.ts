@@ -12,6 +12,8 @@
  *          (non-2xx response, network error, missing token). Errors are logged,
  *          never thrown — a failed export must not crash the caller.
  */
+import { apiUrl } from './api.js';
+
 export async function authenticatedDownload(
   url: string,
   filename: string,
@@ -19,7 +21,7 @@ export async function authenticatedDownload(
 ): Promise<boolean> {
   try {
     const token = await getToken();
-    const res = await fetch(url, {
+    const res = await fetch(apiUrl(url), {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {

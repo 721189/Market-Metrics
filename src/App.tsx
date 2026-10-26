@@ -26,6 +26,7 @@ import type {
 import { auth, loginWithGoogle, logout, firebaseConfigError } from './lib/firebase.js';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { authenticatedDownload } from './lib/download.js';
+import { apiUrl } from './lib/api.js';
 import { MotionConfig, motion, fadeInUp } from './components/motion.js';
 
 export default function App() {
@@ -45,6 +46,8 @@ export default function App() {
   // 500 misconfiguration. Without this a blocked user saw nothing happen.
   const [runError, setRunError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const pollingIntervalRef = useRef<number | null>(null);
+  const pollingJobIdRef = useRef<string | null>(null);
   // Per-job SSE reconnect backoff (ms). Grows on repeated failures so a
   // persistently failing stream can't hammer the server with 1.5s retries;
   // resets to the base delay as soon as a real event arrives.
@@ -79,6 +82,11 @@ export default function App() {
 
     return () => {
       eventSourceRef.current?.close();
+      if (pollingIntervalRef.current !== null) {
+        window.clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+      pollingJobIdRef.current = null;
     };
   }, [user]);
 
@@ -108,7 +116,7 @@ export default function App() {
   const fetchJobsList = async () => {
     try {
       const headers = await getHeaders();
-      const res = await fetch('/api/v1/research', { headers });
+      const res = await fetch(apiUrl('/api/v1/research'), { headers });
       const data = await res.json();
       if (data.jobs) {
         setRecentJobs(data.jobs);
@@ -118,10 +126,45 @@ export default function App() {
     }
   };
 
+  // Poll the authoritative job record independently of SSE. This remains
+  // active if stream-ticket issuance or the live stream fails, preventing a
+  // frozen progress screen when a job is still running or already terminal.
+  const startJobPolling = (jobId: string) => {
+    if (pollingJobIdRef.current === jobId && pollingIntervalRef.current !== null) return;
+    if (pollingIntervalRef.current !== null) window.clearInterval(pollingIntervalRef.current);
+    pollingJobIdRef.current = jobId;
+
+    const poll = async () => {
+      if (pollingJobIdRef.current !== jobId) return;
+      try {
+        const headers = await getHeaders();
+        const response = await fetch(apiUrl('/api/v1/research/' + encodeURIComponent(jobId)), { headers });
+        if (!response.ok) return;
+        const latest: ResearchJob = await response.json();
+        if (latest.id !== jobId || pollingJobIdRef.current !== jobId) return;
+        setCurrentJob(latest);
+        if (latest.report) setReport(latest.report);
+        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(latest.status))) {
+          if (pollingIntervalRef.current !== null) window.clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+          pollingJobIdRef.current = null;
+          eventSourceRef.current?.close();
+          eventSourceRef.current = null;
+          await fetchJobsList();
+        }
+      } catch (err) {
+        console.warn('Research state polling failed; will retry:', err);
+      }
+    };
+
+    void poll();
+    pollingIntervalRef.current = window.setInterval(() => { void poll(); }, 5000);
+  };
+
   const loadBenchmark = async (benchmarkId: string) => {
     try {
       const headers = await getHeaders();
-      const res = await fetch(`/api/v1/benchmarks/${benchmarkId}`, { headers });
+      const res = await fetch(apiUrl(`/api/v1/benchmarks/${benchmarkId}`), { headers });
       if (res.ok) {
         const benchmarkReport: FullResearchReport = await res.json();
         setReport(benchmarkReport);
@@ -162,6 +205,7 @@ export default function App() {
 
   const subscribeToEvents = async (jobId: string, resumeAfter = 0) => {
     eventSourceRef.current?.close();
+    startJobPolling(jobId);
 
     // SSE cannot carry an Authorization header, and the Firebase ID token must
     // never travel in a URL. Mint a 60s single-use ticket over an authenticated
@@ -169,7 +213,7 @@ export default function App() {
     let ticket: string | undefined;
     try {
       const headers = await getHeaders();
-      const res = await fetch(`/api/v1/research/${jobId}/stream-ticket`, {
+      const res = await fetch(apiUrl(`/api/v1/research/${jobId}/stream-ticket`), {
         method: 'POST',
         headers,
       });
@@ -205,53 +249,29 @@ export default function App() {
         return;
       }
     } catch (err) {
-      console.error('Stream ticket request failed:', err);
+      console.error('Stream ticket request failed; polling remains active:', err);
+      const nowMs = Date.now();
+      setEvents(prev => [...prev, {
+        id: 'client-ticket-network-err-' + nowMs,
+        sequence: nowMs,
+        job_id: jobId,
+        event_type: 'error',
+        stage: 'PLANNING',
+        message: 'Live progress is temporarily unavailable. Research status is still being checked automatically.',
+        progress: 0,
+        created_at: new Date(nowMs).toISOString(),
+        created_at_ms: nowMs,
+      }]);
       return;
     }
 
     // `after` resumes a re-established stream: tickets are single-use and a new
     // EventSource cannot replay Last-Event-ID, so the client carries the last
     // sequence number it has seen.
-    const es = new EventSource(
-      `/api/v1/research/${jobId}/events?ticket=${ticket}&after=${resumeAfter}`
-    );
+    const es = new EventSource(apiUrl(`/api/v1/research/${jobId}/events?ticket=${ticket}&after=${resumeAfter}`));
     eventSourceRef.current = es;
     let lastSequence = resumeAfter;
     let terminal = false;
-
-    // Watchdog (stuck-job guard). SSE only emits heartbeats while a job sits in
-    // QUEUED, so if the background worker is not running the UI spins forever
-    // with no error and no timeout. Poll the authoritative job document and
-    // reconcile: close the stream as soon as the job is terminal, and stop
-    // holding the connection open when a job is never picked up.
-    const subscribeStartedAt = Date.now();
-    const watchdog = window.setInterval(async () => {
-      if (eventSourceRef.current !== es) {
-        window.clearInterval(watchdog);
-        return;
-      }
-      try {
-        const headers = await getHeaders();
-        const resp = await fetch(`/api/v1/research/${jobId}`, { headers });
-        if (!resp.ok) return;
-        const latest: ResearchJob = await resp.json();
-        setCurrentJob(latest);
-        if (latest.report) setReport(latest.report);
-
-        const finished = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(latest.status));
-        const neverPickedUp =
-          latest.status === 'QUEUED' && Date.now() - subscribeStartedAt > 120_000;
-
-        if (finished || neverPickedUp) {
-          window.clearInterval(watchdog);
-          es.close();
-          if (eventSourceRef.current === es) eventSourceRef.current = null;
-          fetchJobsList();
-        }
-      } catch {
-        // transient network error — the next tick retries
-      }
-    }, 10_000);
 
     es.onmessage = async (e) => {
       try {
@@ -271,7 +291,7 @@ export default function App() {
 
         // Refresh job state
         const headers = await getHeaders();
-        fetch(`/api/v1/research/${jobId}`, { headers })
+        fetch(apiUrl(`/api/v1/research/${jobId}`), { headers })
           .then(r => r.json())
           .then((updatedJob: ResearchJob) => {
             setCurrentJob(updatedJob);
@@ -315,7 +335,7 @@ export default function App() {
       setActiveView('progress');
 
       const headers = await getHeaders();
-      const res = await fetch('/api/v1/research', {
+      const res = await fetch(apiUrl('/api/v1/research'), {
         method: 'POST',
         headers,
         body: JSON.stringify(requestData),
@@ -375,7 +395,8 @@ export default function App() {
       subscribeToEvents(created.job_id);
     } catch (err: any) {
       console.error('Launch research failed:', err);
-      alert(`Could not start research job: ${err.message}`);
+      setRunError(err?.message || 'A network error prevented the research job from starting.');
+      setActiveView('workspace');
     }
   };
 
@@ -393,7 +414,7 @@ export default function App() {
     if (job.status === 'COMPLETED') {
       try {
         const headers = await getHeaders();
-        const res = await fetch(`/api/v1/research/${job.id}/report`, { headers });
+        const res = await fetch(apiUrl(`/api/v1/research/${job.id}/report`), { headers });
         if (res.ok) {
           const full = await res.json();
           if (full && !full.message) {
@@ -414,7 +435,7 @@ export default function App() {
     if (!currentJob) return;
     try {
       const headers = await getHeaders();
-      await fetch(`/api/v1/research/${currentJob.id}/cancel`, { method: 'POST', headers });
+      await fetch(apiUrl(`/api/v1/research/${currentJob.id}/cancel`), { method: 'POST', headers });
       setCurrentJob(prev => prev ? { ...prev, status: 'CANCELLED' } : null);
     } catch (err) {
       console.error('Failed to cancel job:', err);
@@ -430,7 +451,7 @@ export default function App() {
 
     try {
       const headers = await getHeaders();
-      const res = await fetch(`/api/v1/research/${job.id}`, { method: 'DELETE', headers });
+      const res = await fetch(apiUrl(`/api/v1/research/${job.id}`), { method: 'DELETE', headers });
       if (!res.ok) {
         // Surface the server's real reason (404 missing, 409 still running, 401…).
         let detail = `HTTP ${res.status}`;
