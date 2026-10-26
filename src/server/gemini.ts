@@ -140,9 +140,39 @@ export function classifyProviderError(err: any): RetryClassification {
  * Non-retryable failures fail fast. Retryable failures back off exponentially
  * with jitter so a fleet of workers never synchronises into a thundering herd.
  */
+/**
+ * Render useful provider diagnostics while removing credential material.
+ */
+export function safeProviderErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? 'Unknown provider error');
+  return raw
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]')
+    .replace(/((?:x-goog-api-key|api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret)\s*[:=]\s*)[^,\s&}]+/gi, '$1[REDACTED]')
+    .replace(/([?&](?:key|token|access_token|api_key)=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 700);
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error('Operation aborted before retry delay'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('Operation aborted during retry delay'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export async function executeWithRetry<T>(
   fn: () => Promise<T>,
-  opts: { maxRetries?: number; baseDelayMs?: number; operation?: string } = {}
+  opts: { maxRetries?: number; baseDelayMs?: number; operation?: string; signal?: AbortSignal } = {}
 ): Promise<T> {
   const maxRetries = opts.maxRetries || 3;
   const baseDelay = opts.baseDelayMs || 500;
@@ -150,6 +180,7 @@ export async function executeWithRetry<T>(
 
   let lastError: any;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (opts.signal?.aborted) throw new Error('Operation aborted');
     const startedAt = Date.now();
     try {
       const result = await fn();
@@ -157,6 +188,9 @@ export async function executeWithRetry<T>(
       return result;
     } catch (err: any) {
       lastError = err;
+      if (opts.signal?.aborted || /operation aborted|aborterror|aborted during retry/i.test(String(err?.message || err))) {
+        throw err;
+      }
       const classification = classifyProviderError(err);
       recordProviderCall(Date.now() - startedAt, false, {
         operation,
@@ -168,7 +202,7 @@ export async function executeWithRetry<T>(
         logEnvelope('provider_call_failed', {
           status: 'non_retryable',
           duration_ms: Date.now() - startedAt,
-        }, `${operation}: ${classification.reason} (${attempt}/${maxRetries}): ${err?.message || err}`);
+        }, `${operation}: ${classification.reason} (${attempt}/${maxRetries}): ${safeProviderErrorMessage(err)}`);
         throw err;
       }
 
@@ -180,14 +214,14 @@ export async function executeWithRetry<T>(
         status: 'retryable',
         duration_ms: delay,
       }, `${operation}: ${classification.reason}, retrying in ${Math.round(delay)}ms (attempt ${attempt}/${maxRetries})`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await abortableDelay(delay, opts.signal);
     }
   }
 
   const finalReason = classifyProviderError(lastError).reason;
   logEnvelope('provider_call_failed', {
     status: 'retries_exhausted',
-  }, `${operation}: ${finalReason} after ${maxRetries} attempts: ${lastError?.message || lastError}`);
+  }, `${operation}: ${finalReason} after ${maxRetries} attempts: ${safeProviderErrorMessage(lastError)}`);
   throw lastError;
 }
 
@@ -255,6 +289,7 @@ Return a strict JSON object matching:
           model: resolveModel('PLANNER'),
           contents: prompt,
           config: {
+            abortSignal: signal,
             responseMimeType: 'application/json',
             temperature: 0.1,
           },
@@ -262,12 +297,13 @@ Return a strict JSON object matching:
 
         const text = response.text || '{}';
         return JSON.parse(text);
-      }, { maxRetries: 2 });
+      }, { maxRetries: 2, signal });
     } catch (err: any) {
-      logger.error('gemini.planning_failed', 'Gemini planning failed', {
-        status: err?.message || String(err),
+      const detail = safeProviderErrorMessage(err);
+      logger.error('gemini.planning_failed', 'Gemini planning failed: ' + detail, {
+        status: err?.status || err?.code || err?.name || 'provider_error',
       });
-      throw new Error(`Research planning failed: ${err.message || 'Gemini service is currently unavailable.'}`);
+      throw new Error(`Research planning failed: ${detail || 'Gemini service is currently unavailable.'}`);
     }
   }
 
@@ -294,6 +330,7 @@ Return a strict JSON object matching:
           model: resolveModel('DISCOVERY'),
           contents: prompt,
           config: {
+            abortSignal: signal,
             tools: [{ googleSearch: {} }],
             responseMimeType: 'application/json',
             responseSchema: {
@@ -314,12 +351,13 @@ Return a strict JSON object matching:
 
         const text = response.text || '[]';
         return JSON.parse(text);
-      }, { maxRetries: 2 });
+      }, { maxRetries: 2, signal });
     } catch (e: any) {
-      logger.error('gemini.discovery_failed', 'Discovery search failed', {
-        status: e?.message || String(e),
+      const detail = safeProviderErrorMessage(e);
+      logger.error('gemini.discovery_failed', 'Discovery search failed: ' + detail, {
+        status: e?.status || e?.code || e?.name || 'provider_error',
       });
-      throw new Error(`Web search and source discovery failed: ${e.message || 'Google Search Grounding Service is currently unavailable.'}`);
+      throw new Error(`Web search and source discovery failed: ${detail || 'Google Search Grounding Service is currently unavailable.'}`);
     }
   }
 
@@ -374,6 +412,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
         model: resolveModel('COMPETITORS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
+            abortSignal: params.signal,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -500,7 +539,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
         }
       });
       return JSON.parse(response.text || '{}');
-    });
+    }, { signal: params.signal });
   }
 
   /**
@@ -534,6 +573,7 @@ Documents: `;
         model: resolveModel('EXTRACTION'),
         contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
         config: {
+            abortSignal: params.signal,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
@@ -551,7 +591,7 @@ Documents: `;
         }
       });
       return JSON.parse(response.text || '[]');
-    });
+    }, { signal: params.signal });
   }
 
   /**
@@ -591,6 +631,7 @@ Return a strict JSON object:
         model: resolveModel('FORECAST'),
         contents: prompt,
         config: {
+            abortSignal: params.signal,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -606,7 +647,7 @@ Return a strict JSON object:
         }
       });
       return JSON.parse(response.text || '{}');
-    });
+    }, { signal: params.signal });
   }
 
   /**
@@ -659,6 +700,7 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
         model: resolveModel('SYNTHESIS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
+            abortSignal: params.signal,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -673,6 +715,6 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
         }
       });
       return JSON.parse(response.text || '{}');
-    });
+    }, { signal: params.signal });
   }
 }
