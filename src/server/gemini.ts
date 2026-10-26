@@ -107,6 +107,7 @@ const NON_RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
 const RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
   [/resource[_ ]?exhausted|RESOURCE_EXHAUSTED|429|rate limit/i, 'rate_limited'],
   [/aborted|ABORTED|contention/i, 'contention'],
+  [/deadline[_ ]?expired|deadline expired|504|gateway_timeout/i, 'provider_deadline'],
   [/deadline[_ ]?exceeded|DEADLINE_EXCEEDED|timeout|ETIMEDOUT/i, 'timeout'],
   [/unavailable|UNAVAILABLE|503|502|500|overloaded/i, 'provider_outage'],
   [/ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up/i, 'transient_network'],
@@ -280,23 +281,29 @@ Return a strict JSON object matching:
 }`;
 
     const model = resolveModel('PLANNER');
+    const fallbackModel = model === 'gemini-3.5-flash-lite'
+      ? 'gemini-3.6-flash'
+      : 'gemini-3.5-flash-lite';
     const startedAt = Date.now();
+    const timeoutMs = 90_000;
+
     logger.info('gemini.planning_started', 'Gemini planning request started', {
       model,
-      timeout_ms: 45_000,
+      fallback_model: fallbackModel,
+      timeout_ms: timeoutMs,
     });
 
-    try {
-      const plan = await executeWithRetry(async () => {
+    const requestPlan = (selectedModel: string, maxAttempts: number): Promise<PlannerOutput> =>
+      executeWithRetry(async () => {
         if (signal?.aborted) throw new Error('Operation aborted');
 
         const response = await ai.models.generateContent({
-          model,
+          model: selectedModel,
           contents: prompt,
           config: {
             abortSignal: signal,
-            httpOptions: { timeout: 45_000 },
-            maxOutputTokens: 2048,
+            httpOptions: { timeout: timeoutMs },
+            maxOutputTokens: 1024,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
@@ -319,16 +326,45 @@ Return a strict JSON object matching:
                 'metrics_needed', 'competitor_dimensions', 'target_source_tiers',
               ],
             },
-            temperature: 0.1,
           },
         });
 
-        const text = response.text || '{}';
-        return JSON.parse(text) as PlannerOutput;
-      }, { maxRetries: 2, signal });
+        return JSON.parse(response.text || '{}') as PlannerOutput;
+      }, { maxRetries: maxAttempts, signal, operation: 'research_planning' });
+
+    try {
+      let plan: PlannerOutput;
+      let usedModel = model;
+
+      try {
+        plan = await requestPlan(model, 2);
+      } catch (primaryError: any) {
+        const classification = classifyProviderError(primaryError);
+        if (signal?.aborted || !classification.retryable || fallbackModel === model) {
+          throw primaryError;
+        }
+
+        logger.warn('gemini.planning_fallback_started', 'Primary planner model failed; trying a fallback model', {
+          model,
+          fallback_model: fallbackModel,
+          reason: classification.reason,
+          duration_ms: Date.now() - startedAt,
+        });
+
+        try {
+          plan = await requestPlan(fallbackModel, 1);
+          usedModel = fallbackModel;
+        } catch (fallbackError: any) {
+          throw new Error(
+            'Primary planner model ' + model + ' failed (' + classification.reason +
+            '); fallback model ' + fallbackModel + ' failed: ' + safeProviderErrorMessage(fallbackError)
+          );
+        }
+      }
 
       logger.info('gemini.planning_completed', 'Gemini planning request completed', {
-        model,
+        model: usedModel,
+        primary_model: model,
         duration_ms: Date.now() - startedAt,
       });
       return plan;
@@ -336,10 +372,11 @@ Return a strict JSON object matching:
       const detail = safeProviderErrorMessage(err);
       logger.error('gemini.planning_failed', 'Gemini planning failed: ' + detail, {
         model,
+        fallback_model: fallbackModel,
         duration_ms: Date.now() - startedAt,
         status: err?.status || err?.code || err?.name || 'provider_error',
       });
-      throw new Error(`Research planning failed: ${detail || 'Gemini service is currently unavailable.'}`);
+      throw new Error('Research planning failed: ' + (detail || 'Gemini service is currently unavailable.'));
     }
   }
 

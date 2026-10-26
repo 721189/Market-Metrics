@@ -184,11 +184,16 @@ export const p0IdentityStaticChecks: Check[] = [
       const planner = gemini.slice(plannerStart, plannerEnd);
       return requestCount === 6 &&
         timeoutCount === 6 &&
-        planner.includes('maxOutputTokens: 2048') &&
+        planner.includes('timeoutMs = 90_000') &&
+        planner.includes('maxOutputTokens: 1024') &&
         planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
         planner.includes('responseSchema:') &&
+        planner.includes("'gemini-3.5-flash-lite'") &&
+        planner.includes("'gemini-3.6-flash'") &&
         planner.includes("logger.info('gemini.planning_started'") &&
-        planner.includes('duration_ms: Date.now() - startedAt');
+        planner.includes("logger.warn('gemini.planning_fallback_started'") &&
+        !planner.includes('temperature:') &&
+        gemini.includes('deadline[_ ]?expired|deadline expired|504|gateway_timeout');
     },
   },
   {

@@ -69,6 +69,8 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.8-flash
+      - key: GEMINI_MODEL_PLANNER
+        value: gemini-3.5-flash-lite
       - key: WORKER_MODE
         value: embedded
 
