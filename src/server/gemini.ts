@@ -10,7 +10,7 @@
  * - Real Cost Guard & Token Usage Metering with exponential backoff retries.
  */
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTier, RiskFactor } from '../types.js';
 import { recordProviderCall } from './observability.js';
 import { logEnvelope } from './rate_limits.js';
@@ -297,7 +297,7 @@ Return a strict JSON object matching:
             abortSignal: signal,
             httpOptions: { timeout: 45_000 },
             maxOutputTokens: 2048,
-            thinkingConfig: { thinkingLevel: 'low' },
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,

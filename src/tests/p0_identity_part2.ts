@@ -185,7 +185,7 @@ export const p0IdentityStaticChecks: Check[] = [
       return requestCount === 6 &&
         timeoutCount === 6 &&
         planner.includes('maxOutputTokens: 2048') &&
-        planner.includes("thinkingLevel: 'low'") &&
+        planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
         planner.includes('responseSchema:') &&
         planner.includes("logger.info('gemini.planning_started'") &&
         planner.includes('duration_ms: Date.now() - startedAt');
