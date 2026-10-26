@@ -71,39 +71,35 @@ export const PIPELINE_TIMEOUT_MS = 30 * 60 * 1000;
  * promise is tied to `signal` so an external abort also rejects it.
  */
 function withTimeout<T>(
-  operation: () => Promise<T>,
+  operation: (operationSignal: AbortSignal) => Promise<T>,
   ms: number,
   label: string,
-  signal?: AbortSignal
+  parentSignal?: AbortSignal
 ): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | null = null;
-  const abort = (err: Error) => {
-    if (timer) clearTimeout(timer);
-    timer = null;
-    throw err;
+  let rejectAborted: ((reason?: unknown) => void) | null = null;
+  let timedOut = false;
+  const abortPromise = new Promise<never>((_, reject) => { rejectAborted = reject; });
+  const onParentAbort = () => {
+    controller.abort(parentSignal?.reason);
+    if (!timedOut) rejectAborted?.(new Error('Aborted at ' + label));
   };
-
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      timer = null;
-      reject(new Error(`Pipeline timeout exceeded (${ms}ms) at ${label}`));
+      timedOut = true;
+      const timeoutError = new Error('Pipeline timeout exceeded (' + ms + 'ms) at ' + label);
+      reject(timeoutError);
+      controller.abort(timeoutError);
     }, ms);
   });
-
-  const signalPromise = signal
-    ? new Promise<never>((_, reject) => {
-        if (signal.aborted) {
-          reject(new Error(`Aborted at ${label}`));
-          return;
-        }
-        const onAbort = () => reject(new Error(`Aborted at ${label}`));
-        signal.addEventListener('abort', onAbort, { once: true });
-      })
-    : null;
-
-  return Promise.race([operation(), timeoutPromise, signalPromise]).finally(() => {
+  const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+  return Promise.race([operationPromise, timeoutPromise, abortPromise]).finally(() => {
     if (timer) clearTimeout(timer);
     timer = null;
+    parentSignal?.removeEventListener('abort', onParentAbort);
   });
 }
 
@@ -113,7 +109,7 @@ let eventSequence = 0;
 
 function isCancelled(job: ResearchJob, signal?: AbortSignal): boolean {
   if (signal?.aborted === true) return true;
-  if ((job.status as string) === 'CANCELLED') return true;
+  if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(job.status))) return true;
   // Real cancellation: check the process-wide AbortController registry so a
   // user cancel produces an immediate stop at the next stage checkpoint.
   return cancellationRegistry.isAbortRequested(job.id);
@@ -143,7 +139,40 @@ async function logAndEmitEvent(
   message: string,
   progress: number,
   metadata?: Record<string, any>
-) {
+): Promise<boolean> {
+  const userId = (job as any).user_id;
+  if (!userId) throw new Error('Missing user_id for job event logging');
+  const now = new Date().toISOString();
+
+  job.current_stage = stage;
+  job.progress = progress;
+  const stageEntry = job.stages?.find((item) => item.stage_name === stage);
+  if (stageEntry) {
+    stageEntry.progress = progress;
+    stageEntry.message = message;
+    if (eventType === 'stage_started') {
+      stageEntry.status = 'RUNNING';
+      stageEntry.started_at = stageEntry.started_at || now;
+    } else if (eventType === 'stage_completed' || eventType === 'completed') {
+      stageEntry.status = 'COMPLETED';
+      stageEntry.completed_at = now;
+    } else if (eventType === 'error' && String(job.status) === 'FAILED') {
+      stageEntry.status = 'FAILED';
+      stageEntry.completed_at = now;
+    } else if (eventType === 'error' && String(job.status) === 'CANCELLED') {
+      stageEntry.status = 'SKIPPED';
+      stageEntry.completed_at = now;
+    }
+  }
+  if (eventType === 'stage_started' && canTransition(job.status, 'RUNNING')) job.status = 'RUNNING' as any;
+  if (eventType === 'completed') {
+    job.status = 'COMPLETED';
+    (job as any).completed_at = now;
+  }
+  if (eventType === 'error' && ['FAILED', 'CANCELLED'].includes(String(job.status))) {
+    (job as any).completed_at = now;
+  }
+
   const event: ResearchEvent = {
     id: generateId(),
     sequence: ++eventSequence,
@@ -153,29 +182,24 @@ async function logAndEmitEvent(
     message,
     progress,
     metadata,
-    created_at: new Date().toISOString(),
+    created_at: now,
     created_at_ms: Date.now(),
   };
 
-  job.current_stage = stage;
-  job.progress = progress;
-
-  // State-machine guard: never resurrect a cancelled/failed/completed job.
-  // The previous behavior overwrote CANCELLED with RUNNING on every
-  // stage_started event, silently defeating user cancellation.
-  if (eventType === 'stage_started' && canTransition(job.status, 'RUNNING')) {
-    job.status = 'RUNNING' as any;
+  const saved = await DatabaseRepository.saveJobIfNonTerminal(job, userId);
+  if (!saved) {
+    const latest = await DatabaseRepository.getJob(job.id, userId);
+    if (latest && ['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(latest.status))) {
+      job.status = latest.status;
+      job.current_stage = latest.current_stage;
+      job.progress = latest.progress;
+      job.error_message = latest.error_message;
+    }
+    return false;
   }
-
-  const userId = (job as any).user_id;
-  if (!userId) throw new Error('Missing user_id for job event logging');
-
-  // Persist to DatabaseRepository
   await DatabaseRepository.addEvent(job.id, event);
-  await DatabaseRepository.saveJob(job, userId);
-
-  // Emit to active SSE subscribers
-  pipelineEmitter.emit(`event:${job.id}`, event);
+  pipelineEmitter.emit('event:' + job.id, event);
+  return true;
 }
 
 export class ResearchPipelineManager {
@@ -229,9 +253,13 @@ export class ResearchPipelineManager {
     // 2. Cancel in queue (transactional, state-machine enforced).
     await researchQueue.cancel(jobId);
 
-    await logAndEmitEvent(job, 'error', job.current_stage, 'Job cancellation requested. Halting all worker processes.', job.progress);
-    await DatabaseRepository.saveJob(job, userId);
-    return true;
+    return await logAndEmitEvent(
+      job,
+      'error',
+      job.current_stage,
+      'Job cancellation requested. Halting all worker processes.',
+      job.progress
+    );
   }
 
   /**
@@ -246,6 +274,34 @@ export class ResearchPipelineManager {
    *
    * @returns 'deleted' | 'not_found' | 'not_terminal'
    */
+  /**
+   * Persist worker failures to the main research-job record used by the UI.
+   */
+  public static async failJob(jobId: string, userId: string, error: unknown, stageHint?: string): Promise<void> {
+    if (!userId) throw new Error('userId is required for failJob');
+    const job = await DatabaseRepository.getJob(jobId, userId);
+    if (!job) {
+      logger.error('pipeline.failure_job_missing', 'Cannot finalize failure: main job record is missing', { job_id: jobId });
+      return;
+    }
+    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(job.status))) return;
+    const stageName = (stageHint || job.current_stage || 'PLANNING') as StageName;
+    const raw = error instanceof Error ? error.message : String(error || 'Unknown pipeline failure');
+    const safe = raw
+      .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]')
+      .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
+      .replace(/\s+/g, ' ')
+      .slice(0, 500) || 'Unknown pipeline failure';
+    job.status = 'FAILED';
+    job.current_stage = stageName;
+    job.error_message = 'Research failed during ' + stageName + ': ' + safe;
+    (job as any).completed_at = new Date().toISOString();
+    await logAndEmitEvent(job, 'error', stageName, job.error_message, job.progress, {
+      failure_code: 'RESEARCH_PIPELINE_FAILED',
+      stage: stageName,
+    });
+  }
+
   public static async deleteJob(
     jobId: string,
     userId: string
@@ -389,13 +445,13 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'PLANNING', 'Deconstructing research request into orthogonal search dimensions...', 5);
     
     const plan = await withTimeout(
-      () => GeminiResearchEngine.planResearch(
+      (operationSignal) => GeminiResearchEngine.planResearch(
         job.question,
         job.industry,
         job.geography,
         job.time_horizon,
         job.objectives,
-        signal
+        operationSignal
       ),
       5 * 60 * 1000,
       'PLANNING',
@@ -416,7 +472,7 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
 
     const liveDiscovered = await withTimeout(
-      () => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, signal),
+      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal),
       5 * 60 * 1000,
       'DISCOVERING',
       signal
@@ -669,7 +725,7 @@ export class ResearchPipelineManager {
 
     const analyzableSourceIds = new Set(analyzableSources.map(s => s.id));
     const extractedLLMClaimsRaw = await withTimeout(
-      () => GeminiResearchEngine.extractClaimsFromText({
+      (operationSignal) => GeminiResearchEngine.extractClaimsFromText({
         industry: job.industry,
         geography: job.geography,
         sourceDocuments: analyzableSources.map(s => ({
@@ -678,7 +734,7 @@ export class ResearchPipelineManager {
           title: s.title || s.domain,
           text: sourceTexts.get(s.id) || '',
         })),
-        signal,
+        signal: operationSignal,
       }),
       5 * 60 * 1000,
       'EXTRACTING',
@@ -772,7 +828,7 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'ANALYZING', 'Analyzing financial metrics and market sizing from verified source data...', 80);
 
     const financials = await withTimeout(
-      () => GeminiResearchEngine.extractFinancialMetrics({
+      (operationSignal) => GeminiResearchEngine.extractFinancialMetrics({
         industry: job.industry,
         geography: job.geography,
         sourceDocuments: analyzableSources.map(s => ({
@@ -781,7 +837,7 @@ export class ResearchPipelineManager {
           title: s.title || s.domain,
           text: sourceTexts.get(s.id) || '',
         })),
-        signal,
+        signal: operationSignal,
       }),
       5 * 60 * 1000,
       'ANALYZING',
@@ -922,7 +978,7 @@ export class ResearchPipelineManager {
       .map(e => ({ id: e.id, source_id: e.source_id, quote: e.quote.slice(0, 300) }));
 
     const narrative = await withTimeout(
-      () => GeminiResearchEngine.synthesizeReportOverview({
+      (operationSignal) => GeminiResearchEngine.synthesizeReportOverview({
         question: job.question,
         industry: job.industry,
         geography: job.geography,
@@ -931,7 +987,7 @@ export class ResearchPipelineManager {
         cagr: sizing.cagr_pct,
         claims: verifiedClaimRegistry,
         evidence: synthesisEvidence,
-        signal,
+        signal: operationSignal,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
@@ -939,7 +995,7 @@ export class ResearchPipelineManager {
     );
 
     const details = await withTimeout(
-      () => GeminiResearchEngine.synthesizeReportDetails({
+      (operationSignal) => GeminiResearchEngine.synthesizeReportDetails({
         question: job.question,
         industry: job.industry,
         geography: job.geography,
@@ -947,7 +1003,7 @@ export class ResearchPipelineManager {
         isIndia,
         currency,
         claims: verifiedClaimRegistry,
-        signal,
+        signal: operationSignal,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
@@ -1149,9 +1205,10 @@ export async function startWorker() {
         (pipelineJob as any).user_id = userId;
       }
 
+      const researchJobId = String(pipelineJob.id || job.data?.jobId || job.id);
+      const ownerUserId = String(userId || (pipelineJob as any).user_id || '');
       const controller = new AbortController();
-      // Register the REAL AbortSignal so user cancels reach the pipeline.
-      cancellationRegistry.register(job.id, controller, workerId);
+      cancellationRegistry.register(researchJobId, controller, workerId);
 
       let leaseOwned = true;
       let heartbeatInFlight = false;
@@ -1165,7 +1222,7 @@ export async function startWorker() {
             // another worker, or the job was cancelled): STOP this worker.
             logger.warn('queue.lease_lost', `Worker ${workerId} lost lease. Aborting execution.`, { job_id: job!.id });
             leaseOwned = false;
-            cancellationRegistry.abort(job!.id, 'LEASE_LOST');
+            cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
             controller.abort();
           }
         } finally {
@@ -1179,12 +1236,12 @@ export async function startWorker() {
         // stuck in RUNNING indefinitely. The AbortSignal propagates to every
         // Gemini/fetch call inside the pipeline.
         await withTimeout(
-          () => ResearchPipelineManager.executePipelineWorker(pipelineJob, controller.signal, workerId),
+          (operationSignal) => ResearchPipelineManager.executePipelineWorker(pipelineJob, operationSignal, workerId),
           PIPELINE_TIMEOUT_MS,
           `pipeline:${job.id}`,
           controller.signal
         );
-        if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
+        if (controller.signal.aborted && cancellationRegistry.abortReason(researchJobId) === 'USER_CANCEL') {
           logger.info('queue.job_cancelled', `Job ${job.id} cancelled by user; preserving CANCELLED state.`, { job_id: job.id });
         } else if (!leaseOwned) {
           logger.info('queue.job_abandoned', `Job ${job.id} abandoned after lease loss; ownership transferred.`, { job_id: job.id });
@@ -1192,19 +1249,33 @@ export async function startWorker() {
           await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId);
         }
       } catch (err) {
-        logger.error('queue.job_failed', `Job ${job.id} failed`, { job_id: job.id, status: (err as Error)?.message || String(err) });
-        recordJobFailed(String((job as any).current_stage || 'UNKNOWN'), { job_id: job.id });
+        const rawFailure = err instanceof Error ? err.message : String(err || 'Unknown worker failure');
+        const safeFailure = rawFailure.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]').slice(0, 600);
+        logger.error('queue.job_failed', 'Research job failed: ' + safeFailure, {
+          job_id: researchJobId,
+          stage: String(pipelineJob.current_stage || 'UNKNOWN'),
+        });
+        recordJobFailed(String(pipelineJob.current_stage || 'UNKNOWN'), { job_id: researchJobId });
         if (!leaseOwned) {
-          logger.info('queue.failure_suppressed', `Job ${job.id} failure after lease loss suppressed; new owner responsible.`, { job_id: job.id });
-        } else if (controller.signal.aborted && cancellationRegistry.abortReason(job.id) === 'USER_CANCEL') {
-          logger.info('queue.job_aborted', `Job ${job.id} aborted by user cancellation; preserving CANCELLED state.`, { job_id: job.id });
+          logger.info('queue.failure_suppressed', 'Failure after lease loss suppressed; new owner is responsible.', { job_id: researchJobId });
+        } else if (controller.signal.aborted && cancellationRegistry.abortReason(researchJobId) === 'USER_CANCEL') {
+          logger.info('queue.job_aborted', 'User cancellation preserved; research worker is stopping.', { job_id: researchJobId });
         } else {
-          // Ownership-verified + state-machine-validated transition.
           await researchQueue.updateJobStatus(job.id, 'FAILED', workerId);
+          if (ownerUserId) {
+            try {
+              await ResearchPipelineManager.failJob(researchJobId, ownerUserId, err, String(pipelineJob.current_stage || 'PLANNING'));
+            } catch (finalizeError) {
+              const finalizeMessage = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+              logger.error('pipeline.failure_finalize_failed', 'Could not persist terminal research failure: ' + finalizeMessage.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]').slice(0, 400), {
+                job_id: researchJobId,
+              });
+            }
+          }
         }
       } finally {
         clearInterval(heartbeatInterval);
-        cancellationRegistry.unregister(job.id, workerId);
+        cancellationRegistry.unregister(researchJobId, workerId);
       }
     }
 
