@@ -343,7 +343,7 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractPublisher(text: string, url: string): string {  private static extractPublisher(text: string, url: string): string {
+  private static extractPublisher(text: string, url: string): string {
     try { return new URL(url).hostname; } catch { return 'Unknown'; }
   }
 
@@ -690,7 +690,7 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static async resolveIp(hostname: string): Promise<string | null> {  private static async resolveIp(hostname: string): Promise<string | null> {
+  private static async resolveIp(hostname: string): Promise<string | null> {
     let results: Array<{ address: string }>;
     try {
       results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
