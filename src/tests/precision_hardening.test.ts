@@ -308,7 +308,65 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Empty verbatim quotes are rejected by the citation graph validator.');
 
-  // ===== 7. Golden benchmark fixture must itself satisfy the citation graph =====
+  // ===== 7. End-to-end evidence provenance and offset checks =====
+  const canonicalSourceText = 'Market evidence: verified text is recorded.';
+  const provenanceQuote = 'verified text';
+  const sourceStart = canonicalSourceText.indexOf(provenanceQuote);
+  const sourceEnd = sourceStart + provenanceQuote.length;
+  const sourceHash = RealDocumentFetcher.computeSha256(canonicalSourceText);
+  const provenanceSource = makeSource('src-1', { content_hash: sourceHash });
+  const provenanceEvidence = makeEvidence('ev-provenance', 'src-1');
+  const normalizedRef = 'artifacts/job-hardening-001/src-1/normalized';
+  provenanceEvidence.start_offset = sourceStart;
+  provenanceEvidence.end_offset = sourceEnd;
+  provenanceEvidence.quote = provenanceQuote;
+  provenanceEvidence.text = provenanceQuote;
+  provenanceEvidence.provenance = {
+    ...provenanceEvidence.provenance,
+    document_text: provenanceQuote,
+    document_hash: sourceHash,
+    source_url: provenanceSource.url,
+    start_offset: 0,
+    end_offset: provenanceQuote.length,
+    source_document_start_offset: sourceStart,
+    source_document_end_offset: sourceEnd,
+    source_document_ref: normalizedRef,
+    quote: provenanceQuote,
+    exact_normalized_match: true,
+  };
+  const provenanceReport = makeReport({
+    sources: [provenanceSource],
+    evidence_pool: [provenanceEvidence],
+    claims: [makeClaim('clm-provenance', 1, ['ev-provenance'])],
+  });
+  const sourceTextMap = new Map<string, string>([['src-1', canonicalSourceText]]);
+  const artifactRefMap = new Map<string, string>([['src-1', normalizedRef]]);
+  const provenanceResult = CitationGraphValidator.validate(provenanceReport, sourceTextMap, artifactRefMap);
+  if (!provenanceResult.valid) {
+    return { passed: false, message: 'Valid excerpt/source provenance was rejected: ' + provenanceResult.errors.map(e => e.code).join(',') };
+  }
+
+  const mismatchedEvidence = makeEvidence('ev-provenance-bad', 'src-1');
+  mismatchedEvidence.start_offset = sourceStart;
+  mismatchedEvidence.end_offset = sourceEnd;
+  mismatchedEvidence.quote = provenanceQuote;
+  mismatchedEvidence.provenance = {
+    ...provenanceEvidence.provenance,
+    end_offset: provenanceQuote.length - 1,
+  };
+  const mismatchedReport = makeReport({
+    sources: [provenanceSource],
+    evidence_pool: [mismatchedEvidence],
+    claims: [makeClaim('clm-provenance-bad', 1, ['ev-provenance-bad'])],
+  });
+  const mismatchResult = CitationGraphValidator.validate(mismatchedReport, sourceTextMap, artifactRefMap);
+  if (!mismatchResult.errors.some(issue => issue.code === 'EVIDENCE_PROVENANCE_MISMATCH')) {
+    return { passed: false, message: 'Mismatched excerpt offsets must fail with EVIDENCE_PROVENANCE_MISMATCH' };
+  }
+  console.log('✔ Excerpt-local coordinates, source offsets, hashes and storage refs are validated.');
+
+  // ===== 8. Golden benchmark fixture must itself satisfy the citation graph =====
+
   const benchmarkResult = CitationGraphValidator.validate(BENCHMARK_EV_CHARGING);
   if (!benchmarkResult.valid) {
     return { passed: false, message: `Golden benchmark fixture has a broken citation graph: ${benchmarkResult.errors.slice(0, 3).map(e => e.code).join(',')}` };

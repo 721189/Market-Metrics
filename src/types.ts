@@ -140,14 +140,22 @@ export interface DocumentChunk {
 }
 
 export interface EvidenceProvenance {
+  /** Compact stored excerpt. start_offset/end_offset index into this text. */
   document_text: string;
+  /** SHA-256 of the complete normalized source document. */
   document_hash: string;
   source_url: string;
   retrieved_at: string;
   parser_version: string;
   normalizer_version: string;
+  /** Excerpt-local coordinates; must reproduce quote from document_text. */
   start_offset: number;
   end_offset: number;
+  /** Absolute coordinates into the complete normalized source document. */
+  source_document_start_offset?: number;
+  source_document_end_offset?: number;
+  /** Storage reference for the complete normalized source text. */
+  source_document_ref?: string;
   quote: string;
   exact_normalized_match: boolean;
 }

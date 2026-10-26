@@ -109,6 +109,45 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'all nine pipeline stages have explicit start and completion transitions',
+    fn: async () => {
+      const pipeline = readSource('src/server/pipeline.ts');
+      const stageStarted = (stage: string) => new RegExp("logAndEmitEvent\\([\\s\\S]{0,250}'stage_started',\\s*'" + stage + "'").test(pipeline);
+      const stageCompleted = (stage: string) => new RegExp("logAndEmitEvent\\([\\s\\S]{0,250}'stage_completed',\\s*'" + stage + "'").test(pipeline);
+      const stages = [
+        'PLANNING', 'DISCOVERING', 'FETCHING', 'EXTRACTING',
+        'BUILDING_CLAIMS', 'VERIFYING', 'ANALYZING', 'SYNTHESIZING',
+      ];
+      return stages.every(stageStarted) && stages.every(stageCompleted) &&
+        stageStarted('GENERATING_REPORT') &&
+        pipeline.includes("'completed', 'GENERATING_REPORT'");
+    },
+  },
+  {
+    name: 'terminal jobs mark unfinished stages skipped and display errors in the UI',
+    fn: async () => {
+      const pipeline = readSource('src/server/pipeline.ts');
+      const progress = readSource('src/components/ResearchProgress.tsx');
+      return pipeline.includes("stageItem.status = 'FAILED'") &&
+        pipeline.includes("stageItem.status = 'SKIPPED'") &&
+        progress.includes('job.error_message') &&
+        progress.includes('isFailedStage');
+    },
+  },
+  {
+    name: 'citation graph validates excerpt-local quotes against absolute source offsets and refs',
+    fn: async () => {
+      const pipeline = readSource('src/server/pipeline.ts');
+      const graph = readSource('src/server/citation_graph.ts');
+      const types = readSource('src/types.ts');
+      return pipeline.includes('CitationGraphValidator.validate(finalReport, sourceTexts, sourceArtifactRefs)') &&
+        graph.includes('EVIDENCE_PROVENANCE_MISMATCH') &&
+        graph.includes('sourceText.slice(sourceStart, sourceEnd)') &&
+        types.includes('source_document_start_offset') &&
+        types.includes('source_document_ref');
+    },
+  },
+  {
     name: 'production frontend build requires VITE_FIREBASE_* configuration',
     fn: async () => {
       const client = readSource('src/lib/firebase.ts');

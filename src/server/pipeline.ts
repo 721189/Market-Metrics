@@ -171,6 +171,21 @@ async function logAndEmitEvent(
   }
   if (eventType === 'error' && ['FAILED', 'CANCELLED'].includes(String(job.status))) {
     (job as any).completed_at = now;
+    for (const stageItem of job.stages || []) {
+      if (String(job.status) === 'FAILED' && stageItem.stage_name === stage) {
+        stageItem.status = 'FAILED';
+        stageItem.completed_at = now;
+        stageItem.message = message;
+      } else if (stageItem.status === 'PENDING' || stageItem.status === 'RUNNING') {
+        stageItem.status = 'SKIPPED';
+        stageItem.completed_at = now;
+        stageItem.message = stageItem.message || (
+          String(job.status) === 'CANCELLED'
+            ? 'Skipped because the research job was cancelled.'
+            : 'Skipped because an earlier stage failed.'
+        );
+      }
+    }
   }
 
   const event: ResearchEvent = {
@@ -585,6 +600,7 @@ export class ResearchPipelineManager {
           raw_size_bytes: rawBytes.length,
           normalized_text_size_bytes: Buffer.from(normalizedText, 'utf8').length,
           storage_ref: rawRef,
+          normalized_text_ref: textRef,
           raw_available: true,
           normalized_text_available: true,
         };
@@ -690,14 +706,19 @@ export class ResearchPipelineManager {
           verification_status: 'UNVERIFIED',
           confidence: 94,
           provenance: {
+            // Keep the excerpt compact and its offsets local. Original source
+            // coordinates and the normalized document reference remain traceable.
             document_text: offset.quote,
             document_hash: src.content_hash || '',
             source_url: src.url,
             retrieved_at: src.retrieved_at,
             parser_version: '1.0.0',
             normalizer_version: '1.0.0',
-            start_offset: offset.startOffset,
-            end_offset: offset.endOffset,
+            start_offset: 0,
+            end_offset: offset.quote.length,
+            source_document_start_offset: offset.startOffset,
+            source_document_end_offset: offset.endOffset,
+            source_document_ref: sourceArtifacts.get(src.id)?.normalized_text_ref,
             quote: offset.quote,
             exact_normalized_match: true,
           },
@@ -784,8 +805,11 @@ export class ResearchPipelineManager {
             retrieved_at: source?.retrieved_at || new Date().toISOString(),
             parser_version: '1.0.0',
             normalizer_version: '1.0.0',
-            start_offset: offset.startOffset,
-            end_offset: offset.endOffset,
+            start_offset: 0,
+            end_offset: offset.quote.length,
+            source_document_start_offset: offset.startOffset,
+            source_document_end_offset: offset.endOffset,
+            source_document_ref: sourceArtifacts.get(item.source_id)?.normalized_text_ref,
             quote: offset.quote,
             exact_normalized_match: true,
           },
@@ -821,6 +845,66 @@ export class ResearchPipelineManager {
         claimIdx++;
       }
     }
+
+    await logAndEmitEvent(
+      job,
+      'stage_completed',
+      'BUILDING_CLAIMS',
+      'Structured ' + claims.length + ' grounded claims from ' + evidencePool.length + ' evidence items',
+      68,
+      { claims: claims.length, evidence: evidencePool.length }
+    );
+    if (isCancelled(job, signal)) return;
+
+    // -------------------------------------------------------------
+    // STAGE 6: VERIFYING (Claim and evidence quality gates)
+    // -------------------------------------------------------------
+    await logAndEmitEvent(
+      job,
+      'stage_started',
+      'VERIFYING',
+      'Checking source support, contradictions, and evidence quality...',
+      72
+    );
+
+    const claimVerification = RealClaimVerifier.verifyAll(claims, analyzableSources, evidencePool);
+    const verifiedClaims = claimVerification.verifiedClaims;
+    const evidenceBreakdown = claimVerification.evidenceBreakdown;
+
+    // Truthful claim statistics computed from actual verification outcomes.
+    job.stats.claims_total = claims.length;
+    // With the earned-verification ladder, a claim counts as verified only when
+    // it cleared every evidence gate (SUPPORTED), or cleared them all but had
+    // extraction confidence below the support bar (CORROBORATED). PARTIALLY_
+    // SUPPORTED is no longer produced by the verifier.
+    const claimFullyGrounded = (status: string) => status === 'SUPPORTED' || status === 'CORROBORATED';
+    job.stats.claims_verified = verifiedClaims.filter(c => claimFullyGrounded(c.verification_status)).length;
+    job.stats.claims_contradicted = verifiedClaims.filter(c => c.verification_status === 'CONTRADICTED').length;
+    job.stats.claims_insufficient = verifiedClaims.filter(c => c.verification_status === 'INSUFFICIENT').length;
+    job.stats.evidence_score = evidenceBreakdown.overall_score;
+
+    // A claim that could not reach SUPPORTED is a verification failure worth
+    // graphing: it is the leading indicator of evidence-quality problems, long
+    // before a user complains that a number looks wrong.
+    const unverifiedCount = verifiedClaims.filter(c => !claimFullyGrounded(c.verification_status)).length;
+    if (unverifiedCount > 0) recordVerificationFailure(unverifiedCount);
+
+
+    await logAndEmitEvent(
+      job,
+      'stage_completed',
+      'VERIFYING',
+      'Verified ' + verifiedClaims.length + ' claims; evidence score ' + evidenceBreakdown.overall_score + '/100',
+      78,
+      {
+        claims: verifiedClaims.length,
+        supported: job.stats.claims_verified,
+        contradicted: job.stats.claims_contradicted,
+        insufficient: job.stats.claims_insufficient,
+        evidence_score: evidenceBreakdown.overall_score,
+      }
+    );
+    if (isCancelled(job, signal)) return;
 
     // -------------------------------------------------------------
     // STAGE 7: ANALYZING (Deterministic Financial Calculations)
@@ -860,28 +944,6 @@ export class ResearchPipelineManager {
       sam: baseTAM * 0.4,
       som: baseTAM * 0.1,
     };
-    const claimVerification = RealClaimVerifier.verifyAll(claims, analyzableSources, evidencePool);
-    const verifiedClaims = claimVerification.verifiedClaims;
-    const evidenceBreakdown = claimVerification.evidenceBreakdown;
-
-    // Truthful claim statistics computed from actual verification outcomes.
-    job.stats.claims_total = claims.length;
-    // With the earned-verification ladder, a claim counts as verified only when
-    // it cleared every evidence gate (SUPPORTED), or cleared them all but had
-    // extraction confidence below the support bar (CORROBORATED). PARTIALLY_
-    // SUPPORTED is no longer produced by the verifier.
-    const claimFullyGrounded = (status: string) => status === 'SUPPORTED' || status === 'CORROBORATED';
-    job.stats.claims_verified = verifiedClaims.filter(c => claimFullyGrounded(c.verification_status)).length;
-    job.stats.claims_contradicted = verifiedClaims.filter(c => c.verification_status === 'CONTRADICTED').length;
-    job.stats.claims_insufficient = verifiedClaims.filter(c => c.verification_status === 'INSUFFICIENT').length;
-    job.stats.evidence_score = evidenceBreakdown.overall_score;
-
-    // A claim that could not reach SUPPORTED is a verification failure worth
-    // graphing: it is the leading indicator of evidence-quality problems, long
-    // before a user complains that a number looks wrong.
-    const unverifiedCount = verifiedClaims.filter(c => !claimFullyGrounded(c.verification_status)).length;
-    if (unverifiedCount > 0) recordVerificationFailure(unverifiedCount);
-
     const unitEcon = FinancialEngine.calculateUnitEconomics({
       arpu_annual: isIndia ? 48000 : 4800,
       gross_margin_pct: 78,
@@ -1096,6 +1158,27 @@ export class ResearchPipelineManager {
       limitations.push(`${totalDroppedEntities} synthesized strategic entities were excluded because they could not be grounded in the verified claim registry.`);
     }
 
+    await logAndEmitEvent(
+      job,
+      'stage_completed',
+      'SYNTHESIZING',
+      'Strategic entities and report narrative synthesized and grounded.',
+      96,
+      { dropped_entities: totalDroppedEntities }
+    );
+    if (isCancelled(job, signal)) return;
+
+    // -------------------------------------------------------------
+    // STAGE 9: GENERATING_REPORT (Citation validation and persistence)
+    // -------------------------------------------------------------
+    await logAndEmitEvent(
+      job,
+      'stage_started',
+      'GENERATING_REPORT',
+      'Assembling the dossier and validating every citation/provenance edge...',
+      97
+    );
+
     const finalReport: FullResearchReport = {
       id: `rep-${job.id}`,
       job_id: job.id,
@@ -1129,7 +1212,11 @@ export class ResearchPipelineManager {
     // MANDATORY CITATION GRAPH VALIDATION — no report is persisted or served
     // unless every claim/evidence/source/section/strategic reference is intact.
     // -------------------------------------------------------------
-    const graphValidation = CitationGraphValidator.validate(finalReport);
+    const sourceArtifactRefs = new Map<string, string>();
+    for (const [sourceId, artifact] of sourceArtifacts) {
+      if (artifact.normalized_text_ref) sourceArtifactRefs.set(sourceId, artifact.normalized_text_ref);
+    }
+    const graphValidation = CitationGraphValidator.validate(finalReport, sourceTexts, sourceArtifactRefs);
     if (!graphValidation.valid) {
       const summary = graphValidation.errors.slice(0, 5).map(e => `${e.code}: ${e.message}`).join(' | ');
       recordCitationFailure(job.id);

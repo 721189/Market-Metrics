@@ -24,6 +24,8 @@ export interface RetrievalArtifact {
   raw_size_bytes: number;
   normalized_text_size_bytes: number;
   storage_ref: string; // provider-specific key / URI for the raw blob
+  /** Storage reference for normalized text used by citation offsets. */
+  normalized_text_ref?: string;
   raw_available: boolean;
   normalized_text_available: boolean;
 }

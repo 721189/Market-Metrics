@@ -67,6 +67,15 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
           reachable — the research cannot start until the job is claimed.
         </div>
       )}
+      {isFailed && job.error_message && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm leading-relaxed text-rose-200"
+        >
+          <strong>{job.status === 'CANCELLED' ? 'Research cancelled:' : 'Research failed:'}</strong>{' '}
+          {job.error_message}
+        </div>
+      )}
       {/* Top Status Banner */}
       <div className="rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 p-6 shadow-xl">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -267,6 +276,8 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
                       ? 'border-cyan-500/50 bg-cyan-500/10 shadow-sm'
                       : isComplete
                       ? 'border-slate-800 bg-slate-950/80 text-slate-300'
+                      : isFailedStage
+                      ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
                       : 'border-slate-800/60 bg-slate-950/40 text-slate-400 opacity-60'
                   }`}
                 >
@@ -283,7 +294,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
                       )}
                     </div>
                     <div>
-                      <h4 className={`text-xs font-bold ${isRunning ? 'text-cyan-300' : isComplete ? 'text-white' : 'text-slate-400'}`}>
+                      <h4 className={`text-xs font-bold ${isRunning ? 'text-cyan-300' : isComplete ? 'text-white' : isFailedStage ? 'text-rose-300' : 'text-slate-400'}`}>
                         {s.label}
                       </h4>
                       <p className="text-[11px] text-slate-400 mt-0.5">{s.desc}</p>
@@ -296,7 +307,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({
                   </div>
 
                   <div className="text-right">
-                    <span className={`text-[11px] font-mono font-medium ${isRunning ? 'text-cyan-400' : isComplete ? 'text-emerald-400' : 'text-slate-400'}`}>
+                    <span className={`text-[11px] font-mono font-medium ${isRunning ? 'text-cyan-400' : isComplete ? 'text-emerald-400' : isFailedStage ? 'text-rose-300' : 'text-slate-400'}`}>
                       {stageData?.status || 'PENDING'}
                     </span>
                   </div>

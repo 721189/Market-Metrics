@@ -33,13 +33,18 @@ export interface CitationGraphValidationResult {
 }
 
 export class CitationGraphValidator {
-  public static validate(report: FullResearchReport): CitationGraphValidationResult {
+  public static validate(
+    report: FullResearchReport,
+    sourceTexts?: ReadonlyMap<string, string>,
+    sourceArtifactRefs?: ReadonlyMap<string, string>,
+  ): CitationGraphValidationResult {
     const errors: CitationGraphIssue[] = [];
     const warnings: CitationGraphIssue[] = [];
 
     const claimIds = new Set(report.claims.map(c => c.id));
     const evidenceIds = new Set(report.evidence_pool.map(e => e.id));
     const sourceIds = new Set(report.sources.map(s => s.id));
+    const sourcesById = new Map(report.sources.map(source => [source.id, source]));
 
     if (report.sources.length === 0) {
       errors.push({ code: 'NO_SOURCES', message: 'Report contains zero sources' });
@@ -77,6 +82,60 @@ export class CitationGraphValidator {
           entityId: ev.id,
         });
       }
+
+      const provenance = ev.provenance;
+      if (provenance?.source_document_ref) {
+        const source = sourcesById.get(ev.source_id);
+        const localStart = provenance.start_offset;
+        const localEnd = provenance.end_offset;
+        const localQuote = provenance.document_text.slice(localStart, localEnd);
+        const sourceStart = provenance.source_document_start_offset;
+        const sourceEnd = provenance.source_document_end_offset;
+        const sourceText = sourceTexts?.get(ev.source_id);
+        const expectedArtifactRef = sourceArtifactRefs?.get(ev.source_id);
+
+        const excerptIsReproducible =
+          Number.isInteger(localStart) &&
+          Number.isInteger(localEnd) &&
+          localStart >= 0 &&
+          localEnd > localStart &&
+          localEnd <= provenance.document_text.length &&
+          localQuote === ev.quote &&
+          provenance.quote === ev.quote &&
+          provenance.exact_normalized_match === true;
+        const sourceCoordinatesAreConsistent =
+          typeof sourceStart === 'number' &&
+          typeof sourceEnd === 'number' &&
+          Number.isInteger(sourceStart) &&
+          Number.isInteger(sourceEnd) &&
+          sourceStart === ev.start_offset &&
+          sourceEnd === ev.end_offset &&
+          sourceStart >= 0 &&
+          sourceEnd > sourceStart &&
+          (!source || (
+            provenance.document_hash === source.content_hash &&
+            provenance.source_url === source.url
+          ));
+        const sourceSliceIsExact = sourceText === undefined ||
+          (typeof sourceStart === 'number' && typeof sourceEnd === 'number' &&
+            sourceText.slice(sourceStart, sourceEnd) === ev.quote);
+        const artifactReferenceMatches = expectedArtifactRef === undefined ||
+          expectedArtifactRef === provenance.source_document_ref;
+
+        if (
+          !excerptIsReproducible ||
+          !sourceCoordinatesAreConsistent ||
+          !sourceSliceIsExact ||
+          !artifactReferenceMatches
+        ) {
+          errors.push({
+            code: 'EVIDENCE_PROVENANCE_MISMATCH',
+            message: 'Evidence ' + ev.id + ' cannot reproduce its quote from the saved excerpt and source coordinates',
+            entityId: ev.id,
+          });
+        }
+      }
+
     }
 
 
