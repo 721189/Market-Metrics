@@ -279,26 +279,64 @@ Return a strict JSON object matching:
   "target_source_tiers": string[]
 }`;
 
+    const model = resolveModel('PLANNER');
+    const startedAt = Date.now();
+    logger.info('gemini.planning_started', 'Gemini planning request started', {
+      model,
+      timeout_ms: 45_000,
+    });
+
     try {
-      return await executeWithRetry(async () => {
+      const plan = await executeWithRetry(async () => {
         if (signal?.aborted) throw new Error('Operation aborted');
 
         const response = await ai.models.generateContent({
-          model: resolveModel('PLANNER'),
+          model,
           contents: prompt,
           config: {
             abortSignal: signal,
+            httpOptions: { timeout: 45_000 },
+            maxOutputTokens: 2048,
+            thinkingConfig: { thinkingLevel: 'low' },
             responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                normalized_question: { type: Type.STRING },
+                domain: { type: Type.STRING },
+                geography: { type: Type.STRING },
+                time_horizon: { type: Type.STRING },
+                decision_objective: { type: Type.STRING },
+                research_questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                search_query_families: { type: Type.ARRAY, items: { type: Type.STRING } },
+                metrics_needed: { type: Type.ARRAY, items: { type: Type.STRING } },
+                competitor_dimensions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                target_source_tiers: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: [
+                'normalized_question', 'domain', 'geography', 'time_horizon',
+                'decision_objective', 'research_questions', 'search_query_families',
+                'metrics_needed', 'competitor_dimensions', 'target_source_tiers',
+              ],
+            },
             temperature: 0.1,
           },
         });
 
         const text = response.text || '{}';
-        return JSON.parse(text);
+        return JSON.parse(text) as PlannerOutput;
       }, { maxRetries: 2, signal });
+
+      logger.info('gemini.planning_completed', 'Gemini planning request completed', {
+        model,
+        duration_ms: Date.now() - startedAt,
+      });
+      return plan;
     } catch (err: any) {
       const detail = safeProviderErrorMessage(err);
       logger.error('gemini.planning_failed', 'Gemini planning failed: ' + detail, {
+        model,
+        duration_ms: Date.now() - startedAt,
         status: err?.status || err?.code || err?.name || 'provider_error',
       });
       throw new Error(`Research planning failed: ${detail || 'Gemini service is currently unavailable.'}`);
@@ -329,6 +367,7 @@ Return a strict JSON object matching:
           contents: prompt,
           config: {
             abortSignal: signal,
+            httpOptions: { timeout: 90_000 },
             tools: [{ googleSearch: {} }],
             responseMimeType: 'application/json',
             responseSchema: {
@@ -411,6 +450,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
             abortSignal: params.signal,
+            httpOptions: { timeout: 90_000 },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -572,6 +612,7 @@ Documents: `;
         contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
         config: {
             abortSignal: params.signal,
+            httpOptions: { timeout: 90_000 },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
@@ -630,6 +671,7 @@ Return a strict JSON object:
         contents: prompt,
         config: {
             abortSignal: params.signal,
+            httpOptions: { timeout: 90_000 },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -699,6 +741,7 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
             abortSignal: params.signal,
+            httpOptions: { timeout: 90_000 },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,

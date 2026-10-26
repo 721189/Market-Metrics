@@ -174,6 +174,24 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'Gemini model requests have bounded HTTP deadlines and planner output budget',
+    fn: async () => {
+      const gemini = readSource('src/server/gemini.ts');
+      const requestCount = gemini.split('ai.models.generateContent({').length - 1;
+      const timeoutCount = gemini.split('httpOptions: { timeout:').length - 1;
+      const plannerStart = gemini.indexOf('planResearch(');
+      const plannerEnd = gemini.indexOf('discoverLiveSources(', plannerStart);
+      const planner = gemini.slice(plannerStart, plannerEnd);
+      return requestCount === 6 &&
+        timeoutCount === 6 &&
+        planner.includes('maxOutputTokens: 2048') &&
+        planner.includes("thinkingLevel: 'low'") &&
+        planner.includes('responseSchema:') &&
+        planner.includes("logger.info('gemini.planning_started'") &&
+        planner.includes('duration_ms: Date.now() - startedAt');
+    },
+  },
+  {
     name: 'production frontend build requires VITE_FIREBASE_* configuration',
     fn: async () => {
       const client = readSource('src/lib/firebase.ts');
