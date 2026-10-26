@@ -68,7 +68,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: WORKER_MODE
-        value: separate
+        value: embedded
 
       # --- Client-side Firebase config (BUILD TIME — inlined by Vite) --------
       # These MUST match the same Firebase project as the server identifiers
@@ -88,7 +88,7 @@ services:
 
       # --- Optional / operational --------------------------------------------
       # Same-origin deploy, so no absolute API URL or CORS allowlist is needed.
-      # Left empty so localhost origins are reflected only in non-production.
+      # Leave empty unless a separate frontend origin is used.
       - key: FRONTEND_ORIGIN
         sync: false
       # Comma-separated Firebase UIDs allowed to reach admin/system endpoints.
@@ -96,40 +96,3 @@ services:
       - key: ADMIN_UIDS
         sync: false
 
-  # ---------------------------------------------------------------------------
-  # Dedicated queue worker (SaaS topology).
-  # Research runs for minutes; an embedded worker dies with the web dyno on every
-  # restart/deploy/spin-down. This service drains the same Firestore queue
-  # (transactional lease + stale-lease recovery) and starts NO HTTP listener.
-  # Use a paid instance type: free instances sleep and stop draining.
-  # ---------------------------------------------------------------------------
-  - type: worker
-    name: market-metrics-worker
-    runtime: node
-    plan: starter
-    region: oregon
-    branch: main
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
-    autoDeployTrigger: commit
-    envVars:
-      - key: WORKER_MODE
-        value: worker
-      - key: NODE_ENV
-        value: production
-      - key: APP_ENV
-        value: production
-      - key: FIREBASE_PROJECT_ID
-        sync: false
-      - key: FIRESTORE_DATABASE_ID
-        sync: false
-      - key: STORAGE_BUCKET
-        sync: false
-      - key: FIREBASE_AUTH_DOMAIN
-        sync: false
-      - key: FIREBASE_SERVICE_ACCOUNT
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: WORKER_MODE
-        value: separate
