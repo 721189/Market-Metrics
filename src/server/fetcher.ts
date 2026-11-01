@@ -174,7 +174,7 @@ export class RealDocumentFetcher {
   /** True when a resolved literal IP is non-routable. Second layer behind validateUrl. */
   public static isPrivateIp(ip: string): boolean {
     if (!ip) return true;
-    const value = ip.toLowerCase().replace(/^\\[|\\]$/g, '').split('%')[0];
+    const value = ip.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
     const family = isIP(value);
     if (!family) return true;
 
