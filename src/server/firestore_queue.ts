@@ -5,27 +5,8 @@ import { canTransition } from './job_state.js';
 import { recordLeaseRecovery, recordQueueDepth } from './observability.js';
 import { stripUndefined } from './firestore_sanitize.js';
 import { logger } from './logger.js';
-import type { ResearchJob } from '../types.js';
 
 export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3-minute lease
-
-/** A lease is valid only while its persisted expiry is strictly in the future. */
-export function isLeaseActive(leasedUntil: unknown, nowMs: number = Date.now()): boolean {
-    let expiry: number | null = null;
-    if (typeof leasedUntil === 'number' && Number.isFinite(leasedUntil)) {
-        expiry = leasedUntil;
-    } else if (leasedUntil instanceof Date) {
-        expiry = leasedUntil.getTime();
-    } else if (leasedUntil && typeof (leasedUntil as any).toMillis === 'function') {
-        try {
-            const value = (leasedUntil as any).toMillis();
-            if (Number.isFinite(value)) expiry = value;
-        } catch {
-            expiry = null;
-        }
-    }
-    return expiry !== null && expiry > nowMs;
-}
 
 export type QueueJob = {
     id: string;
@@ -44,37 +25,6 @@ export type QueueJob = {
 export class FirestoreQueue {
     private collectionName = 'job_queue';
 
-    /**
-     * Persist the tenant-owned job and its queue row in one Firestore
-     * transaction. The API must never acknowledge a job that was saved but
-     * not enqueued (or enqueue work whose parent job was not saved).
-     */
-    async addWithJob(job: ResearchJob, userId: string) {
-        if (!userId) throw new Error('[Queue] userId is required to enqueue a research job');
-        if (!job?.id) throw new Error('[Queue] job id is required to enqueue a research job');
-
-        const jobRef = adminDb.collection('jobs').doc(job.id);
-        const queueRef = adminDb.collection(this.collectionName).doc(job.id);
-        const ownedJob = { ...job, user_id: userId };
-        const jobDocument = stripUndefined({
-            ...ownedJob,
-            updated_at: FieldValue.serverTimestamp(),
-        });
-        const queueDocument = stripUndefined({
-            name: 'market-research-execution',
-            data: { jobId: job.id, job: ownedJob, userId },
-            status: 'QUEUED',
-            created_at: FieldValue.serverTimestamp(),
-            updated_at: FieldValue.serverTimestamp(),
-        });
-
-        await adminDb.runTransaction(async transaction => {
-            transaction.create(jobRef, jobDocument);
-            transaction.create(queueRef, queueDocument);
-        });
-        return queueRef;
-    }
-
     async add(name: string, data: any) {
         const researchJobId = typeof data?.jobId === 'string' && data.jobId.trim()
             ? data.jobId.trim()
@@ -84,7 +34,7 @@ export class FirestoreQueue {
         const docRef = researchJobId
             ? adminDb.collection(this.collectionName).doc(researchJobId)
             : adminDb.collection(this.collectionName).doc();
-        await docRef.create(stripUndefined({
+        await docRef.set(stripUndefined({
             name,
             data,
             status: 'QUEUED',
@@ -182,7 +132,7 @@ export class FirestoreQueue {
             return null;
         } catch (err: any) {
             logger.error('queue.claim_failed', 'Error claiming next job', { status: (err as Error)?.message || String(err) });
-            throw err;
+            return null;
         }
     }
 
@@ -238,7 +188,7 @@ export class FirestoreQueue {
                     return;
                 }
                 const data = doc.data() as QueueJob | undefined;
-                if (data?.status === 'RUNNING' && data?.worker_id === workerId && Boolean(leaseId) && data?.lease_id === leaseId && isLeaseActive(data?.leased_until)) {
+                if (data?.status === 'RUNNING' && data?.worker_id === workerId && Boolean(leaseId) && data?.lease_id === leaseId) {
                     // Bump lease version so any stale heartbeat from before this
                     // moment becomes invalid after this transaction commits.
                     const nextVersion = (data.lease_version ?? 0) + 1;
@@ -293,7 +243,7 @@ export class FirestoreQueue {
             return recovered;
         } catch (err) {
             logger.error('queue.recover_failed', 'Error in recoverStaleJobs', { status: (err as Error)?.message || String(err) });
-            throw err;
+            return 0;
         }
     }
 
@@ -380,10 +330,8 @@ export class FirestoreQueue {
                 const data = doc.data();
                 if (workerId && (
                     !leaseId ||
-                    data?.status !== 'RUNNING' ||
                     data?.worker_id !== workerId ||
-                    data?.lease_id !== leaseId ||
-                    !isLeaseActive(data?.leased_until)
+                    data?.lease_id !== leaseId
                 )) {
                     logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost lease ownership`, { job_id: jobId });
                     return false;
@@ -451,22 +399,23 @@ export class FirestoreQueue {
             const jobDoc = await jobRef.get();
             if (!jobDoc.exists || jobDoc.data()?.status !== 'QUEUED') return null;
             const createdAt = jobDoc.data()?.created_at;
-            if (!createdAt) return null;
+            if (!createdAt) return 1;
 
-            // Count only earlier queue entries on the indexed timestamp range;
-            // never download the entire backlog for a single progress request.
-            const earlier = await adminDb.collection(this.collectionName)
+            const snap = await adminDb.collection(this.collectionName)
                 .where('status', '==', 'QUEUED')
-                .where('created_at', '<', createdAt)
-                .count()
                 .get();
-            return earlier.data().count + 1;
-        } catch (err) {
-            logger.warn('queue.position_failed', 'Could not calculate queue position', {
-                job_id: jobId,
-                status: (err as Error)?.message || String(err),
+            let count = 1;
+            snap.forEach(doc => {
+                if (doc.id !== jobRef.id) {
+                    const data = doc.data() as QueueJob;
+                    const ta = data.created_at?.toMillis ? data.created_at.toMillis() : 0;
+                    const tb = createdAt?.toMillis ? createdAt.toMillis() : 0;
+                    if (ta < tb) count++;
+                }
             });
-            return null;
+            return count;
+        } catch (err) {
+            return 1;
         }
     }
 
