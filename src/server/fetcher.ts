@@ -209,13 +209,9 @@ export class RealDocumentFetcher {
       }
     }
 
-    const lastMod = headers.get('last-modified');
-    if (lastMod) {
-      const parsed = Date.parse(lastMod);
-      if (!isNaN(parsed)) return new Date(parsed).toISOString();
-    }
-
-    // Unknown publication date -> null. Do NOT fabricate a date.
+    // Last-Modified is a transport/cache timestamp, not proof of the
+    // document's publication date. Keep publication time unknown unless the
+    // document explicitly exposes datePublished/article:published_time metadata.
     return null;
   }
 
@@ -309,8 +305,16 @@ export class RealDocumentFetcher {
         if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
         else if (v !== undefined) fetchHeaders.append(k, v);
       });
-      const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
-      const title = this.extractTitle(extractedText, url);
+      // Preserve the original HTML long enough to extract metadata. The
+      // normalized text no longer contains <title>, Open Graph, or JSON-LD tags.
+      const isHtmlDocument =
+        /(?:text\/html|application\/xhtml\+xml)/i.test(contentType) ||
+        /\.(?:html?|xhtml)(?:[?#]|$)/i.test(url);
+      const originalHtml = isHtmlDocument ? body.toString('utf8') : '';
+      const publishedAt = originalHtml
+        ? this.extractPublicationDate(originalHtml, fetchHeaders)
+        : null;
+      const title = originalHtml ? this.extractTitle(originalHtml, url) : this.extractTitle('', url);
       const contentHash = this.computeSha256(extractedText);
       const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
       const chunks = this.chunkText(sourceId, title, extractedText);
@@ -522,24 +526,90 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractHtmlText(html: string, url: string): string | null {
+  public static extractHtmlText(html: string, _url: string): string | null {
     if (!html || html.length < 50) return null;
-    let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<svg[\s\S]*?<\/svg>/gi, ' ').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#[0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
-    if (text.length < 100) return null;
-    const paragraphs = text.split(/\n\s*\n/).filter((p: string) => p.trim().length > 50);
-    if (paragraphs.length === 0) return text;
-    const scored = paragraphs.map((p: string) => ({ t: p.trim(), w: p.trim().split(/\s+/).length }))
-      .filter((p: { w: number }) => p.w >= 20).sort((a: { w: number }, b: { w: number }) => b.w - a.w);
-    if (scored.length === 0) return text;
-    const tw = scored.reduce((s: number, p: { w: number }) => s + p.w, 0);
-    let cum = 0;
-    const sel = scored.filter((p: { w: number }) => { cum += p.w; return cum <= tw * 0.8 || sel.length < 3; });
-    if (sel.length < 3) return paragraphs.join('\n\n');
-    return sel.map((p: { t: string }) => p.t).join('\n\n');
+
+    // Drop non-content regions before inserting structural separators. In
+    // particular, retain paragraph and table boundaries rather than flattening
+    // every whitespace character into a single space.
+    let text = html
+      .replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, ' ')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+      .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<br\b[^>]*\/?>/gi, '\n')
+      .replace(/<\/(?:td|th)\s*>/gi, '\t')
+      .replace(/<\/tr\s*>/gi, '\n\n')
+      .replace(/<tr\b[^>]*>/gi, '\n\n')
+      .replace(/<\/(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|ul)\s*>/gi, '\n\n')
+      .replace(/<(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|ul)\b[^>]*>/gi, '\n\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&#x([0-9a-f]+);/gi, (_match: string, hex: string) => {
+        const codePoint = Number.parseInt(hex, 16);
+        return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : ' ';
+      })
+      .replace(/&#(\d+);/g, (_match: string, decimal: string) => {
+        const codePoint = Number.parseInt(decimal, 10);
+        return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : ' ';
+      });
+
+    const paragraphs = text
+      .split(/\n\s*\n+/)
+      .map((paragraph: string) => paragraph
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\s*\n\s*/g, ' ')
+        .trim())
+      .filter((paragraph: string) => paragraph.length > 50);
+
+    if (paragraphs.length === 0) {
+      const fallback = text.replace(/\s+/g, ' ').trim();
+      return fallback.length >= 100 ? fallback : null;
+    }
+
+    const scored = paragraphs
+      .map((paragraph: string, index: number) => ({
+        text: paragraph,
+        index,
+        words: paragraph.split(/\s+/).length,
+      }))
+      .filter((paragraph: { words: number }) => paragraph.words >= 20);
+
+    if (scored.length === 0) return paragraphs.join('\n\n');
+
+    // Select the substantial paragraphs covering roughly 80% of the text,
+    // but always retain up to the first three candidates. Selection is done
+    // explicitly (not inside Array.filter, where referencing the result array
+    // would hit its temporal dead zone), then restored to document order.
+    const ranked = [...scored].sort((a, b) => b.words - a.words || a.index - b.index);
+    const selected: typeof ranked = [];
+    const totalWords = ranked.reduce((sum, paragraph) => sum + paragraph.words, 0);
+    let selectedWords = 0;
+
+    for (const paragraph of ranked) {
+      if (selected.length < Math.min(3, ranked.length) || selectedWords < totalWords * 0.8) {
+        selected.push(paragraph);
+        selectedWords += paragraph.words;
+      } else {
+        break;
+      }
+    }
+
+    return selected
+      .sort((a, b) => a.index - b.index)
+      .map(paragraph => paragraph.text)
+      .join('\n\n');
   }
 
   private static parseCsvToText(csv: string): string {
