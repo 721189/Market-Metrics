@@ -336,6 +336,7 @@ export class FinancialEngine {
       ltv_to_cac,
       payback_period_months,
       annual_gross_profit_per_user: Math.round(safeArpu * grossMarginDecimal),
+      sales_cycle_months: Number.isFinite(inputs.sales_cycle_months) ? Math.max(0, inputs.sales_cycle_months) : null,
       net_revenue_retention_pct: netRevenueRetention,
       rule_of_40_score: ruleOf40Score,
     };
@@ -384,6 +385,7 @@ export class FinancialEngine {
     baseMargin: number,
     currency: string = 'USD',
     baseCustomerCount: number = 0,
+    baseSalesCycleMonths: number = 2.8,
   ) {
     // Conservative
     const consEcon = this.calculateUnitEconomics({
@@ -391,7 +393,7 @@ export class FinancialEngine {
       gross_margin_pct: Math.max(30, baseMargin - 6),
       annual_churn_rate_pct: 14,
       cac: baseCac * 1.25,
-      sales_cycle_months: 4.5,
+      sales_cycle_months: Math.max(0, baseSalesCycleMonths * 1.6),
     });
 
     // Base
@@ -400,7 +402,7 @@ export class FinancialEngine {
       gross_margin_pct: baseMargin,
       annual_churn_rate_pct: 7.5,
       cac: baseCac,
-      sales_cycle_months: 2.8,
+      sales_cycle_months: Math.max(0, baseSalesCycleMonths),
     });
 
     // Aggressive
@@ -409,7 +411,7 @@ export class FinancialEngine {
       gross_margin_pct: Math.min(92, baseMargin + 6),
       annual_churn_rate_pct: 4,
       cac: baseCac * 0.8,
-      sales_cycle_months: 1.5,
+      sales_cycle_months: Math.max(0, baseSalesCycleMonths * 0.6),
     });
 
     const sensitivityMatrix = this.generateSensitivityMatrix(baseArpu, baseCac, baseMargin);
