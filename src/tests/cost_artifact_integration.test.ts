@@ -9,6 +9,7 @@ import { CostGovernor } from '../server/cost_governor.js';
 import { InMemoryArtifactStorage, artifactRef, parseArtifactRef, RetrievalArtifact } from '../server/artifacts.js';
 import { logEnvelope } from '../server/rate_limits.js';
 import { RealDocumentFetcher } from '../server/fetcher.js';
+import { getGeminiStandardRates } from '../server/gemini.js';
 
 function approxEqual(a: number, b: number, tol = 0.01): boolean {
   return Math.abs(a - b) <= tol;
@@ -16,6 +17,22 @@ function approxEqual(a: number, b: number, tol = 0.01): boolean {
 
 async function runCostGovernorTests(): Promise<{ passed: boolean; message: string }> {
   console.log('[Cost/Artifact Integration] Running cost governor + artifact persistence tests...');
+
+  // --- Gemini Standard-tier pricing table and scheduled effective date ---
+  const flash2026 = getGeminiStandardRates('gemini-3.8-flash', new Date('2026-12-31T23:59:59.000Z'));
+  const flash2027 = getGeminiStandardRates('gemini-3.8-flash', new Date('2027-01-01T00:00:00.000Z'));
+  const liteRates = getGeminiStandardRates('gemini-3.5-flash-lite', new Date('2026-11-02T00:00:00.000Z'));
+  if (
+    flash2026?.inputUsdPerMillion !== 0.75 ||
+    flash2026?.outputUsdPerMillion !== 3.75 ||
+    flash2027?.inputUsdPerMillion !== 1.5 ||
+    flash2027?.outputUsdPerMillion !== 7.5 ||
+    liteRates?.inputUsdPerMillion !== 0.30 ||
+    liteRates?.outputUsdPerMillion !== 2.50 ||
+    getGeminiStandardRates('unpriced-model') !== null
+  ) {
+    return { passed: false, message: 'Gemini token prices must match the configured Standard-tier model schedule and reject unpriced model IDs' };
+  }
 
   // --- Cost governor: cap enforcement ---
   const governor = new CostGovernor({ maxSources: 3, maxDocumentSizeBytes: 1000 });
