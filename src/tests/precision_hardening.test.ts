@@ -18,6 +18,7 @@ import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentNam
 import { resolveModel } from '../server/gemini.js';
 import { classifyDomainTier } from '../server/pipeline.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
+import { createArtifactStorage, InMemoryArtifactStorage } from '../server/artifacts.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
 function makeSource(id: string, overrides: Partial<Source> = {}): Source {
@@ -158,6 +159,45 @@ function makeReport(overrides: {
 }
 
 export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; message: string }> {
+
+  // ===== Production artifact storage must never degrade to process memory =====
+  let productionArtifactFallbackRejected = false;
+  try {
+    createArtifactStorage(
+      { APP_ENV: 'production', NODE_ENV: 'production' },
+      () => { throw new Error('bucket unavailable'); },
+    );
+  } catch (error) {
+    productionArtifactFallbackRejected =
+      error instanceof Error && error.message.includes('refusing in-memory fallback');
+  }
+  const stagingArtifactFallbackRejected = (() => {
+    try {
+      createArtifactStorage(
+        { APP_ENV: 'staging', NODE_ENV: 'production' },
+        () => { throw new Error('bucket unavailable'); },
+      );
+      return false;
+    } catch (error) {
+      return error instanceof Error && error.message.includes('refusing in-memory fallback');
+    }
+  })();
+  const localArtifactFallback = createArtifactStorage(
+    { APP_ENV: 'development', NODE_ENV: 'development' },
+    () => { throw new Error('bucket unavailable'); },
+  );
+  if (
+    !productionArtifactFallbackRejected ||
+    !stagingArtifactFallbackRejected ||
+    !(localArtifactFallback instanceof InMemoryArtifactStorage)
+  ) {
+    return {
+      passed: false,
+      message: 'Staging/production must fail closed when durable artifact storage is unavailable; only local development may fall back to memory',
+    };
+  }
+  console.log('✔ Durable artifact storage fails closed in staging/production and falls back only in local development.');
+
   console.log('\n--- Running Test 10: Precision Hardening Suite ---');
 
   // ===== 1. Cancellation state machine =====
