@@ -235,21 +235,23 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
-    name: 'queue readiness uses aggregate counts and fails closed when Firestore is unavailable',
+    name: 'Render readiness probes critical dependencies with one bounded Firestore read',
     fn: async () => {
       const queue = readSource('src/server/firestore_queue.ts');
       const server = readSource('server.ts');
-      const statsStart = queue.indexOf('async getStats()');
-      const statsEnd = queue.indexOf('async getJobPosition', statsStart);
-      const stats = queue.slice(statsStart, statsEnd);
+      const render = readSource('render.yaml');
+      const probeStart = queue.indexOf('async checkReady()');
+      const probeEnd = queue.indexOf('async getStats()', probeStart);
+      const probe = queue.slice(probeStart, probeEnd);
       const readyStart = server.indexOf("app.get('/ready'");
       const readyEnd = server.indexOf('// OPERATIONAL METRICS', readyStart);
       const ready = server.slice(readyStart, readyEnd);
-      return stats.includes('collection.count().get()') &&
-        stats.includes("collection.where('status', '==', 'QUEUED').count().get()") &&
-        !stats.includes('collection.get()') &&
-        ready.includes('researchQueue.getStats()') &&
-        ready.includes('res.status(503)');
+      return probe.includes('collection(this.collectionName).limit(1).get()') &&
+        ready.includes('researchQueue.checkReady()') &&
+        ready.includes('GEMINI_API_KEY') &&
+        ready.includes('res.status(503)') &&
+        !ready.includes('researchQueue.getStats()') &&
+        render.includes('healthCheckPath: /ready');
     },
   },
   {
