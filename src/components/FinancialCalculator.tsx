@@ -45,7 +45,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
     sales_cycle_months: salesCycleMonths,
   });
 
-  const scenarios = FinancialEngine.generateScenarios(arpu, cac, grossMargin, currency, customerCount, salesCycleMonths);
+  const scenarios = FinancialEngine.generateScenarios(arpu, cac, grossMargin, currency, customerCount, salesCycleMonths, churnRate);
 
   const formatCurr = (amount: number | null) => FinancialEngine.formatCurrency(amount, currency);
 
