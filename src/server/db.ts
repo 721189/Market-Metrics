@@ -26,7 +26,7 @@ export class DatabaseRepository {
         // value ("Cannot use undefined as a Firestore value"), which threw and
         // aborted job creation. stripUndefined drops those keys instead of
         // rejecting the whole document (SetOptions has no ignore-flag in v14).
-      }, { merge: true });
+      });
     } catch (err) {
       logger.error('db.save_job_failed', `Error saving job ${job.id}`, {
         status: (err as Error)?.message || String(err),
