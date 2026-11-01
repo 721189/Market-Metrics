@@ -7,6 +7,7 @@ import {
   type RateLimitStore,
 } from './stores.js';
 import { logger } from './logger.js';
+import { authMiddleware } from './middleware.js';
 
 /**
  * Server-side administrative path lockdown.
@@ -52,22 +53,27 @@ export function adminPathBlocker() {
     );
 
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!isAdminPath(req.path)) {
+    if (!isAdminPath(req.path)) return next();
+
+    const authorizeAdmin = () => {
+      const user = (req as any).user;
+      const uid: string | undefined = user?.uid;
+      const isAdmin =
+        (!!uid && adminUids().has(uid)) || user?.role === 'admin' || user?.admin === true;
+
+      if (!user || !isAdmin) {
+        return res.status(404).json({
+          error: { code: 'NOT_FOUND', message: 'Not found' },
+        });
+      }
       return next();
-    }
+    };
 
-    const user = (req as any).user;
-    const uid: string | undefined = user?.uid;
-    const isAdmin =
-      (!!uid && adminUids().has(uid)) || user?.role === 'admin' || user?.admin === true;
-
-    if (!user || !isAdmin) {
-      return res.status(404).json({
-        error: { code: 'NOT_FOUND', message: 'Not found' },
-      });
-    }
-
-    return next();
+    // This guard is mounted globally, so it must establish identity itself
+    // before evaluating admin privileges. Reuse a verified identity if an
+    // earlier route middleware has already authenticated the request.
+    if ((req as any).user?.uid) return authorizeAdmin();
+    return authMiddleware(req, res, authorizeAdmin);
   };
 }
 
