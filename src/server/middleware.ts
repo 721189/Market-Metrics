@@ -165,7 +165,8 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     .update(userId + '|' + path + '|' + idempotencyKey)
     .digest('hex');
 
-  const storeKind = (process.env.IDEMPOTENCY_STORE || 'memory').trim().toLowerCase();
+  const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+  const storeKind = (process.env.IDEMPOTENCY_STORE || (productionDefaults ? 'firestore' : 'memory')).trim().toLowerCase();
   if (storeKind !== 'memory' && storeKind !== 'firestore') {
     return sendIdempotencyError(
       res, 503, 'IDEMPOTENCY_STORE_UNAVAILABLE',
