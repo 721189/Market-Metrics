@@ -71,7 +71,7 @@ function installIdempotencyResponse(
     docKey: string;
     requestHash: string;
     storeKind: 'memory' | 'firestore';
-    firestoreRef?: FirebaseFirestore.DocumentReference;
+    firestoreRef?: any;
   },
 ): void {
   const originalJson = res.json.bind(res);
