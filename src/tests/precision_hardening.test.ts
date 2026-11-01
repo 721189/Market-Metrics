@@ -421,6 +421,9 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   if (!conflictingEnvironmentRejected) {
     return { passed: false, message: 'Conflicting APP_ENV and NODE_ENV values must fail closed' };
   }
+  if (resolveEnvironmentName({ APP_ENV: 'staging', NODE_ENV: 'production' } as NodeJS.ProcessEnv) !== 'staging') {
+    return { passed: false, message: 'Staging may use production runtime mode while retaining isolated staging resources' };
+  }
   const stagingApplet = loadEnvironmentConfig({
     APP_ENV: 'staging', NODE_ENV: 'staging',
     FIREBASE_PROJECT_ID: APPLET_DEV_PROJECT_ID,
