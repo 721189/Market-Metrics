@@ -37,7 +37,7 @@ import type {
   MarketMetric,
   FinancialOutputs,
 } from '../types.js';
-import { FinancialEngine } from './financial.js';
+import { FinancialEngine, extractVerifiedMarketSizing } from './financial.js';
 import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext } from './gemini.js';
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
@@ -143,11 +143,25 @@ export function classifyDomainTier(domain: string): { tier: Source['source_type'
   const hostname = normalizeSourceHostname(domain);
   if (!hostname) return { tier: 'TIER_D', reliability: 45 };
 
+  // Use explicit official suffixes. A generic regex such as *.gov.<tld>
+  // incorrectly trusts commercial lookalikes like example.gov.com.
+  const governmentSuffixes = [
+    'gov', 'gov.uk', 'gov.in', 'gov.au', 'gov.ca', 'govt.nz',
+    'gov.sg', 'gov.za', 'gov.br', 'gov.cn', 'gov.my', 'gov.ph',
+    'gob.mx', 'gob.es', 'go.jp', 'go.kr',
+  ];
+  const academicSuffixes = [
+    'edu', 'edu.au', 'edu.in', 'edu.sg', 'edu.cn', 'edu.my',
+    'ac.uk', 'ac.in', 'ac.nz', 'ac.jp', 'ac.za', 'ac.kr',
+    'ac.cn', 'ac.id', 'ac.th', 'ac.ke', 'ac.ug', 'ac.tz',
+  ];
+  const matchesSuffix = (suffix: string) =>
+    hostname === suffix || hostname.endsWith('.' + suffix);
   const governmentOrAcademic =
-    /(^|\.)gov(\.[a-z]{2,})?$/.test(hostname) ||
-    /(^|\.)edu(\.[a-z]{2,})?$/.test(hostname) ||
-    /(^|\.)ac\.[a-z]{2,}$/.test(hostname) ||
-    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org'].some(domain => isDomainOrSubdomain(hostname, domain));
+    governmentSuffixes.some(matchesSuffix) ||
+    academicSuffixes.some(matchesSuffix) ||
+    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org']
+      .some(domain => isDomainOrSubdomain(hostname, domain));
 
   if (governmentOrAcademic || isDomainOrSubdomain(hostname, 'sec.gov')) {
     return { tier: 'TIER_A', reliability: 96 };
@@ -977,112 +991,98 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'ANALYZING', 'Analyzing financial metrics and market sizing from verified source data...', 80);
 
-    const financials = await withTimeout(
-      (operationSignal) => GeminiResearchEngine.extractFinancialMetrics({
-        industry: job.industry,
-        geography: job.geography,
-        sourceDocuments: analyzableSources.map(s => ({
-          id: s.id,
-          domain: s.domain,
-          title: s.title || s.domain,
-          text: sourceTexts.get(s.id) || '',
-        })),
-        signal: operationSignal,
-        costGovernor,
-      }),
-      5 * 60 * 1000,
-      'ANALYZING',
-      signal
-    );
-
-    const isIndia = financials.currency === 'INR';
-    const currency = financials.currency;
-    const baseTAM = financials.tam;
-    const growthRate = financials.cagr;
-    const startYear = financials.year_start;
-    const endYear = financials.year_end;
-    const horizonYears = endYear - startYear;
-    const tamForecast = baseTAM * Math.pow(1 + growthRate / 100, horizonYears);
-
-    const sizing = {
-      tam_current: baseTAM,
-      tam_forecast: tamForecast,
-      cagr_pct: growthRate,
-      sam: baseTAM * 0.4,
-      som: baseTAM * 0.1,
-    };
-    const unitEcon = FinancialEngine.calculateUnitEconomics({
-      arpu_annual: isIndia ? 48000 : 4800,
-      gross_margin_pct: 78,
-      annual_churn_rate_pct: 7.5,
-      cac: isIndia ? 38000 : 3800,
-      sales_cycle_months: 2.8,
-    });
-
-    const scenarios = FinancialEngine.generateScenarios(
-      isIndia ? 48000 : 4800,
-      isIndia ? 38000 : 3800,
-      78,
-      currency
-    );
+    // Financial outputs are derived only from claims that passed the full
+    // evidence verifier. No LLM-only TAM/CAGR extraction or hardcoded SaaS
+    // economics are allowed to populate a research report.
+    const sizing = extractVerifiedMarketSizing(publishableClaims);
+    const currency = sizing.currency || 'Not established';
+    const isIndia = sizing.currency === 'INR';
 
     const financialOutputs: FinancialOutputs = {
+      data_status: sizing.data_status,
+      source_claim_ids: sizing.source_claim_ids,
+      metric_claim_ids: sizing.metric_claim_ids,
+      limitations: sizing.limitations,
       cagr_pct: sizing.cagr_pct,
       tam_current: sizing.tam_current,
       tam_forecast: sizing.tam_forecast,
       sam: sizing.sam,
       som: sizing.som,
-      currency,
-      year_start: startYear,
-      year_end: endYear,
-      scenario_conservative: scenarios.scenario_conservative,
-      scenario_base: scenarios.scenario_base,
-      scenario_aggressive: scenarios.scenario_aggressive,
+      currency: sizing.currency,
+      year_start: sizing.year_start,
+      year_end: sizing.year_end,
+      scenario_conservative: null,
+      scenario_base: null,
+      scenario_aggressive: null,
     };
 
-    const marketMetrics: MarketMetric[] = [
-      {
+    const marketMetrics: MarketMetric[] = [];
+    const addVerifiedMetric = (
+      metricName: string,
+      value: number | null,
+      unit: string,
+      claimId: string | undefined,
+      formattedValue: string,
+    ) => {
+      if (value === null || !claimId) return;
+      const claim = publishableClaims.find(item => item.id === claimId);
+      if (!claim) return;
+      marketMetrics.push({
         id: generateId(),
         job_id: job.id,
-        metric_name: 'Total Addressable Market (Base)',
-        value: sizing.tam_current,
-        formatted_value: FinancialEngine.formatCurrency(sizing.tam_current, currency),
-        unit: currency,
-        currency,
+        metric_name: metricName,
+        value,
+        formatted_value: formattedValue,
+        unit,
+        currency: unit === '%' ? '' : (sizing.currency || ''),
         geography: job.geography,
-        period_start: String(startYear),
-        period_end: String(startYear),
-        confidence: 96,
-      },
-      {
-        id: generateId(),
-        job_id: job.id,
-        metric_name: 'Forecast TAM',
-        value: sizing.tam_forecast,
-        formatted_value: FinancialEngine.formatCurrency(sizing.tam_forecast, currency),
-        unit: currency,
-        currency,
-        geography: job.geography,
-        period_start: String(startYear),
-        period_end: String(endYear),
-        confidence: 94,
-      },
-      {
-        id: generateId(),
-        job_id: job.id,
-        metric_name: 'Deterministic CAGR',
-        value: sizing.cagr_pct,
-        formatted_value: `${sizing.cagr_pct}%`,
-        unit: '%',
-        currency: '',
-        geography: job.geography,
-        period_start: String(startYear),
-        period_end: String(endYear),
-        confidence: 98,
-      },
-    ];
+        period_start: sizing.year_start === null ? '' : String(sizing.year_start),
+        period_end: sizing.year_end === null ? '' : String(sizing.year_end),
+        source_claim_id: claimId,
+        confidence: Math.max(0, Math.min(100, claim.confidence)),
+      });
+    };
 
-    await logAndEmitEvent(job, 'stage_completed', 'ANALYZING', `Financial analysis calculated: Verified CAGR ${sizing.cagr_pct}%, SAM ${FinancialEngine.formatCurrency(sizing.sam, currency)}, LTV:CAC ${unitEcon.ltv_to_cac}x`, 88);
+    addVerifiedMetric(
+      'Total Addressable Market (Base)',
+      sizing.tam_current,
+      sizing.currency || '',
+      sizing.metric_claim_ids.tam_current,
+      FinancialEngine.formatCurrency(sizing.tam_current, sizing.currency || ''),
+    );
+    addVerifiedMetric(
+      'Forecast TAM',
+      sizing.tam_forecast,
+      sizing.currency || '',
+      sizing.metric_claim_ids.tam_forecast,
+      FinancialEngine.formatCurrency(sizing.tam_forecast, sizing.currency || ''),
+    );
+    addVerifiedMetric(
+      'Serviceable Available Market (SAM)',
+      sizing.sam,
+      sizing.currency || '',
+      sizing.metric_claim_ids.sam,
+      FinancialEngine.formatCurrency(sizing.sam, sizing.currency || ''),
+    );
+    addVerifiedMetric(
+      'Serviceable Obtainable Market (SOM)',
+      sizing.som,
+      sizing.currency || '',
+      sizing.metric_claim_ids.som,
+      FinancialEngine.formatCurrency(sizing.som, sizing.currency || ''),
+    );
+    addVerifiedMetric(
+      'Verified CAGR',
+      sizing.cagr_pct,
+      '%',
+      sizing.metric_claim_ids.cagr,
+      sizing.cagr_pct === null ? 'Not established' : sizing.cagr_pct + '%',
+    );
+
+    const financialSummary = sizing.data_status === 'SOURCE_BACKED'
+      ? 'Financial analysis completed using verified source claims; unsupported projections were withheld.'
+      : 'No market-size or unit-economics values passed verification; unsupported projections were withheld.';
+    await logAndEmitEvent(job, 'stage_completed', 'ANALYZING', financialSummary, 88);
 
     if (isCancelled(job, signal)) return;
 
@@ -1179,7 +1179,9 @@ export class ResearchPipelineManager {
       title: `Mitigate critical risk: ${r.title}`,
       priority: 'CRITICAL' as const,
       timeframe: 'IMMEDIATE' as const,
-      rationale: `Address the highest-impact verified risk before pursuing growth of ${sizing.cagr_pct}% in ${job.geography}.`,
+      rationale: sizing.cagr_pct === null
+        ? `Address the highest-impact verified risk before pursuing further growth in ${job.geography}.`
+        : `Address the highest-impact verified risk before pursuing the verified ${sizing.cagr_pct}% CAGR in ${job.geography}.`,
       risk_factors: [r.title],
       supporting_claim_ids: r.supporting_claim_ids,
     }));
