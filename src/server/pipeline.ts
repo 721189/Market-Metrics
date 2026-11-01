@@ -1406,7 +1406,15 @@ export async function startWorker() {
         } else if (!leaseOwned) {
           logger.info('queue.job_abandoned', `Job ${job.id} abandoned after lease loss; ownership transferred.`, { job_id: job.id });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''));
+          const completed = await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''));
+          if (!completed) {
+            leaseOwned = false;
+            cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+            controller.abort();
+            logger.warn('queue.completion_suppressed', 'Completion refused because this worker no longer owns the exact lease.', {
+              job_id: researchJobId,
+            });
+          }
         }
       } catch (err) {
         const rawFailure = err instanceof Error ? err.message : String(err || 'Unknown worker failure');
@@ -1421,8 +1429,15 @@ export async function startWorker() {
         } else if (controller.signal.aborted && cancellationRegistry.abortReason(researchJobId) === 'USER_CANCEL') {
           logger.info('queue.job_aborted', 'User cancellation preserved; research worker is stopping.', { job_id: researchJobId });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''));
-          if (ownerUserId) {
+          const failed = await researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''));
+          if (!failed) {
+            leaseOwned = false;
+            cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+            controller.abort();
+            logger.warn('queue.failure_finalize_suppressed', 'Failure finalization refused because this worker no longer owns the exact lease.', {
+              job_id: researchJobId,
+            });
+          } else if (ownerUserId) {
             try {
               await ResearchPipelineManager.failJob(researchJobId, ownerUserId, err, String(pipelineJob.current_stage || 'PLANNING'));
             } catch (finalizeError) {
