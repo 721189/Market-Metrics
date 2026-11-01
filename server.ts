@@ -208,18 +208,26 @@ async function startServer() {
   });
 
   app.get('/ready', async (req: Request, res: Response) => {
-    // Readiness must not fabricate a tenant. Queue depth is tenant-independent
-    // and comes from the queue collection; per-tenant job counts are not
-    // probed here (that would require inventing an identity).
-    const queueStats = await researchQueue.getStats();
-
-    res.status(200).json({
-      status: 'ready',
-      gemini_configured: Boolean(process.env.GEMINI_API_KEY),
-      environment: process.env.NODE_ENV || 'development',
-      queue: queueStats,
-      version: '2.0.0',
-    });
+    // Readiness must fail when Firestore cannot report the operational queue
+    // state. An all-zero fallback would falsely advertise a healthy service.
+    try {
+      const queueStats = await researchQueue.getStats();
+      return res.status(200).json({
+        status: 'ready',
+        gemini_configured: Boolean(process.env.GEMINI_API_KEY),
+        environment: process.env.NODE_ENV || 'development',
+        queue: queueStats,
+        version: '2.0.0',
+      });
+    } catch (err) {
+      logger.warn('health.readiness_failed', 'Queue readiness probe failed', {
+        status: (err as Error)?.message || String(err),
+      });
+      return res.status(503).json({
+        status: 'not_ready',
+        error: { code: 'QUEUE_STATUS_UNAVAILABLE', message: 'Queue status could not be verified.' },
+      });
+    }
   });
 
   // -------------------------------------------------------------
