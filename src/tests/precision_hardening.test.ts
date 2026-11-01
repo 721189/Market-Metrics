@@ -14,7 +14,7 @@ import { canTransition, assertTransition, cancellationRegistry } from '../server
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
-import { resolveModel } from '../server/gemini.js';
+import { resolveModel, classifyProviderError } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -412,6 +412,22 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     else process.env.GEMINI_MODEL_PLANNER = savedPlannerModel;
   }
   console.log('✔ Gemini model selection defaults to 3.8 Flash and preserves explicit overrides.');
+  
+  // ===== 9. Quota exhaustion is not retried as a transient 429 =====
+  const exhaustedQuota = classifyProviderError(new Error(
+    '429 RESOURCE_EXHAUSTED: You exceeded your current quota, please check your plan and billing details.'
+  ));
+  if (exhaustedQuota.retryable || exhaustedQuota.reason !== 'quota_exhausted') {
+    return { passed: false, message: 'A billing/quota exhaustion response must fail fast with quota_exhausted, not retry' };
+  }
+  const transientRateLimit = classifyProviderError(new Error(
+    '429 RESOURCE_EXHAUSTED: rate limit exceeded for requests per minute; retry after 1s'
+  ));
+  if (!transientRateLimit.retryable || transientRateLimit.reason !== 'rate_limited') {
+    return { passed: false, message: 'A transient per-minute rate limit must remain retryable' };
+  }
+  console.log('✔ Gemini distinguishes exhausted project quota from transient rate limiting.');
+
 
   // ===== 9. Pre-aborted document fetch rejects without starting network work =====
   const cancelledFetch = new AbortController();
