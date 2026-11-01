@@ -360,7 +360,13 @@ export class ResearchPipelineManager {
   ): Promise<'deleted' | 'not_found' | 'not_terminal'> {
     if (!userId) throw new Error('userId is required for deleteJob');
     const job = await DatabaseRepository.getJob(jobId, userId);
-    if (!job) return 'not_found';
+    if (!job) {
+      // A prior deletion attempt may have committed its tombstone but failed
+      // during chunked cleanup. Retry cleanup idempotently without exposing the
+      // tombstoned job to ordinary reads.
+      const resumed = await DatabaseRepository.deleteJob(jobId, userId);
+      return resumed ? 'deleted' : 'not_found';
+    }
 
     // Compare as plain strings: JobStatus includes stage-prefixed values
     // (PLANNING..) that are not part of the terminal QueueExecutionStatus union.
@@ -372,7 +378,8 @@ export class ResearchPipelineManager {
     // (or after) its documents are removed.
     cancellationRegistry.abort(jobId, 'USER_CANCEL');
 
-    await DatabaseRepository.deleteJob(jobId, userId);
+    const deleted = await DatabaseRepository.deleteJob(jobId, userId);
+    if (!deleted) return 'not_found';
     logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
     return 'deleted';
   }
