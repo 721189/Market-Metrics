@@ -14,7 +14,7 @@ import { canTransition, assertTransition, cancellationRegistry } from '../server
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
 import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.js';
-import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
+import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentName, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
@@ -388,6 +388,40 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+  // Environment labels must never downgrade an explicitly production process.
+  if (resolveEnvironmentName({ APP_ENV: 'prod', NODE_ENV: 'production' } as NodeJS.ProcessEnv) !== 'production') {
+    return { passed: false, message: 'Equivalent production aliases must resolve consistently' };
+  }
+  let invalidEnvironmentRejected = false;
+  try {
+    resolveEnvironmentName({ APP_ENV: 'developmnt', NODE_ENV: 'production' } as NodeJS.ProcessEnv);
+  } catch {
+    invalidEnvironmentRejected = true;
+  }
+  if (!invalidEnvironmentRejected) {
+    return { passed: false, message: 'An invalid APP_ENV must not downgrade NODE_ENV=production to development' };
+  }
+  let conflictingEnvironmentRejected = false;
+  try {
+    resolveEnvironmentName({ APP_ENV: 'development', NODE_ENV: 'production' } as NodeJS.ProcessEnv);
+  } catch {
+    conflictingEnvironmentRejected = true;
+  }
+  if (!conflictingEnvironmentRejected) {
+    return { passed: false, message: 'Conflicting APP_ENV and NODE_ENV values must fail closed' };
+  }
+  const stagingApplet = loadEnvironmentConfig({
+    APP_ENV: 'staging', NODE_ENV: 'staging',
+    FIREBASE_PROJECT_ID: APPLET_DEV_PROJECT_ID,
+    FIRESTORE_DATABASE_ID: 'staging-db',
+    STORAGE_BUCKET: 'staging-bucket',
+    FIREBASE_AUTH_DOMAIN: 'staging.firebaseapp.com',
+  } as NodeJS.ProcessEnv);
+  if (stagingApplet.allowViteDevServer || !findEnvironmentViolations(stagingApplet).some(v => v.includes(APPLET_DEV_PROJECT_ID))) {
+    return { passed: false, message: 'Staging must reject the applet project and never mount the Vite development server' };
+  }
+  console.log('✔ Environment resolution rejects typos, conflicting labels, and applet reuse in staging.');
+
 
   // ===== 8. Gemini model selection defaults to a currently supported stable model =====
   const savedGlobalModel = process.env.GEMINI_MODEL;
