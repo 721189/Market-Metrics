@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import { getAuth } from 'firebase-admin/auth';
 import { getAdminApp } from './firebase_admin.js';
 import { logger } from './logger.js';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { adminDb } from '../lib/firebase-admin.js';
 
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -71,7 +71,7 @@ function installIdempotencyResponse(
     docKey: string;
     requestHash: string;
     storeKind: 'memory' | 'firestore';
-    firestoreRef?: any;
+    firestoreRef?: DocumentReference;
   },
 ): void {
   const originalJson = res.json.bind(res);
