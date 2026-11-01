@@ -190,7 +190,7 @@ export class FirestoreQueue {
      * - { owned: false, definitive: false } -> transient error; worker may
      *        continue but all final state writes remain ownership-verified
      */
-    async heartbeat(jobId: string, workerId: string): Promise<{ owned: boolean; definitive: boolean }> {
+    async heartbeat(jobId: string, workerId: string, leaseId: string): Promise<{ owned: boolean; definitive: boolean }> {
         try {
             const jobRef = adminDb.collection(this.collectionName).doc(jobId);
             let owned = false;
@@ -203,7 +203,7 @@ export class FirestoreQueue {
                     return;
                 }
                 const data = doc.data() as QueueJob | undefined;
-                if (data?.status === 'RUNNING' && data?.worker_id === workerId) {
+                if (data?.status === 'RUNNING' && data?.worker_id === workerId && Boolean(leaseId) && data?.lease_id === leaseId) {
                     // Bump lease version so any stale heartbeat from before this
                     // moment becomes invalid after this transaction commits.
                     const nextVersion = (data.lease_version ?? 0) + 1;
@@ -232,30 +232,22 @@ export class FirestoreQueue {
     async recoverStaleJobs(): Promise<number> {
         try {
             const now = Date.now();
-            // Single-field filter only. `status ==` combined with a
-            // `leased_until <=` range ALSO requires a composite index, which a
-            // fresh project does not have — recovery would then never run and
-            // jobs orphaned by a Render restart would stay RUNNING forever.
-            // The expiry check is done in JS; _recoverStaleJobTransaction()
-            // re-reads the live document, so a heartbeat that lands in between
-            // still wins and the lease is not stolen.
-            const runningSnap = await adminDb.collection(this.collectionName)
+            // Query actual expired leases, rather than taking the first 100
+            // RUNNING jobs and filtering in memory. Otherwise a full page of
+            // healthy long-running jobs can starve every expired job behind it.
+            // The status + leased_until composite index is declared in
+            // firestore.indexes.json and must be deployed with this change.
+            const staleSnap = await adminDb.collection(this.collectionName)
                 .where('status', '==', 'RUNNING')
+                .where('leased_until', '<=', Timestamp.fromMillis(now))
+                .orderBy('leased_until', 'asc')
                 .limit(100)
                 .get();
 
-            const staleDocs = runningSnap.docs.filter(doc => {
-                const until = (doc.data() as QueueJob).leased_until;
-                const ms = until?.toMillis != null
-                    ? until.toMillis()
-                    : (typeof until === 'number' ? until : -1);
-                return ms <= now;
-            });
-
-            if (staleDocs.length === 0) return 0;
+            if (staleSnap.empty) return 0;
 
             let recovered = 0;
-            for (const doc of staleDocs) {
+            for (const doc of staleSnap.docs) {
                 const recoveredOk = await this._recoverStaleJobTransaction(doc.id);
                 if (recoveredOk) recovered++;
             }
@@ -271,18 +263,16 @@ export class FirestoreQueue {
     }
 
     /**
-     * Transactional, lease_version-verified recovery of a single stale job.
+     * Transactionally recover one expired lease.
      *
-     * A job is recoverable only if:
-     *   - status === 'RUNNING'
-     *   - leased_until <= now
-     *   - the lease version in the document still matches the version we observed
-     *     in the stale snapshot (else a heartbeat just extended the lease, and we
-     *     must not steal it).
+     * The live document is re-read inside the transaction and is recoverable
+     * only when status is still RUNNING and leased_until is still expired.
+     * If a heartbeat commits first, Firestore retries this transaction against
+     * the extended lease and the recovery is refused. A later claim assigns a
+     * fresh lease_id atomically, fencing the previous worker.
      *
-     * On success, the job is returned to QUEUED with a cleared lease.
-     * We do NOT assign a new worker here — that stays in claimNextJob so the
-     * claim is atomic with respect to other workers.
+     * On success, the job is returned to QUEUED with a cleared lease. We do
+     * NOT assign a new worker here — that stays in claimNextJob.
      */
     private async _recoverStaleJobTransaction(jobId: string): Promise<boolean> {
         const jobRef = adminDb.collection(this.collectionName).doc(jobId);
@@ -343,7 +333,7 @@ export class FirestoreQueue {
      * CANCELLED -> COMPLETED after a user cancel) are refused, never applied.
      * Returns true only if the transition was applied.
      */
-    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED', workerId?: string): Promise<boolean> {
+    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED', workerId?: string, leaseId?: string): Promise<boolean> {
         try {
             const jobRef = adminDb.collection(this.collectionName).doc(jobId);
             return await adminDb.runTransaction(async (transaction) => {
@@ -353,8 +343,12 @@ export class FirestoreQueue {
                     return false;
                 }
                 const data = doc.data();
-                if (workerId && data?.worker_id && data.worker_id !== workerId) {
-                    logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost ownership`, { job_id: jobId });
+                if (workerId && (
+                    !leaseId ||
+                    data?.worker_id !== workerId ||
+                    data?.lease_id !== leaseId
+                )) {
+                    logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost lease ownership`, { job_id: jobId });
                     return false;
                 }
                 const current = data?.status ?? 'QUEUED';
@@ -375,22 +369,31 @@ export class FirestoreQueue {
     }
 
     async getStats() {
+        const collection = adminDb.collection(this.collectionName);
         try {
-            const snap = await adminDb.collection(this.collectionName).get();
-            let queued = 0;
-            let running = 0;
-            let completed = 0;
-            let failed = 0;
-            snap.forEach(doc => {
-                const data = doc.data();
-                if (data.status === 'QUEUED') queued++;
-                else if (data.status === 'RUNNING') running++;
-                else if (data.status === 'COMPLETED') completed++;
-                else if (data.status === 'FAILED') failed++;
-            });
-            return { total: snap.size, queued, running, completed, failed };
+            // Read aggregate counts only. Readiness is polled frequently by
+            // the platform, so scanning every historical queue document here
+            // would create unbounded Firestore reads as the queue grows.
+            const [total, queued, running, completed, failed] = await Promise.all([
+                collection.count().get(),
+                collection.where('status', '==', 'QUEUED').count().get(),
+                collection.where('status', '==', 'RUNNING').count().get(),
+                collection.where('status', '==', 'COMPLETED').count().get(),
+                collection.where('status', '==', 'FAILED').count().get(),
+            ]);
+            return {
+                total: total.data().count,
+                queued: queued.data().count,
+                running: running.data().count,
+                completed: completed.data().count,
+                failed: failed.data().count,
+            };
         } catch (err) {
-            return { total: 0, queued: 0, running: 0, completed: 0, failed: 0 };
+            logger.error('queue.stats_failed', 'Could not read queue readiness statistics', {
+                status: (err as Error)?.message || String(err),
+            });
+            // Returning zeroes would falsely advertise a healthy, empty queue.
+            throw err;
         }
     }
 
