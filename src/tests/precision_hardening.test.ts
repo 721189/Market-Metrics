@@ -500,14 +500,53 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   if (currencylessSizing.tam_current !== null || currencylessSizing.currency !== null) {
     return { passed: false, message: 'Ambiguous dollar symbols must not be assumed to mean USD' };
   }
+
+  const mismatchedBaseYear = makeClaim('clm-tam-base-2025', 9, []);
+  mismatchedBaseYear.claim_type = 'MARKET_SIZE';
+  mismatchedBaseYear.verification_status = 'SUPPORTED';
+  mismatchedBaseYear.statement = 'The TAM was USD 100 million in 2025.';
+  const mismatchedCagr = makeClaim('clm-cagr-2024-2030', 10, []);
+  mismatchedCagr.claim_type = 'MARKET_GROWTH';
+  mismatchedCagr.verification_status = 'SUPPORTED';
+  mismatchedCagr.statement = 'The TAM CAGR was 10% from 2024 to 2030.';
+  const mismatchedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, mismatchedCagr]);
+  if (
+    mismatchedSizing.tam_current !== 100_000_000 ||
+    mismatchedSizing.tam_forecast !== null ||
+    mismatchedSizing.year_start !== 2025 ||
+    mismatchedSizing.year_end !== null ||
+    !mismatchedSizing.limitations.some(note => note.includes('CAGR period could not be matched'))
+  ) {
+    return { passed: false, message: 'A CAGR period beginning before the verified TAM baseline must not be applied to that baseline' };
+  }
+
+  const alignedCagr = makeClaim('clm-cagr-2025-2030', 11, []);
+  alignedCagr.claim_type = 'MARKET_GROWTH';
+  alignedCagr.verification_status = 'SUPPORTED';
+  alignedCagr.statement = 'The TAM CAGR was 10% from 2025 to 2030.';
+  const alignedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, alignedCagr]);
+  if (
+    alignedSizing.tam_forecast !== 161_051_000 ||
+    alignedSizing.year_start !== 2025 ||
+    alignedSizing.year_end !== 2030
+  ) {
+    return { passed: false, message: 'A CAGR may extrapolate a verified TAM only when its stated start year matches the TAM baseline year' };
+  }
+
   console.log('✔ Market sizing accepts only verified claims and explicit, unambiguous currency values.');
 
   const trustedGovernment = classifyDomainTier('https://www.sec.gov/reports');
   const trustedPublisher = classifyDomainTier('research.bloomberg.com');
   const lookalikePublisher = classifyDomainTier('bloomberg.com.attacker.example');
   const unknownPublisher = classifyDomainTier('unlisted-research.example');
+  const fakeGovernmentDomain = classifyDomainTier('reports.fake.gov.com');
+  const fakeAcademicDomain = classifyDomainTier('research.fake.edu.com');
+  const trustedUkGovernment = classifyDomainTier('department.gov.uk');
+  const trustedUkUniversity = classifyDomainTier('research.example.ac.uk');
   if (trustedGovernment.tier !== 'TIER_A' || trustedPublisher.tier !== 'TIER_B' ||
-      lookalikePublisher.reliability >= 70 || unknownPublisher.reliability >= 70) {
+      lookalikePublisher.reliability >= 70 || unknownPublisher.reliability >= 70 ||
+      fakeGovernmentDomain.tier === 'TIER_A' || fakeAcademicDomain.tier === 'TIER_A' ||
+      trustedUkGovernment.tier !== 'TIER_A' || trustedUkUniversity.tier !== 'TIER_A') {
     return { passed: false, message: 'Source credibility must use canonical host allowlists and keep unknown domains below the verification threshold' };
   }
   console.log('✔ Source credibility rejects lookalike domains and conservatively scores unknown publishers.');
