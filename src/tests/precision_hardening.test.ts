@@ -445,6 +445,11 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Currency formatting must preserve the explicit currency and never label EUR/GBP/unknown amounts as USD' };
   }
 
+  const tenPercentChurnScenarios = FinancialEngine.generateScenarios(1000, 1000, 80, 'USD', 100, 2.8, 10);
+  if (tenPercentChurnScenarios.scenario_base.ltv !== 8000) {
+    return { passed: false, message: 'Scenario base-case LTV must use the live churn assumption supplied by the calculator' };
+  }
+
   const invalidSizing = FinancialEngine.calculateMarketSizing({
     tam_current: 1000, tam_forecast: 1200, year_start: 2030, year_end: 2025,
     sam_share_pct: 40, som_share_pct: 10, currency: 'USD',
