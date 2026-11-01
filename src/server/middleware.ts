@@ -16,13 +16,14 @@ const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 type IdempotencyRecord = {
   state: 'IN_FLIGHT' | 'COMPLETED';
   request_hash: string;
+  lock_token?: string;
   status?: number;
   body?: any;
   expires_at_ms: number;
 };
 
 type IdempotencyDecision =
-  | { kind: 'claimed' }
+  | { kind: 'claimed'; lockToken: string }
   | { kind: 'replay'; status: number; body: any }
   | { kind: 'in_flight' }
   | { kind: 'conflict' };
@@ -50,6 +51,16 @@ function idempotencyRequestHash(method: string, path: string, body: any): string
     .digest('hex');
 }
 
+function timestampMillis(value: any): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  if (value && typeof value.toMillis === 'function') {
+    const millis = value.toMillis();
+    return Number.isFinite(millis) ? millis : null;
+  }
+  return null;
+}
+
 function sendIdempotencyError(
   res: Response,
   status: number,
@@ -70,6 +81,7 @@ function installIdempotencyResponse(
   options: {
     docKey: string;
     requestHash: string;
+    lockToken: string;
     storeKind: 'memory' | 'firestore';
     firestoreRef?: DocumentReference;
   },
@@ -86,9 +98,18 @@ function installIdempotencyResponse(
     const expiresAt = now + IDEMPOTENCY_RESPONSE_TTL_MS;
 
     if (options.storeKind === 'memory') {
+      const current = inMemoryIdempotencyCache.get(options.docKey);
+      if (!current || current.lock_token !== options.lockToken) {
+        return sendIdempotencyError(
+          res, 409, 'IDEMPOTENCY_LEASE_LOST',
+          'This request no longer owns the idempotency reservation. Retry with the same key.',
+          2,
+        );
+      }
       inMemoryIdempotencyCache.set(options.docKey, {
         state: 'COMPLETED',
         request_hash: options.requestHash,
+        lock_token: options.lockToken,
         status,
         body: body ?? null,
         expires_at_ms: expiresAt,
@@ -96,9 +117,8 @@ function installIdempotencyResponse(
       return originalJson(body);
     }
 
-    // The response is not sent until the replay record is durably committed.
-    // This closes the crash window where clients receive a job ID but a retry
-    // can create a second job because the idempotency result was not persisted.
+    // Do not let an expired handler overwrite a reservation acquired by a
+    // later retry. The unique lock token is the fencing value for this claim.
     void adminDb.runTransaction(async transaction => {
       const ref = options.firestoreRef!;
       const snapshot = await transaction.get(ref);
@@ -106,9 +126,10 @@ function installIdempotencyResponse(
       if (
         !snapshot.exists ||
         data?.state !== 'IN_FLIGHT' ||
-        data.request_hash !== options.requestHash
+        data.request_hash !== options.requestHash ||
+        data.lock_token !== options.lockToken
       ) {
-        throw new Error('Idempotency reservation was lost before response persistence.');
+        return false;
       }
       transaction.update(ref, {
         state: 'COMPLETED',
@@ -118,7 +139,16 @@ function installIdempotencyResponse(
         expires_at_ms: expiresAt,
         expires_at: new Date(expiresAt),
       });
-    }).then(() => {
+      return true;
+    }).then(committed => {
+      if (!committed) {
+        sendIdempotencyError(
+          res, 409, 'IDEMPOTENCY_LEASE_LOST',
+          'This request no longer owns the idempotency reservation. Retry with the same key.',
+          2,
+        );
+        return;
+      }
       originalJson(body);
     }).catch(err => {
       logger.error('idempotency.persist_failed', 'Could not durably record an idempotent response', {
@@ -162,7 +192,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   const path = String(req.originalUrl || req.path || '/').split('?')[0];
   const requestHash = idempotencyRequestHash(method, path, req.body ?? null);
   const docKey = crypto.createHash('sha256')
-    .update(userId + '|' + path + '|' + idempotencyKey)
+    .update(userId + '|' + method + '|' + path + '|' + idempotencyKey)
     .digest('hex');
 
   const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
@@ -173,6 +203,8 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
       'The configured idempotency store is not supported. Use memory or firestore.',
     );
   }
+
+  const lockToken = crypto.randomUUID();
 
   if (storeKind === 'memory') {
     const now = Date.now();
@@ -197,9 +229,12 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     inMemoryIdempotencyCache.set(docKey, {
       state: 'IN_FLIGHT',
       request_hash: requestHash,
+      lock_token: lockToken,
       expires_at_ms: now + IDEMPOTENCY_PENDING_TTL_MS,
     });
-    installIdempotencyResponse(req, res, next, { docKey, requestHash, storeKind: 'memory' });
+    installIdempotencyResponse(req, res, next, {
+      docKey, requestHash, lockToken, storeKind: 'memory',
+    });
     return;
   }
 
@@ -209,44 +244,60 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     const snapshot = await transaction.get(ref);
     if (snapshot.exists) {
       const data = snapshot.data() as (Partial<IdempotencyRecord> & {
-        createdAt?: { toMillis?: () => number };
+        created_at?: any;
+        createdAt?: any;
+        created_at_ms?: number;
+        responded_at?: any;
+        respondedAt?: any;
+        expires_at?: any;
       }) | undefined;
-      const expiresAt = typeof data?.expires_at_ms === 'number'
-        ? data.expires_at_ms
-        : Number.POSITIVE_INFINITY; // Legacy records fail closed and are never replayed unsafely.
-      const active = expiresAt > now;
 
-      if (active) {
+      const createdAt = timestampMillis(data?.created_at_ms) ??
+        timestampMillis(data?.created_at) ??
+        timestampMillis(data?.createdAt);
+      const respondedAt = timestampMillis(data?.responded_at) ??
+        timestampMillis(data?.respondedAt);
+      const explicitExpiry = timestampMillis(data?.expires_at_ms) ??
+        timestampMillis(data?.expires_at);
+
+      const completed = data?.state === 'COMPLETED' ||
+        (typeof data?.status === 'number' && data.body !== undefined);
+      const recordExpiry = explicitExpiry ??
+        (completed
+          ? (respondedAt ?? createdAt ?? 0) + IDEMPOTENCY_RESPONSE_TTL_MS
+          : (createdAt ?? 0) + IDEMPOTENCY_PENDING_TTL_MS);
+
+      if (recordExpiry > now) {
         if (data?.request_hash && data.request_hash !== requestHash) {
           return { kind: 'conflict' } as IdempotencyDecision;
         }
-        if (data?.state === 'COMPLETED' || (
-          typeof data?.status === 'number' && data.body !== undefined
-        )) {
+        if (completed) {
           return {
             kind: 'replay',
-            status: data.status ?? 200,
-            body: data.body,
+            status: data?.status ?? 200,
+            body: data?.body,
           } as IdempotencyDecision;
         }
         return { kind: 'in_flight' } as IdempotencyDecision;
       }
+      // Expired or legacy records without trustworthy timestamps may be
+      // reclaimed. A fresh unique token fences off the previous handler.
     }
 
-    const pendingExpiresAt = now + IDEMPOTENCY_PENDING_TTL_MS;
     transaction.set(ref, {
       state: 'IN_FLIGHT',
       request_hash: requestHash,
+      lock_token: lockToken,
       method,
       path,
       user_id: userId,
       key_hash: docKey,
       created_at: FieldValue.serverTimestamp(),
       created_at_ms: now,
-      expires_at_ms: pendingExpiresAt,
-      expires_at: new Date(pendingExpiresAt),
+      expires_at_ms: now + IDEMPOTENCY_PENDING_TTL_MS,
+      expires_at: new Date(now + IDEMPOTENCY_PENDING_TTL_MS),
     });
-    return { kind: 'claimed' } as IdempotencyDecision;
+    return { kind: 'claimed', lockToken } as IdempotencyDecision;
   }).then((decision: IdempotencyDecision) => {
     if (decision.kind === 'replay') {
       res.status(decision.status).json(decision.body);
@@ -270,6 +321,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     installIdempotencyResponse(req, res, next, {
       docKey,
       requestHash,
+      lockToken: decision.lockToken,
       storeKind: 'firestore',
       firestoreRef: ref,
     });
@@ -285,6 +337,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     );
   });
 }
+
 
 
 export function rateLimiterMiddleware(opts: { maxRequests?: number; windowSec?: number } = {}) {
