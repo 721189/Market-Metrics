@@ -199,10 +199,13 @@ export async function runApiAuthTest() {
     });
     let deleteNext = false;
     idempotencyMiddleware(deleteReq, deleteRes, () => { deleteNext = true; });
-    if (!deleteNext) {
-      throw new Error('Idempotency reservations must be scoped by HTTP method.');
+    if (
+      deleteNext ||
+      deleteRes.statusCode !== 409 ||
+      deleteRes.responseBody?.error?.code !== 'IDEMPOTENCY_KEY_REUSED'
+    ) {
+      throw new Error('Reusing a key with a different HTTP method must be rejected as a request conflict.');
     }
-    deleteRes.status(200).json({ deleted: true });
 
     // Reserve a key before route execution so simultaneous duplicate requests
     // cannot both enter the handler.
