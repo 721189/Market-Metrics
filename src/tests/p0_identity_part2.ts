@@ -109,14 +109,17 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
-    name: 'admin authorization verifies Firebase identity before checking admin role',
+    name: 'global admin guard verifies Firebase identity before checking admin role',
     fn: async () => {
       const server = readSource('server.ts');
+      const rateLimits = readSource('src/server/rate_limits.ts');
+      const coarseLimit = server.indexOf('app.use(rateLimiterMiddleware(');
+      const adminGuard = server.indexOf('app.use(adminPathBlocker())');
       const metricsStart = server.indexOf("app.get('/metrics'");
-      const metricsRoute = server.slice(metricsStart, metricsStart + 220);
-      return metricsStart >= 0 &&
-        metricsRoute.includes('authMiddleware, adminPathBlocker()') &&
-        !server.includes('app.use(adminPathBlocker())');
+      const metricsRoute = server.slice(metricsStart, metricsStart + 180);
+      return coarseLimit >= 0 && adminGuard > coarseLimit &&
+        metricsStart >= 0 && metricsRoute.includes('rateLimiterByCategory()') &&
+        rateLimits.includes('return authMiddleware(req, res, authorizeAdmin)');
     },
   },
   {
