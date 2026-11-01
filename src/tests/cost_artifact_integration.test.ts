@@ -6,7 +6,7 @@
  */
 
 import { CostGovernor } from '../server/cost_governor.js';
-import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from '../server/artifacts.js';
+import { InMemoryArtifactStorage, artifactRef, parseArtifactRef, RetrievalArtifact } from '../server/artifacts.js';
 import { logEnvelope } from '../server/rate_limits.js';
 import { RealDocumentFetcher } from '../server/fetcher.js';
 
@@ -63,6 +63,15 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
   await storage.delete('src-1', 'job-1');
   if (await storage.getRaw(ref) !== null) {
     return { passed: false, message: 'delete should remove the raw artifact' };
+  }
+
+  const parsedArtifactRef = parseArtifactRef(ref);
+  if (
+    parsedArtifactRef?.job_id !== 'job-1' ||
+    parsedArtifactRef?.source_id !== 'src-1' ||
+    parsedArtifactRef?.kind !== 'raw'
+  ) {
+    return { passed: false, message: 'Artifact references must preserve job_id and source_id path segments in their correct fields' };
   }
 
   // --- RetrievalArtifact shape ---
