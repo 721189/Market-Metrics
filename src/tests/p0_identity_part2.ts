@@ -346,6 +346,7 @@ export const p0IdentityStaticChecks: Check[] = [
         hasTtl;
     },
   },
+  {
     name: 'report cache refuses stale entries after parent job deletion or tombstoning',
     fn: async () => {
       const cache = readSource('src/server/cache.ts');
