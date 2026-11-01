@@ -1376,7 +1376,7 @@ export async function startWorker() {
         if (heartbeatInFlight) return; // never stack overlapping heartbeats
         heartbeatInFlight = true;
         try {
-          const hb = await researchQueue.heartbeat(job!.id, workerId);
+          const hb = await researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''));
           if (!hb.owned && hb.definitive) {
             // Lease ownership was definitively lost (expired and re-claimed by
             // another worker, or the job was cancelled): STOP this worker.
@@ -1406,7 +1406,7 @@ export async function startWorker() {
         } else if (!leaseOwned) {
           logger.info('queue.job_abandoned', `Job ${job.id} abandoned after lease loss; ownership transferred.`, { job_id: job.id });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId);
+          await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''));
         }
       } catch (err) {
         const rawFailure = err instanceof Error ? err.message : String(err || 'Unknown worker failure');
@@ -1421,7 +1421,7 @@ export async function startWorker() {
         } else if (controller.signal.aborted && cancellationRegistry.abortReason(researchJobId) === 'USER_CANCEL') {
           logger.info('queue.job_aborted', 'User cancellation preserved; research worker is stopping.', { job_id: researchJobId });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'FAILED', workerId);
+          await researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''));
           if (ownerUserId) {
             try {
               await ResearchPipelineManager.failJob(researchJobId, ownerUserId, err, String(pipelineJob.current_stage || 'PLANNING'));
