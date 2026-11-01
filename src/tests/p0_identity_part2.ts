@@ -136,7 +136,16 @@ export const p0IdentityStaticChecks: Check[] = [
     name: 'job and report repository reads reject missing owner metadata',
     fn: async () => {
       const db = readSource('src/server/db.ts');
-      return (db.match(/if \(data\.user_id !== userId\) return null;/g) || []).length === 2 &&
+      const getJobStart = db.indexOf('public static async getJob');
+      const getJobEnd = db.indexOf('public static async listJobs', getJobStart);
+      const getJob = db.slice(getJobStart, getJobEnd);
+      const getReportStart = db.indexOf('public static async getReport');
+      const getReportEnd = db.indexOf('public static async deleteJob', getReportStart);
+      const getReport = db.slice(getReportStart, getReportEnd);
+      return getJob.includes('data.user_id !== userId') &&
+        getJob.includes('data.deletion_requested_at') &&
+        getReport.includes('jobData?.user_id !== userId') &&
+        getReport.includes('jobData.deletion_requested_at') &&
         db.includes('!existing?.user_id || existing.user_id !== userId');
     },
   },
