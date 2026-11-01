@@ -89,6 +89,21 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
     return { passed: false, message: 'delete should remove the raw artifact' };
   }
 
+  // Job-scoped cleanup removes both artifact kinds for the selected job.
+  // Other jobs' files must remain untouched.
+  await storage.putRaw('src-2', 'job-2', 'https://example.test/src-2', 'text/plain', Buffer.from('other job'));
+  await storage.putNormalizedText('src-2', 'job-2', 'other normalized content');
+  await storage.putRaw('src-3', 'job-1', 'https://example.test/src-3', 'text/plain', Buffer.from('second source'));
+  await storage.deleteJob('job-1');
+  if (
+    await storage.getRaw(ref) !== null ||
+    await storage.getNormalizedText(textRef) !== null ||
+    await storage.getRaw(artifactRef('src-3', 'job-1', 'raw')) !== null ||
+    (await storage.getRaw(artifactRef('src-2', 'job-2', 'raw')))?.toString() !== 'other job'
+  ) {
+    return { passed: false, message: 'Job-scoped artifact cleanup must remove all artifacts for one job without touching another job' };
+  }
+
   const parsedArtifactRef = parseArtifactRef(ref);
   if (
     parsedArtifactRef?.job_id !== 'job-1' ||
