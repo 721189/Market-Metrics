@@ -353,6 +353,16 @@ export class FirestoreQueue {
         }
     }
 
+    /**
+     * Lightweight readiness probe: verify that the configured Firestore
+     * database is reachable without scanning/counting queue documents.
+     * The caller may invoke this every few seconds from the platform health
+     * check, so keep the query bounded to at most one document.
+     */
+    async checkReady(): Promise<void> {
+        await adminDb.collection(this.collectionName).limit(1).get();
+    }
+
     async getStats() {
         const collection = adminDb.collection(this.collectionName);
         try {
