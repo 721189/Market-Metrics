@@ -430,6 +430,48 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Fetch cancellation and timeout errors are distinguishable.');
 
+
+  // ===== 10. HTML ingestion regression tests =====
+  const htmlParagraphs = [
+    'The commercial market expanded steadily during the reporting period, with enterprise customers increasing their annual procurement budgets and prioritizing measurable operational efficiency improvements.',
+    'Independent industry participants reported that infrastructure investment accelerated across major metropolitan regions, while procurement teams evaluated reliability, lifecycle cost, and interoperability before selecting vendors.',
+    'The policy framework introduced additional compliance requirements for operators, including transparent reporting, periodic audits, and documented service-level commitments for critical infrastructure.',
+    'Market participants also noted that regional differences in grid capacity, financing availability, and local permitting continue to influence the pace of deployment.',
+  ];
+  const htmlFixture = `<!doctype html><html><head><title>Market Outlook 2026</title></head><body><main>${htmlParagraphs.map(p => `<p>${p}</p>`).join('')}</main></body></html>`;
+  const extractedHtml = RealDocumentFetcher.extractHtmlText(htmlFixture, 'https://example.com/report');
+  if (!extractedHtml || htmlParagraphs.some(p => !extractedHtml.includes(p))) {
+    return { passed: false, message: 'HTML extraction must preserve all substantial paragraphs in ordinary multi-paragraph pages' };
+  }
+  if (extractedHtml.indexOf(htmlParagraphs[0]) > extractedHtml.indexOf(htmlParagraphs[1])) {
+    return { passed: false, message: 'HTML extraction must preserve document order after paragraph selection' };
+  }
+
+  const oneParagraphHtml = `<html><body><article><p>${htmlParagraphs[0]}</p></article></body></html>`;
+  const oneParagraphText = RealDocumentFetcher.extractHtmlText(oneParagraphHtml, 'https://example.com/one');
+  if (!oneParagraphText || !oneParagraphText.includes(htmlParagraphs[0])) {
+    return { passed: false, message: 'HTML extraction must retain a single substantial paragraph' };
+  }
+
+  const tableHtml = '<html><body><table><tr><th>Year</th><th>Revenue</th></tr><tr><td>2024</td><td>₹120 crore</td></tr></table><p>' + htmlParagraphs[0] + '</p></body></html>';
+  const tableText = RealDocumentFetcher.extractHtmlText(tableHtml, 'https://example.com/table');
+  if (!tableText || !tableText.includes('Year') || !tableText.includes('Revenue') || !tableText.includes('₹120 crore')) {
+    return { passed: false, message: 'HTML extraction must retain readable table cell values' };
+  }
+
+  const metadataHtml = '<html><head><title>Verified Report Title</title><meta property="article:published_time" content="2025-04-03T10:00:00Z"></head><body><p>Content</p></body></html>';
+  if (RealDocumentFetcher.extractTitle(metadataHtml, 'https://example.com/fallback') !== 'Verified Report Title') {
+    return { passed: false, message: 'HTML title extraction must use the original document title' };
+  }
+  const publishedDate = RealDocumentFetcher.extractPublicationDate(metadataHtml, new Headers());
+  if (publishedDate !== '2025-04-03T10:00:00.000Z') {
+    return { passed: false, message: 'Publication date extraction must read explicit article metadata' };
+  }
+  if (RealDocumentFetcher.extractPublicationDate('<html><body>no publication date</body></html>', new Headers({ 'last-modified': 'Wed, 21 Oct 2015 07:28:00 GMT' })) !== null) {
+    return { passed: false, message: 'Last-Modified must not be misrepresented as a publication date' };
+  }
+  console.log('✔ HTML extraction preserves paragraphs, order, tables, titles, and verified publication metadata.');
+
   // ===== 10. Golden benchmark fixture must itself satisfy the citation graph =====
 
 
