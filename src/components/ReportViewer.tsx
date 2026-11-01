@@ -74,7 +74,11 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
   };
 
   const handleCopySummary = () => {
-    const content = `${report.title}\n\nExecutive Summary:\n${report.executive_summary}\n\nVerified Evidence Score: ${report.evidence_score_breakdown.overall_score}/100\nForecast TAM: ${FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency)} (${report.financial_models.cagr_pct}% CAGR)`;
+    const forecastSummary = report.financial_models.tam_forecast === null
+      ? 'Forecast TAM: Not established from verified claims'
+      : 'Forecast TAM: ' + FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency) +
+        ' (' + (report.financial_models.cagr_pct === null ? 'CAGR not established' : report.financial_models.cagr_pct + '% CAGR') + ')';
+    const content = `${report.title}\n\nExecutive Summary:\n${report.executive_summary}\n\nVerified Evidence Score: ${report.evidence_score_breakdown.overall_score}/100\n${forecastSummary}`;
     navigator.clipboard.writeText(content);
     setCopiedSummary(true);
     setTimeout(() => setCopiedSummary(false), 2000);
