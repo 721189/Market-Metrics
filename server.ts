@@ -271,7 +271,7 @@ async function startServer() {
   // authenticated request is charged to the shared anonymous bucket.
   app.use(rateLimiterByCategory());
 
-  app.post('/api/v1/research', async (req: Request, res: Response) => {
+  app.post('/api/v1/research', idempotencyMiddleware, async (req: Request, res: Response) => {
     try {
       const tenantId = getUserId(req);
       const { question, industry, geography, time_horizon, objectives, target_company, competitors, scope_depth } = req.body;
