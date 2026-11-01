@@ -43,7 +43,8 @@ let sharedCostStore: CostStore | null = null;
 
 function getCostStore(): CostStore {
   if (sharedCostStore) return sharedCostStore;
-  const kind = resolveStoreKind(process.env.COST_STORE, 'memory');
+  const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+  const kind = resolveStoreKind(process.env.COST_STORE, productionDefaults ? 'firestore' : 'memory');
   if (kind === 'redis') throwRedisNotProvisioned('CostGovernor');
   if (kind === 'firestore') {
     sharedCostStore = new FirestoreCostStore();
