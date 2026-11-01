@@ -74,6 +74,17 @@ services:
       - key: WORKER_MODE
         value: embedded
 
+      # Production state must survive restarts and be shared across replicas.
+      # These adapters use the Firebase project/database configured above.
+      - key: IDEMPOTENCY_STORE
+        value: firestore
+      - key: COST_STORE
+        value: firestore
+      - key: RATE_LIMIT_STORE
+        value: firestore
+      - key: CACHE_STORE
+        value: firestore
+
       # --- Client-side Firebase config (BUILD TIME — inlined by Vite) --------
       # These MUST match the same Firebase project as the server identifiers
       # above, otherwise the browser cannot verify ID tokens against the API.
