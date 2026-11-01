@@ -241,27 +241,35 @@ export class FinancialEngine {
    * Deterministic Compound Annual Growth Rate (CAGR)
    * Formula: (Ending Value / Starting Value) ^ (1 / Years) - 1
    */
-  public static calculateCAGR(startingValue: number, endingValue: number, years: number): number {
-    if (startingValue <= 0 || endingValue <= 0 || years <= 0) {
-      return 0;
+  public static calculateCAGR(startingValue: number, endingValue: number, years: number): number | null {
+    if (
+      !Number.isFinite(startingValue) || !Number.isFinite(endingValue) ||
+      !Number.isFinite(years) || startingValue <= 0 || endingValue <= 0 || years <= 0
+    ) {
+      return null;
     }
     const cagr = Math.pow(endingValue / startingValue, 1 / years) - 1;
-    if (isNaN(cagr) || !isFinite(cagr)) return 0;
-    return Math.round(cagr * 10000) / 100; // Returns percentage rounded to 2 decimal places e.g. 28.45%
+    if (!Number.isFinite(cagr)) return null;
+    return Math.round(cagr * 10000) / 100;
   }
 
   /**
    * Top-Down & Bottom-Up Sizing Model
    */
   public static calculateMarketSizing(inputs: SizingInputs) {
-    const years = Math.max(1, inputs.year_end - inputs.year_start);
-    const cagr_pct = this.calculateCAGR(inputs.tam_current, inputs.tam_forecast, years);
+    const years = Number.isFinite(inputs.year_start) && Number.isFinite(inputs.year_end) &&
+      inputs.year_end > inputs.year_start ? inputs.year_end - inputs.year_start : 0;
+    const tamBaseValid = Number.isFinite(inputs.tam_current) && inputs.tam_current > 0;
+    const tamForecastValid = Number.isFinite(inputs.tam_forecast) && inputs.tam_forecast > 0;
+    const cagr_pct = tamBaseValid && tamForecastValid && years > 0
+      ? this.calculateCAGR(inputs.tam_current, inputs.tam_forecast, years)
+      : null;
 
-    const safeSamPct = Math.min(100, Math.max(0, inputs.sam_share_pct));
-    const safeSomPct = Math.min(100, Math.max(0, inputs.som_share_pct));
+    const safeSamPct = Number.isFinite(inputs.sam_share_pct) ? Math.min(100, Math.max(0, inputs.sam_share_pct)) : 0;
+    const safeSomPct = Number.isFinite(inputs.som_share_pct) ? Math.min(100, Math.max(0, inputs.som_share_pct)) : 0;
 
-    const sam = Math.round((inputs.tam_current * safeSamPct) / 100);
-    const som = Math.round((sam * safeSomPct) / 100);
+    const sam = tamBaseValid ? Math.round((inputs.tam_current * safeSamPct) / 100) : null;
+    const som = sam === null ? null : Math.round((sam * safeSomPct) / 100);
 
     return {
       tam_current: inputs.tam_current,
@@ -278,11 +286,14 @@ export class FinancialEngine {
    * Bottom-up TAM builder: Target Customers * Annual Contract Value (ACV)
    */
   public static calculateBottomUpTAM(targetCustomerCount: number, acv: number, penetrationPct: number = 100) {
-    const rawTAM = Math.max(0, targetCustomerCount) * Math.max(0, acv);
-    const serviceable = (rawTAM * Math.min(100, Math.max(0, penetrationPct))) / 100;
+    const safeCustomerCount = Number.isFinite(targetCustomerCount) ? Math.max(0, targetCustomerCount) : 0;
+    const safeAcv = Number.isFinite(acv) ? Math.max(0, acv) : 0;
+    const safePenetration = Number.isFinite(penetrationPct) ? Math.min(100, Math.max(0, penetrationPct)) : 0;
+    const rawTAM = safeCustomerCount * safeAcv;
+    const serviceable = (rawTAM * safePenetration) / 100;
     return {
-      customer_count: targetCustomerCount,
-      acv,
+      customer_count: safeCustomerCount,
+      acv: safeAcv,
       bottom_up_tam: rawTAM,
       serviceable_market: serviceable,
     };
