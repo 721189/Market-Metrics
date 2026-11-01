@@ -309,6 +309,43 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'every Gemini provider call is cost-governed and uses token usage metadata',
+    fn: async () => {
+      const gemini = readSource('src/server/gemini.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const providerCalls = gemini.split('ai.models.generateContent({').length - 1;
+      const trackedCalls = gemini.split('generateWithCostTracking(').length - 1;
+      return providerCalls === 6 &&
+        trackedCalls === 7 &&
+        gemini.includes('response.usageMetadata') &&
+        gemini.includes('costGovernor.allowModelCall()') &&
+        gemini.includes('costGovernor.checkRequestBudget()') &&
+        gemini.includes('costGovernor.recordModelCall(') &&
+        gemini.includes('GEMINI_MODEL_PRICING_JSON') &&
+        pipeline.includes('signal: operationSignal,\\n        costGovernor,') &&
+        pipeline.includes('await costGovernor.recordJobCost(userId, job.id, costUsd, executionId)') &&
+        pipeline.includes('} finally {');
+    },
+  },
+  {
+    name: 'persistent spend settlement is idempotent per worker execution',
+    fn: async () => {
+      const stores = readSource('src/server/stores.ts');
+      const governor = readSource('src/server/cost_governor.ts');
+      const indexes = JSON.parse(readSource('firestore.indexes.json'));
+      const hasTtl = indexes.fieldOverrides?.some((field: any) =>
+        field.collectionGroup === 'cost_usage_events' &&
+        field.fieldPath === 'expires_at' &&
+        field.ttl === true
+      );
+      return stores.includes('recordOnce(idempotencyKey') &&
+        stores.includes("collection('cost_usage_events')") &&
+        stores.includes('tx.create(eventRef') &&
+        governor.includes('.recordOnce(eventKey, costUsd') &&
+        governor.includes("executionId: string = jobId") &&
+        hasTtl;
+    },
+  },
     name: 'report cache refuses stale entries after parent job deletion or tombstoning',
     fn: async () => {
       const cache = readSource('src/server/cache.ts');
