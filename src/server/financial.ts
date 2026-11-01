@@ -376,7 +376,7 @@ export class FinancialEngine {
   }
 
   /**
-   * Probabilistic Monte Carlo Summary (P10, P50, P90)
+   * Deterministic sensitivity envelope. This is not a statistical Monte Carlo.
    */
   public static calculateMonteCarloRange(tamBase: number, cagrBase: number, years: number = 5) {
     const p10Cagr = Math.max(5, cagrBase * 0.7);
@@ -401,7 +401,8 @@ export class FinancialEngine {
     baseArpu: number,
     baseCac: number,
     baseMargin: number,
-    currency: string = 'USD'
+    currency: string = 'USD',
+    baseCustomerCount: number = 0,
   ) {
     // Conservative
     const consEcon = this.calculateUnitEconomics({
@@ -431,11 +432,15 @@ export class FinancialEngine {
     });
 
     const sensitivityMatrix = this.generateSensitivityMatrix(baseArpu, baseCac, baseMargin);
+    const safeCustomerCount = Number.isFinite(baseCustomerCount) ? Math.max(0, Math.round(baseCustomerCount)) : 0;
+    const conservativeCustomers = Math.round(safeCustomerCount * 0.5);
+    const aggressiveCustomers = Math.round(safeCustomerCount * 1.5);
 
     return {
       currency,
       scenario_conservative: {
-        year_3_revenue: Math.round(consEcon.annual_gross_profit_per_user * 280),
+        year_3_revenue: Math.round(baseArpu * 0.85 * conservativeCustomers),
+        customer_count: conservativeCustomers,
         gross_margin_pct: Math.max(30, baseMargin - 6),
         break_even_month: Math.round(consEcon.payback_period_months * 1.8),
         cac: consEcon.cac,
@@ -444,7 +449,8 @@ export class FinancialEngine {
         payback_months: consEcon.payback_period_months,
       },
       scenario_base: {
-        year_3_revenue: Math.round(baseEcon.annual_gross_profit_per_user * 650),
+        year_3_revenue: Math.round(baseArpu * safeCustomerCount),
+        customer_count: safeCustomerCount,
         gross_margin_pct: baseMargin,
         break_even_month: Math.round(baseEcon.payback_period_months * 1.3),
         cac: baseEcon.cac,
@@ -453,7 +459,8 @@ export class FinancialEngine {
         payback_months: baseEcon.payback_period_months,
       },
       scenario_aggressive: {
-        year_3_revenue: Math.round(aggEcon.annual_gross_profit_per_user * 1400),
+        year_3_revenue: Math.round(baseArpu * 1.3 * aggressiveCustomers),
+        customer_count: aggressiveCustomers,
         gross_margin_pct: Math.min(92, baseMargin + 6),
         break_even_month: Math.round(aggEcon.payback_period_months * 0.9),
         cac: aggEcon.cac,
@@ -468,9 +475,10 @@ export class FinancialEngine {
   /**
    * Deterministic Currency Normalizer and Formatter
    */
-  public static formatCurrency(amount: number | null | undefined, currency: string = 'USD'): string {
+  public static formatCurrency(amount: number | null | undefined, currency: string | null = 'USD'): string {
     if (amount === null || amount === undefined) return 'Not established';
     if (!Number.isFinite(amount)) return 'Not available';
+    if (!currency) return amount.toLocaleString() + ' (currency not established)';
     const abs = Math.abs(amount);
     const sign = amount < 0 ? '-' : '';
 
