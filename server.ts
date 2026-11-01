@@ -188,13 +188,8 @@ async function startServer() {
 
   // Global Security & Optimization Middleware
   
-  // Server-side administrative path lockdown (must precede any route handlers).
-  app.use(adminPathBlocker());
-
-  // Identity-aware rate limiting by IP + Firebase UID + endpoint category.
-  app.use(rateLimiterByCategory());
-
-  // Coarse global safety rate limit (kept as a backstop; category limits above are the real control).
+  // Coarse IP safety limit applies before authentication as a backstop.
+  // Identity-aware category limits are mounted only after auth has populated UID.
   app.use(rateLimiterMiddleware({ maxRequests: 300, windowSec: 60 }));
 
   // -------------------------------------------------------------
@@ -231,7 +226,7 @@ async function startServer() {
   // that is not an authenticated admin, so this handler is reachable only by an
   // authorized operator. Front-end visibility is irrelevant — the authorization
   // decision is made server-side, on every request.
-  app.get('/metrics', (req: Request, res: Response) => {
+  app.get('/metrics', authMiddleware, adminPathBlocker(), rateLimiterByCategory(), (req: Request, res: Response) => {
     const snapshot = observabilitySnapshot();
     res.status(200).json({
       ...snapshot,
@@ -273,6 +268,10 @@ async function startServer() {
   // (/health, /ready, /metrics-behind-admin, /api/v1/benchmarks) stay outside.
   app.use('/api/v1/research', authMiddleware);
   app.use('/api/v1/user', authMiddleware);
+
+  // Run identity-aware budgets after Firebase verification. Otherwise every
+  // authenticated request is charged to the shared anonymous bucket.
+  app.use(rateLimiterByCategory());
 
   app.post('/api/v1/research', async (req: Request, res: Response) => {
     try {
