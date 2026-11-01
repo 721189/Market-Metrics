@@ -218,7 +218,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
               {economics.net_revenue_retention_pct === null ? 'Requires expansion input' : economics.net_revenue_retention_pct + '%'}
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 block mt-1">Estimated annual retention</span>
+          <span className="text-[10px] text-slate-400 block mt-1">Requires measured expansion rate</span>
         </div>
 
         <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
@@ -322,7 +322,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
             </div>
             <div className="space-y-1.5 text-xs">
               <div className="flex justify-between">
-                <span className="text-slate-400">3-Year Revenue:</span>
+                <span className="text-slate-400">Year-3 Annual Revenue:</span>
                 <span className="font-mono font-bold text-emerald-400">{formatCurr(scenarios.scenario_aggressive.year_3_revenue)}</span>
               </div>
               <div className="flex justify-between">
