@@ -37,7 +37,7 @@ import type {
   MarketMetric,
   FinancialOutputs,
 } from '../types.js';
-import { FinancialEngine } from './financial.js';
+import { FinancialEngine, extractVerifiedMarketSizing } from './financial.js';
 import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext } from './gemini.js';
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
@@ -963,7 +963,7 @@ export class ResearchPipelineManager {
     // Financial outputs are derived only from claims that passed the full
     // evidence verifier. No LLM-only TAM/CAGR extraction or hardcoded SaaS
     // economics are allowed to populate a research report.
-    const sizing = FinancialEngine.extractVerifiedMarketSizing(publishableClaims);
+    const sizing = extractVerifiedMarketSizing(publishableClaims);
     const currency = sizing.currency || 'Not established';
     const isIndia = sizing.currency === 'INR';
 
