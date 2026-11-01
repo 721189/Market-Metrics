@@ -684,6 +684,7 @@ export class RealDocumentFetcher {
   }
 
   public static async extractPdfText(body: Buffer): Promise<string> {
+    let parserFailure = '';
     try {
       const pdfModule = require('pdf-parse');
       const PDFParse = pdfModule?.PDFParse || pdfModule?.default?.PDFParse;
@@ -705,9 +706,8 @@ export class RealDocumentFetcher {
         return this.normalizeText(result?.text || '');
       }
     } catch (error) {
-      logger.warn('fetcher.pdf_parse_failed', 'Installed pdf-parse API could not parse document', {
-        reason: error instanceof Error ? error.message : String(error),
-      });
+      parserFailure = error instanceof Error ? error.message : String(error);
+      logger.warn('fetcher.pdf_parse_failed', 'Installed pdf-parse API could not parse document', { reason: parserFailure });
     }
     try {
       const pdfjs = require('pdfjs-dist');
@@ -719,8 +719,11 @@ export class RealDocumentFetcher {
         }));
         return this.normalizeText(pages.join('\n\n'));
       }
-    } catch { /* not available */ }
-    throw new Error('No PDF parser available (install pdf-parse or pdfjs-dist)');
+    } catch (error) {
+      const fallbackFailure = error instanceof Error ? error.message : String(error);
+      parserFailure = parserFailure ? parserFailure + '; pdfjs-dist fallback: ' + fallbackFailure : fallbackFailure;
+    }
+    throw new Error('PDF extraction failed. Install a compatible pdf-parse parser. ' + parserFailure);
   }
 
 
