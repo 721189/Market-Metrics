@@ -45,7 +45,7 @@ import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer, ContradictionEngine } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
-import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
+import { InMemoryArtifactStorage, createArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
 import { logEnvelope } from './rate_limits.js';
@@ -374,15 +374,11 @@ export class ResearchPipelineManager {
   ): Promise<'deleted' | 'not_found' | 'not_terminal'> {
     if (!userId) throw new Error('userId is required for deleteJob');
     const cleanupArtifacts = async () => {
-      try {
-        const storage = new FirestoreArtifactStorage();
-        await storage.deleteJob(jobId);
-      } catch (err) {
-        // In local/dev mode the pipeline uses process-local memory artifacts;
-        // there is no durable bucket to clean up.
-        if (err instanceof Error && err.message.includes('storageBucket is not configured')) return;
-        throw err;
-      }
+      // Resolve the same environment-specific backend as the research pipeline.
+      // Staging/production fail closed if Cloud Storage is unavailable; local
+      // development gets a harmless in-memory cleanup adapter.
+      const storage = createArtifactStorage();
+      await storage.deleteJob(jobId);
     };
     const job = await DatabaseRepository.getJob(jobId, userId);
     if (!job) {
@@ -499,12 +495,9 @@ export class ResearchPipelineManager {
     const userId = (job as any).user_id || 'unknown';
     const requestId = (job as any).request_id || `req-${job.id}`;
     const costGovernor = new CostGovernor({ userId });
-    let artifactStorage: import('./artifacts.js').ArtifactStorage;
-    try {
-      artifactStorage = new FirestoreArtifactStorage();
-    } catch {
-      artifactStorage = new InMemoryArtifactStorage();
-      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+    const artifactStorage = createArtifactStorage();
+    if (artifactStorage instanceof InMemoryArtifactStorage) {
+      logger.warn('pipeline.artifact_fallback', 'Using in-memory artifact storage outside staging/production', {});
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
