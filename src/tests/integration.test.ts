@@ -29,6 +29,7 @@ import { runDeployLayerTest } from './deploy_layer_part3.js';
 import { runBenchmarkCorpusTest } from './benchmark.test.js';
 import { runE2ETest } from './e2e.test.js';
 import { runDeploymentLoadTest } from './load.test.js';
+import { runFinancialRegressionTests } from './financial_regression.test.js';
 
 interface TestResult {
   name: string;
@@ -80,6 +81,7 @@ export async function runAllTests() {
     { name: 'Concurrency & Fault-Injection Test (P1)', fn: runConcurrencyTest },
     { name: 'Deploy-Layer Test (CORS, stores, budgets, cache)', fn: runDeployLayerTest },
     { name: 'Deterministic Benchmark Corpus (P1)', fn: runBenchmarkCorpusTest },
+    { name: 'Financial extraction & unit economics regression (P1)', fn: runFinancialRegressionTests },
     { name: '8. Precision Hardening Suite (P0)', fn: runPrecisionHardeningTest },
     { name: 'Observability: spans, metrics persistence, alerts', fn: async () => {
       for (const check of observabilityChecks) {
