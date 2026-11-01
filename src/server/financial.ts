@@ -376,25 +376,6 @@ export class FinancialEngine {
   }
 
   /**
-   * Deterministic sensitivity envelope. This is not a statistical Monte Carlo.
-   */
-  public static calculateMonteCarloRange(tamBase: number, cagrBase: number, years: number = 5) {
-    const p10Cagr = Math.max(5, cagrBase * 0.7);
-    const p50Cagr = cagrBase;
-    const p90Cagr = cagrBase * 1.35;
-
-    const p10Forecast = Math.round(tamBase * Math.pow(1 + p10Cagr / 100, years));
-    const p50Forecast = Math.round(tamBase * Math.pow(1 + p50Cagr / 100, years));
-    const p90Forecast = Math.round(tamBase * Math.pow(1 + p90Cagr / 100, years));
-
-    return {
-      p10: { cagr: Math.round(p10Cagr * 10) / 10, forecast_tam: p10Forecast },
-      p50: { cagr: Math.round(p50Cagr * 10) / 10, forecast_tam: p50Forecast },
-      p90: { cagr: Math.round(p90Cagr * 10) / 10, forecast_tam: p90Forecast },
-    };
-  }
-
-  /**
    * 3-Tier Financial Scenario Generator
    */
   public static generateScenarios(
