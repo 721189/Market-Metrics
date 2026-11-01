@@ -666,9 +666,30 @@ export class RealDocumentFetcher {
 
   private static async extractPdfText(body: Buffer): Promise<string> {
     try {
-      const pdfParse = require('pdf-parse');
-      if (typeof pdfParse === 'function') { const data = await pdfParse(body); return this.normalizeText(data.text || ''); }
-    } catch { /* not available */ }
+      const pdfModule = require('pdf-parse');
+      const PDFParse = pdfModule?.PDFParse || pdfModule?.default?.PDFParse;
+      if (typeof PDFParse === 'function') {
+        // pdf-parse v2 exposes a stateful parser class, not the v1 callable
+        // function. Always destroy parser resources after text extraction.
+        const parser = new PDFParse({ data: new Uint8Array(body) });
+        try {
+          const result = await parser.getText();
+          return this.normalizeText(result?.text || '');
+        } finally {
+          await parser.destroy();
+        }
+      }
+
+      // Compatibility path for installations still exposing the v1 function.
+      if (typeof pdfModule === 'function') {
+        const result = await pdfModule(body);
+        return this.normalizeText(result?.text || '');
+      }
+    } catch (error) {
+      logger.warn('fetcher.pdf_parse_failed', 'Installed pdf-parse API could not parse document', {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
     try {
       const pdfjs = require('pdfjs-dist');
       if (typeof pdfjs !== 'undefined' && typeof pdfjs.getDocument === 'function') {
