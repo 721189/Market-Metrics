@@ -104,6 +104,12 @@ const NON_RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
   [/malformed|invalid JSON|JSON parse|unexpected token/i, 'malformed_model_output'],
 ];
 
+// A quota/billing exhaustion response is not a transient rate-limit response.
+ // Retrying it immediately only burns another request and delays an actionable error.
+const NON_RETRYABLE_QUOTA_PATTERNS: Array<[RegExp, string]> = [
+  [/exceeded your current quota|quota (?:has been )?exceeded|check your plan and billing|daily quota exhausted|quota limit exceeded/i, 'quota_exhausted'],
+];
+
 const RETRYABLE_PATTERNS: Array<[RegExp, string]> = [
   [/resource[_ ]?exhausted|RESOURCE_EXHAUSTED|429|rate limit/i, 'rate_limited'],
   [/aborted|ABORTED|contention/i, 'contention'],
@@ -124,6 +130,9 @@ export function classifyProviderError(err: any): RetryClassification {
   // Explicit non-retryable signals win: a 401 that also mentions "unavailable"
   // must not be retried.
   for (const [pattern, reason] of NON_RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) return { retryable: false, reason };
+  }
+  for (const [pattern, reason] of NON_RETRYABLE_QUOTA_PATTERNS) {
     if (pattern.test(message)) return { retryable: false, reason };
   }
   for (const [pattern, reason] of RETRYABLE_PATTERNS) {
