@@ -580,5 +580,4 @@ export class FinancialEngine {
     }
     return sign + symbol + abs.toLocaleString('en-US');
   }
-  }
 }
