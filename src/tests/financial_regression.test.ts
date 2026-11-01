@@ -94,6 +94,15 @@ export async function runFinancialRegressionTests(): Promise<boolean> {
   assert(missingOperatingInputs.net_revenue_retention_pct === null, 'NRR must remain unavailable without expansion');
   assert(missingOperatingInputs.rule_of_40_score === null, 'Rule of 40 must remain unavailable without both inputs');
 
+  const invalidCac = FinancialEngine.calculateUnitEconomics({
+    arpu_annual: 1200,
+    gross_margin_pct: 75,
+    annual_churn_rate_pct: 10,
+    cac: -300,
+    sales_cycle_months: 4,
+  });
+  assert(invalidCac.cac === 0, 'reported CAC must match the normalized value used by calculations');
+
   const sensitivity = FinancialEngine.generateSensitivityMatrix(1200, 0, 75);
   assert(sensitivity.length === 3 && sensitivity.every(row => row.length === 3), 'sensitivity matrix dimensions');
   assert(sensitivity.every(row => row.every(cell => cell.ltv_to_cac === null)), 'zero CAC must remain an undefined ratio throughout sensitivity output');
