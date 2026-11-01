@@ -234,6 +234,44 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'queue readiness uses aggregate counts and fails closed when Firestore is unavailable',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const server = readSource('server.ts');
+      const statsStart = queue.indexOf('async getStats()');
+      const statsEnd = queue.indexOf('async getJobPosition', statsStart);
+      const stats = queue.slice(statsStart, statsEnd);
+      const readyStart = server.indexOf("app.get('/ready'");
+      const readyEnd = server.indexOf('// OPERATIONAL METRICS', readyStart);
+      const ready = server.slice(readyStart, readyEnd);
+      return stats.includes('collection.count().get()') &&
+        stats.includes("collection.where('status', '==', 'QUEUED').count().get()") &&
+        !stats.includes('collection.get()') &&
+        ready.includes('researchQueue.getStats()') &&
+        ready.includes('res.status(503)');
+    },
+  },
+  {
+    name: 'stale queue recovery is expiry-indexed and scans beyond healthy running jobs',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const indexConfig = JSON.parse(readSource('firestore.indexes.json'));
+      const start = queue.indexOf('async recoverStaleJobs()');
+      const end = queue.indexOf('private async _recoverStaleJobTransaction', start);
+      const recovery = queue.slice(start, end);
+      const hasIndex = indexConfig.indexes.some((index: any) =>
+        index.collectionGroup === 'job_queue' &&
+        index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
+        index.fields?.some((field: any) => field.fieldPath === 'leased_until' && field.order === 'ASCENDING')
+      );
+      return recovery.includes(".where('status', '==', 'RUNNING')") &&
+        recovery.includes(".where('leased_until', '<=', Timestamp.fromMillis(now))") &&
+        recovery.includes(".orderBy('leased_until', 'asc')") &&
+        recovery.includes('.limit(100)') &&
+        hasIndex;
+    },
+  },
+  {
     name: 'report cache refuses stale entries after parent job deletion or tombstoning',
     fn: async () => {
       const cache = readSource('src/server/cache.ts');
