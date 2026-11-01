@@ -81,13 +81,28 @@ function readAppletConfig(): Record<string, any> | null {
   }
 }
 
-/** Resolve the environment name. An unknown/missing value is never production. */
+/** Parse one explicit environment label; unknown labels must never downgrade to development. */
+function parseEnvironmentLabel(raw: string, source: 'APP_ENV' | 'NODE_ENV'): EnvironmentName | null {
+  const value = raw.trim().toLowerCase();
+  if (!value) return null;
+  if (value === 'production' || value === 'prod') return 'production';
+  if (value === 'staging' || value === 'stage') return 'staging';
+  if (value === 'development' || value === 'dev') return 'development';
+  if (value === 'test') return 'test';
+  throw new EnvironmentIsolationError(`Unknown ${source} value "${raw}". Use development, staging, production, or test.`);
+}
+
+/**
+ * Resolve environment labels without precedence-based downgrades. If both
+ * APP_ENV and NODE_ENV are set they must describe the same environment.
+ */
 export function resolveEnvironmentName(env: NodeJS.ProcessEnv = process.env): EnvironmentName {
-  const raw = (env.APP_ENV || env.NODE_ENV || '').trim().toLowerCase();
-  if (raw === 'production' || raw === 'prod') return 'production';
-  if (raw === 'staging' || raw === 'stage') return 'staging';
-  if (raw === 'test') return 'test';
-  return 'development';
+  const appEnv = parseEnvironmentLabel(env.APP_ENV || '', 'APP_ENV');
+  const nodeEnv = parseEnvironmentLabel(env.NODE_ENV || '', 'NODE_ENV');
+  if (appEnv && nodeEnv && appEnv !== nodeEnv) {
+    throw new EnvironmentIsolationError(`APP_ENV (${appEnv}) conflicts with NODE_ENV (${nodeEnv}).`);
+  }
+  return appEnv || nodeEnv || 'development';
 }
 
 /**
@@ -121,7 +136,7 @@ export function loadEnvironmentConfig(
     // GEMINI_CREDENTIAL_SOURCE is descriptive metadata, not a credential.
     geminiCredentialSource: env.GEMINI_API_KEY?.trim() ? 'env:GEMINI_API_KEY' : 'unset',
     logLevel: (name === 'development' || name === 'test' ? 'debug' : 'info') as LogLevel,
-    allowViteDevServer: name !== 'production',
+    allowViteDevServer: name === 'development' || name === 'test',
   };
 }
 
@@ -130,7 +145,7 @@ export function loadEnvironmentConfig(
  * callers and tests can inspect them; `validateEnvironmentOrThrow` converts a
  * non-empty list into a hard boot failure.
  */
-export function findEnvironmentViolations(cfg: EnvironmentConfig): string[] {
+export function findEnvironmentViolations(cfg: EnvironmentConfig, env: NodeJS.ProcessEnv = process.env): string[] {
   const violations: string[] = [];
 
   for (const field of REQUIRED_FIELDS) {
@@ -139,18 +154,16 @@ export function findEnvironmentViolations(cfg: EnvironmentConfig): string[] {
     }
   }
 
-  // Allowed for standalone deploy if explicit
-  // if (cfg.name === 'production' || cfg.name === 'staging') {
-  //   if (cfg.projectId === APPLET_DEV_PROJECT_ID) {
-  //     violations.push(
-  //       `[${cfg.name}] refuses to bind the AI Studio applet (development) project `
-  //       + `'${APPLET_DEV_PROJECT_ID}'. Provision a separate Firebase project for ${cfg.name}.`,
-  //     );
-  //   }
-  // }
+  // The AI Studio applet is a development-only resource. Production and
+  // staging must never bind it, even when identifiers are explicitly supplied.
+  if ((cfg.name === 'production' || cfg.name === 'staging') && cfg.projectId === APPLET_DEV_PROJECT_ID) {
+    violations.push(
+      `[${cfg.name}] refuses to bind the AI Studio applet (development) project '${APPLET_DEV_PROJECT_ID}'.`,
+    );
+  }
 
   // A non-production environment must never point at production resources.
-  const productionProjectId = (process.env.PRODUCTION_PROJECT_ID || '').trim();
+  const productionProjectId = (env.PRODUCTION_PROJECT_ID || '').trim();
   if (cfg.name !== 'production' && productionProjectId && cfg.projectId === productionProjectId) {
     violations.push(
       `[${cfg.name}] must not bind the production project '${productionProjectId}'. `
@@ -178,7 +191,7 @@ export function validateEnvironmentOrThrow(
   env: NodeJS.ProcessEnv = process.env,
 ): EnvironmentConfig {
   const cfg = loadEnvironmentConfig(env);
-  const violations = findEnvironmentViolations(cfg);
+  const violations = findEnvironmentViolations(cfg, env);
   if (violations.length > 0) {
     throw new EnvironmentIsolationError(
       `Environment isolation check failed for '${cfg.name}':\n  - ${violations.join('\n  - ')}`,
