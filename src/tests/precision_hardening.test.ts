@@ -483,6 +483,15 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   if (forecastOnlySizing.data_status !== 'SOURCE_BACKED' || forecastOnlySizing.tam_forecast !== 4_000_000_000 || forecastOnlySizing.tam_current !== null || forecastOnlySizing.year_start !== null || forecastOnlySizing.year_end !== 2030) {
     return { passed: false, message: 'A verified forecast-only market value must remain source-backed without inventing a base value' };
   }
+  const ambiguousTamClaim = makeClaim('clm-tam-ambiguous', 8, []);
+  ambiguousTamClaim.claim_type = 'MARKET_SIZE';
+  ambiguousTamClaim.verification_status = 'SUPPORTED';
+  ambiguousTamClaim.statement = 'The TAM includes USD 8 billion for enterprise and USD 4 billion for small business.';
+  const ambiguousTam = extractVerifiedMarketSizing([ambiguousTamClaim]);
+  if (ambiguousTam.tam_current !== null || ambiguousTam.tam_forecast !== null ||
+      !ambiguousTam.limitations.some(note => note.includes('ambiguous base-to-forecast'))) {
+    return { passed: false, message: 'Multiple market amounts without an explicit base-to-forecast relationship must not be misclassified as TAM and forecast' };
+  }
   const currencylessClaim = makeClaim('clm-currencyless', 6, []);
   currencylessClaim.claim_type = 'MARKET_SIZE';
   currencylessClaim.verification_status = 'SUPPORTED';
