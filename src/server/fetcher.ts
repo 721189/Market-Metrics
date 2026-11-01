@@ -571,7 +571,7 @@ export class RealDocumentFetcher {
         .replace(/[ \t]+/g, ' ')
         .replace(/\s*\n\s*/g, ' ')
         .trim())
-      .filter((paragraph: string) => paragraph.length > 50);
+      .filter((paragraph: string) => paragraph.length > 50 || (paragraph.includes('\t') && paragraph.length > 3));
 
     if (paragraphs.length === 0) {
       const fallback = text.replace(/\s+/g, ' ').trim();
