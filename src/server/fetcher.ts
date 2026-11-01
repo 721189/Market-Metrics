@@ -359,7 +359,7 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractPublisher(html: string, url: string): string {
+  public static extractPublisher(html: string, url: string): string {
     const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
     for (const tag of metaTags) {
       const key = tag.match(/(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
