@@ -34,6 +34,20 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
     return { passed: false, message: 'allowFetch should reject after maxSources exhausted' };
   }
 
+  // Retry budget is measured in retry attempts, never model output tokens.
+  const retryGov = new CostGovernor({ maxRetries: 3 });
+  retryGov.recordModelCall(100, 10000, 0.01);
+  if (
+    retryGov.allowRetry(0) !== null ||
+    retryGov.allowRetry(1) !== null ||
+    retryGov.allowRetry(2) !== null ||
+    retryGov.allowRetry(3) !== 'Retry cap exceeded: 3 retries per operation' ||
+    retryGov.allowRetry(-1) !== 'Retry count must be a non-negative integer' ||
+    retryGov.allowRetry(1.5) !== 'Retry count must be a non-negative integer'
+  ) {
+    return { passed: false, message: 'allowRetry must enforce the retry-attempt count independently of output tokens' };
+  }
+
   // --- Cost governor: budget enforcement ---
   const budgetGov = new CostGovernor({ requestBudgetUsd: 0.05 });
   budgetGov.recordFetch(100, 0.02);
