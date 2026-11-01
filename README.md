@@ -92,7 +92,7 @@ flowchart TB
 
     subgraph Persistence["Persistence"]
         FS[("Firestore<br/>jobs · events · sources<br/>evidence · claims · reports")]
-        ART["Artifact storage<br/>raw bytes + normalized text<br/>(interface; in-memory now)"]
+        ART["Artifact storage<br/>Cloud Storage in staging/production<br/>memory fallback only in local dev/test"]
     end
 
     UI -->|Bearer token + JSON| MW
@@ -274,7 +274,7 @@ stateDiagram-v2
 | `worker_id` | Identifies the lease holder |
 | `lease_id` | Unique per acquisition — proves *this* claim, not a previous one |
 | `lease_version` | Monotonic counter; incremented on every heartbeat |
-| Heartbeat | Transactional; extends **only** if `status === RUNNING && worker_id === workerId` |
+| Heartbeat | Transactional; extends **only** if `status === RUNNING && worker_id === workerId && lease_id === leaseId` |
 | Completion / failure | Transactional; verifies both ownership *and* the state machine |
 | `recoverStaleJobs` | Re-reads and re-verifies at recovery time — it never blind-assigns from a stale snapshot |
 | **Lost lease** | The worker aborts at its next checkpoint and stops. It does **not** write results — the new owner owns them |
@@ -491,13 +491,11 @@ Keys are date-partitioned (`cost:daily:{uid}:{yyyy-mm-dd}`, `cost:monthly:{uid}:
 
 | `COST_STORE` | Behaviour |
 |---|---|
-| `memory` | Default. Correct for a single replica |
-| `firestore` | Selected but **not yet wired** → fails closed with an explicit error |
-| `redis` | Not provisioned → fails closed with an explicit error |
+| `memory` | Local development/tests; in-process only |
+| `firestore` | Implemented with transactional per-user/month/day buckets; production default and explicit Render setting |
+| `redis` | Not provisioned → selecting it fails explicitly |
 
-**Refusing to degrade silently is the feature.** A store that cannot actually enforce a budget
-crashes loudly at boot instead of quietly under-counting spend. Every denial returns a reason
-string, so a blocked call is explained rather than mysterious.
+**Refusing to degrade silently is the feature.** Production cost checks fail closed when the Firestore store cannot be read: a new research job is rejected rather than being admitted with unknown spend. Each denial returns a reason string, so a blocked call is explained rather than mysterious.
 
 ---
 
@@ -591,11 +589,7 @@ flowchart TB
 the frontend origin via `FRONTEND_ORIGIN` (comma-separated allowlist). Empty in development
 reflects localhost origins; **staging and production must set it explicitly**.
 
-**Single replica today, multi-replica ready.** `RATE_LIMIT_STORE`, `COST_STORE` and `CACHE_STORE`
-default to `memory`, which is correct for one replica. The store interfaces exist so that scaling
-out means implementing a `Redis*` / `Firestore*` store behind the same interface — **no
-middleware or route changes**. `docker-compose.yml` deliberately omits Redis for the same reason:
-it is not needed yet, and it will be added when replica count justifies it.
+**Current Render topology: one web service with an embedded queue worker.** Production selects Firestore for idempotency, cost accounting, category rate limits and report caching; raw/normalized source artifacts use Firebase Cloud Storage. Local development and tests default to in-memory adapters. Firestore-backed stores and transactional leases allow multiple application/worker replicas, although Render currently configures the worker inside the web service (`WORKER_MODE=embedded`). Redis is deliberately not provisioned.
 
 ---
 
@@ -675,8 +669,8 @@ for infrastructure that does not exist; the production gate stays strictly fail-
 | `ADMIN_UIDS` | `""` | recommended | Comma-separated Firebase UIDs allowed to touch admin paths. **Empty = nobody** |
 | `LOG_LEVEL` | `debug` (dev) / `info` (prod) | — | `debug` \| `info` \| `warn` \| `error` |
 | `RATE_LIMIT_STORE` | `memory` | — | `memory` \| `firestore` \| `redis` (last two fail closed today) |
-| `COST_STORE` | `memory` | — | Same selector semantics as above |
-| `CACHE_STORE` | `memory` | — | Same selector semantics as above |
+| `COST_STORE` | `memory` locally; `firestore` in production | — | Persistent user/global spend buckets |
+| `CACHE_STORE` | `memory` locally; `firestore` in production | — | Tenant-keyed report cache |
 | `APP_URL` | — | — | Public URL of the deployment, used for self-referential links |
 | `PORT` | `3000` | — | Injected by Railway at runtime; the default keeps local `docker run` working |
 
@@ -688,7 +682,7 @@ so editing the variable and redeploying takes effect immediately.
 
 ### Production persistence defaults
 
-When `NODE_ENV=production` or `APP_ENV=production`, idempotency, cost accounting, category rate limits, and report caching default to Firestore unless a store is explicitly overridden. The Render Blueprint sets all four selectors to `firestore`, so these guarantees survive restarts and work across replicas. Local development and tests default to in-memory stores.
+When `NODE_ENV=production` or `APP_ENV=production`, idempotency, cost accounting, category rate limits, and report caching default to Firestore unless explicitly overridden. The Render Blueprint sets all four selectors to `firestore`. Raw and normalized artifacts use Firebase Cloud Storage through `FirestoreArtifactStorage`; staging/production reject an unavailable bucket instead of falling back to process memory. Local development and tests may use in-memory adapters.
 
 ## 16. API Reference
 
@@ -696,8 +690,8 @@ When `NODE_ENV=production` or `APP_ENV=production`, idempotency, cost accounting
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness: status, uptime, heap usage. Unauthenticated **by design** — the container healthcheck depends on it |
-| `GET` | `/ready` | Readiness: `gemini_configured`, environment, persisted job count, queue stats, version |
+| `GET` | `/health` | Liveness only: process status, uptime and heap usage. Unauthenticated by design |
+| `GET` | `/ready` | Readiness: verifies Firestore with one bounded read and confirms Gemini is configured. Render probes this endpoint |
 | `GET` | `/api/v1/benchmarks` | List benchmark datasets (id, title, industry, geography) |
 | `GET` | `/api/v1/benchmarks/:id` | One dataset. `404 BENCHMARK_NOT_FOUND` when absent |
 
@@ -833,14 +827,14 @@ Documentation that only lists strengths is marketing. These are the real limits:
 
 | Boundary | Reality |
 |---|---|
-| **Single replica** | `RATE_LIMIT_STORE`, `COST_STORE` and `CACHE_STORE` are `memory` by default. Budgets and rate limits are therefore **per-process** until a persistent store is wired. `COST_STORE=firestore` is not yet implemented and `redis` is not provisioned — both fail closed rather than silently under-enforcing. **SSE stream tickets are the exception:** they default to Firestore in production, so single-use semantics already hold across replicas |
-| **Idempotency is in-process** | `idempotencyMiddleware` keys responses in a `Map` with no user scoping: it is lost on restart, is not shared across replicas, and a key collision between two users could replay the wrong response. **Do not treat it as a safety mechanism for expensive jobs yet** — persist it as `sha256(user_id + endpoint + key)` before exposing `POST /research` publicly |
-| **Raw artifacts are in memory** | `InMemoryArtifactStorage` is the only implementation. The `ArtifactStorage` interface, the blob metadata record, and `STORAGE_BUCKET` are all in place, but until an object-storage adapter is wired, **raw source documents do not survive a restart** — the structured graph (citations, offsets, hashes) does |
+| **Render topology** | Render currently deploys one web service with `WORKER_MODE=embedded`. Production persistence is not process-local: the Blueprint selects Firestore for idempotency, cost accounting, rate limits and report caching, and Firebase Cloud Storage for source artifacts. Local development/tests default to memory. Redis is not provisioned |
+| **Idempotency backend** | Production uses Firestore records scoped by authenticated UID, endpoint path and request fingerprint, with expiring reservations and lease-token fencing. Local development/tests use an in-memory map; changing the production selector to memory removes cross-replica and restart safety |
+| **Artifact durability** | Staging/production require `FirestoreArtifactStorage` backed by Firebase Cloud Storage. If the bucket is unavailable, the pipeline fails rather than returning a report whose source artifacts exist only in process memory. In-memory storage is restricted to local development/tests |
 | **Outbound fetch is not a full network boundary** | Hostname-pattern validation blocks obvious private/link-local targets and unsupported schemes, and response size and MIME are capped, but there is no DNS-pinning (rebinding), no per-redirect re-validation, and no decompression-bomb guard. Treat the fetcher as hardened-but-not-complete |
 | **Ingestion is HTML-first** | Text extraction is regex/heuristic based. PDFs, SEC filings, scanned documents and complex tables are **not** parsed — such sources genuinely `FETCH_FAILED` rather than being guessed at. This is the single biggest lever on research quality |
-| **Workers are in-process** | The worker loop shares the API process today. Lease semantics already make multiple workers *safe*; splitting the role out is a deployment change, not a redesign |
+| **Worker topology** | Render currently runs the worker loop inside the API process. The queue uses Firestore transactions and per-claim lease IDs, so a dedicated or replicated worker deployment is possible, but the Blueprint currently uses `WORKER_MODE=embedded` |
 | **Paywalls and JS-only pages** | Such sources will genuinely `FETCH_FAILED`. The engine does not bypass paywalls or render client-side JavaScript. The cost of this honesty is **lower recall than a system willing to fabricate** — the correct trade-off, and it is visible in `fetch_status` rather than hidden |
-| **Artifact storage** | The `ArtifactStorage` interface exists for raw bytes and normalized text; confirm the production target behind `STORAGE_BUCKET` before relying on long-term raw-document retention |
+| **Cloud Storage operations** | Production artifact durability depends on the configured Firebase Storage bucket, service-account permissions and object availability. Bucket access must be verified in the deployment environment; missing configuration now fails research jobs closed |
 | **Test harness fidelity** | The Firestore harness is an in-memory mock. It is deterministic and fast, but it does not exercise the real Firestore rules engine, so security rules also need verification against the live emulator before any release that changes them |
 | **Benchmark scope** | The corpus validates evidence discipline, offset exactness and arithmetic. It measures behaviour on a *known* corpus — it is not a statement about live-source coverage |
 | **Verification is a grade, not a verdict** | `SUPPORTED` means *evidence was found and survived adversarial checking*. It is not a guarantee of truth, and consequential decisions still warrant human review of the cited sources |
