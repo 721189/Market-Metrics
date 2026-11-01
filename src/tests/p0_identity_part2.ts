@@ -149,6 +149,16 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'research job creation applies idempotency after authentication',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const routeStart = server.indexOf("app.post('/api/v1/research'");
+      const route = server.slice(routeStart, routeStart + 160);
+      const auth = server.indexOf("app.use('/api/v1/research', authMiddleware)");
+      return routeStart >= 0 && route.includes('idempotencyMiddleware') && auth >= 0 && auth < routeStart;
+    },
+  },
+  {
     name: 'all nine pipeline stages have explicit start and completion transitions',
     fn: async () => {
       const pipeline = readSource('src/server/pipeline.ts');
