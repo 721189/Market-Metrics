@@ -192,6 +192,9 @@ async function startServer() {
   // Identity-aware category limits are mounted only after auth has populated UID.
   app.use(rateLimiterMiddleware({ maxRequests: 300, windowSec: 60 }));
 
+  // Admin paths authenticate before role checks; public paths pass through.
+  app.use(adminPathBlocker());
+
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
   // -------------------------------------------------------------
@@ -224,7 +227,7 @@ async function startServer() {
   // -------------------------------------------------------------
   // Authentication runs before the admin allow-list check on this route.
   // Front-end visibility is irrelevant — authorization is enforced server-side.
-  app.get('/metrics', authMiddleware, adminPathBlocker(), rateLimiterByCategory(), (req: Request, res: Response) => {
+  app.get('/metrics', rateLimiterByCategory(), (req: Request, res: Response) => {
     const snapshot = observabilitySnapshot();
     res.status(200).json({
       ...snapshot,
