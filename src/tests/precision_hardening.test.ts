@@ -17,6 +17,7 @@ import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.j
 import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentName, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { classifyDomainTier } from '../server/pipeline.js';
+import { extractVerifiedMarketSizing } from '../server/financial.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -389,6 +390,48 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+  const verifiedTam = makeClaim('clm-tam-verified', 1, []);
+  verifiedTam.claim_type = 'MARKET_SIZE';
+  verifiedTam.verification_status = 'SUPPORTED';
+  verifiedTam.statement = 'The total addressable market was USD 8.4 billion in 2025 and is projected to reach USD 41.2 billion by 2030.';
+  const verifiedCagr = makeClaim('clm-cagr-verified', 2, []);
+  verifiedCagr.claim_type = 'MARKET_GROWTH';
+  verifiedCagr.verification_status = 'CORROBORATED';
+  verifiedCagr.statement = 'The market is expected to grow at a 37.4% CAGR from 2025 to 2030.';
+  const verifiedSam = makeClaim('clm-sam-verified', 3, []);
+  verifiedSam.claim_type = 'MARKET_SIZE';
+  verifiedSam.verification_status = 'SUPPORTED';
+  verifiedSam.statement = 'The serviceable available market (SAM) is USD 2.5 billion.';
+  const verifiedSom = makeClaim('clm-som-verified', 4, []);
+  verifiedSom.claim_type = 'MARKET_SIZE';
+  verifiedSom.verification_status = 'SUPPORTED';
+  verifiedSom.statement = 'The serviceable obtainable market (SOM) is USD 500 million.';
+  const unverifiedFinancial = makeClaim('clm-tam-unverified', 5, []);
+  unverifiedFinancial.claim_type = 'MARKET_SIZE';
+  unverifiedFinancial.verification_status = 'INSUFFICIENT';
+  unverifiedFinancial.statement = 'The total addressable market is USD 999 billion.';
+  const verifiedSizing = extractVerifiedMarketSizing([
+    verifiedTam, verifiedCagr, verifiedSam, verifiedSom, unverifiedFinancial,
+  ]);
+  if (verifiedSizing.tam_current !== 8_400_000_000 ||
+      verifiedSizing.tam_forecast !== 41_200_000_000 ||
+      verifiedSizing.cagr_pct !== 37.4 ||
+      verifiedSizing.sam !== 2_500_000_000 ||
+      verifiedSizing.som !== 500_000_000 ||
+      verifiedSizing.currency !== 'USD' ||
+      verifiedSizing.source_claim_ids.includes(unverifiedFinancial.id)) {
+    return { passed: false, message: 'Financial metrics must be extracted only from supported claims with explicit currency and values' };
+  }
+  const currencylessClaim = makeClaim('clm-currencyless', 6, []);
+  currencylessClaim.claim_type = 'MARKET_SIZE';
+  currencylessClaim.verification_status = 'SUPPORTED';
+  currencylessClaim.statement = 'The total addressable market is $8.4 billion.';
+  const currencylessSizing = extractVerifiedMarketSizing([currencylessClaim]);
+  if (currencylessSizing.tam_current !== null || currencylessSizing.currency !== null) {
+    return { passed: false, message: 'Ambiguous dollar symbols must not be assumed to mean USD' };
+  }
+  console.log('✔ Market sizing accepts only verified claims and explicit, unambiguous currency values.');
+
   const trustedGovernment = classifyDomainTier('https://www.sec.gov/reports');
   const trustedPublisher = classifyDomainTier('research.bloomberg.com');
   const lookalikePublisher = classifyDomainTier('bloomberg.com.attacker.example');
