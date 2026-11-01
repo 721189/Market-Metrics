@@ -194,10 +194,10 @@ export const p0IdentityStaticChecks: Check[] = [
         productionDefault.test(cost) &&
         productionDefault.test(rate) &&
         productionDefault.test(cache) &&
-        render.includes('key: IDEMPOTENCY_STORE\\n        value: firestore') &&
-        render.includes('key: COST_STORE\\n        value: firestore') &&
-        render.includes('key: RATE_LIMIT_STORE\\n        value: firestore') &&
-        render.includes('key: CACHE_STORE\\n        value: firestore');
+        render.includes('key: IDEMPOTENCY_STORE\n        value: firestore') &&
+        render.includes('key: COST_STORE\n        value: firestore') &&
+        render.includes('key: RATE_LIMIT_STORE\n        value: firestore') &&
+        render.includes('key: CACHE_STORE\n        value: firestore');
     },
   },
   {
