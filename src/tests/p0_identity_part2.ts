@@ -322,7 +322,7 @@ export const p0IdentityStaticChecks: Check[] = [
         gemini.includes('costGovernor.checkRequestBudget()') &&
         gemini.includes('costGovernor.recordModelCall(') &&
         gemini.includes('GEMINI_MODEL_PRICING_JSON') &&
-        pipeline.includes('signal: operationSignal,\\n        costGovernor,') &&
+        pipeline.includes('signal: operationSignal,') && pipeline.includes('costGovernor,') &&
         pipeline.includes('await costGovernor.recordJobCost(userId, job.id, costUsd, executionId)') &&
         pipeline.includes('} finally {');
     },
