@@ -190,7 +190,7 @@ export class FirestoreQueue {
      * - { owned: false, definitive: false } -> transient error; worker may
      *        continue but all final state writes remain ownership-verified
      */
-    async heartbeat(jobId: string, workerId: string): Promise<{ owned: boolean; definitive: boolean }> {
+    async heartbeat(jobId: string, workerId: string, leaseId: string): Promise<{ owned: boolean; definitive: boolean }> {
         try {
             const jobRef = adminDb.collection(this.collectionName).doc(jobId);
             let owned = false;
@@ -203,7 +203,7 @@ export class FirestoreQueue {
                     return;
                 }
                 const data = doc.data() as QueueJob | undefined;
-                if (data?.status === 'RUNNING' && data?.worker_id === workerId) {
+                if (data?.status === 'RUNNING' && data?.worker_id === workerId && Boolean(leaseId) && data?.lease_id === leaseId) {
                     // Bump lease version so any stale heartbeat from before this
                     // moment becomes invalid after this transaction commits.
                     const nextVersion = (data.lease_version ?? 0) + 1;
@@ -335,7 +335,7 @@ export class FirestoreQueue {
      * CANCELLED -> COMPLETED after a user cancel) are refused, never applied.
      * Returns true only if the transition was applied.
      */
-    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED', workerId?: string): Promise<boolean> {
+    async updateJobStatus(jobId: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED', workerId?: string, leaseId?: string): Promise<boolean> {
         try {
             const jobRef = adminDb.collection(this.collectionName).doc(jobId);
             return await adminDb.runTransaction(async (transaction) => {
@@ -345,8 +345,12 @@ export class FirestoreQueue {
                     return false;
                 }
                 const data = doc.data();
-                if (workerId && data?.worker_id && data.worker_id !== workerId) {
-                    logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost ownership`, { job_id: jobId });
+                if (workerId && (
+                    !leaseId ||
+                    data?.worker_id !== workerId ||
+                    data?.lease_id !== leaseId
+                )) {
+                    logger.warn('queue.status_refused_ownership', `updateJobStatus REFUSED: worker ${workerId} lost lease ownership`, { job_id: jobId });
                     return false;
                 }
                 const current = data?.status ?? 'QUEUED';
