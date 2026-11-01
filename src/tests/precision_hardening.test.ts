@@ -431,6 +431,18 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Market sizing must allow legitimate zero SAM/SOM shares without forcing a 1% floor' };
   }
 
+  if (FinancialEngine.calculateCAGR(0, 100, 5) !== null ||
+      FinancialEngine.calculateCAGR(100, 200, 0) !== null) {
+    return { passed: false, message: 'Invalid CAGR inputs must be represented as unavailable, not zero growth' };
+  }
+  const invalidSizing = FinancialEngine.calculateMarketSizing({
+    tam_current: 1000, tam_forecast: 1200, year_start: 2030, year_end: 2025,
+    sam_share_pct: 40, som_share_pct: 10, currency: 'USD',
+  });
+  if (invalidSizing.cagr_pct !== null || invalidSizing.years !== 0) {
+    return { passed: false, message: 'Market sizing must reject reversed forecast periods' };
+  }
+
   const verifiedTam = makeClaim('clm-tam-verified', 1, []);
   verifiedTam.claim_type = 'MARKET_SIZE';
   verifiedTam.verification_status = 'SUPPORTED';
