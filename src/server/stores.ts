@@ -31,12 +31,22 @@ export interface RateLimitStore {
   hit(key: string, limit: number, windowSec: number): Promise<RateLimitVerdict>;
 }
 
+export interface CostBucketUpdate {
+  key: string;
+  ttlSec: number;
+}
+
 export interface CostStore {
   readonly kind: string;
   /** Atomically add costUsd to the bucket and return the new total. */
   add(key: string, costUsd: number, ttlSec: number): Promise<number>;
   /** Read the current bucket total (0 when absent). */
   get(key: string): Promise<number>;
+  /**
+   * Atomically add one execution's cost to every spend bucket exactly once.
+   * Implementations must deduplicate idempotencyKey across retries/recovery.
+   */
+  recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean>;
 }
 
 export interface CacheStore {
@@ -95,6 +105,7 @@ export class InMemoryRateLimitStore implements RateLimitStore {
 export class InMemoryCostStore implements CostStore {
   readonly kind = 'memory';
   private readonly totals = new Map<string, number>();
+  private readonly recordedEvents = new Set<string>();
 
   async add(key: string, costUsd: number): Promise<number> {
     const next = (this.totals.get(key) || 0) + costUsd;
@@ -104,6 +115,17 @@ export class InMemoryCostStore implements CostStore {
 
   async get(key: string): Promise<number> {
     return this.totals.get(key) || 0;
+  }
+
+  async recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean> {
+    if (this.recordedEvents.has(idempotencyKey)) return false;
+    if (!Number.isFinite(costUsd) || costUsd < 0) throw new Error('Cost event must be a finite non-negative USD amount');
+    // A single synchronous section makes this atomic within one Node process.
+    for (const bucket of buckets) {
+      this.totals.set(bucket.key, (this.totals.get(bucket.key) || 0) + costUsd);
+    }
+    this.recordedEvents.add(idempotencyKey);
+    return true;
   }
 }
 
@@ -153,6 +175,35 @@ const RATE_LIMIT_COLLECTION = 'rate_limit_buckets';
  */
 export class FirestoreCostStore implements CostStore {
   readonly kind = 'firestore';
+
+  async recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean> {
+    if (!Number.isFinite(costUsd) || costUsd < 0) throw new Error('Cost event must be a finite non-negative USD amount');
+    if (!idempotencyKey || idempotencyKey.includes('/')) throw new Error('Cost idempotency key is invalid');
+    const eventRef = adminDb.collection('cost_usage_events').doc(idempotencyKey);
+    const bucketRefs = buckets.map(bucket => adminDb.collection(COST_COLLECTION).doc(bucket.key));
+    return adminDb.runTransaction(async tx => {
+      const eventSnapshot = await tx.get(eventRef);
+      if (eventSnapshot.exists) return false;
+
+      const bucketSnapshots = await Promise.all(bucketRefs.map(ref => tx.get(ref)));
+      const nextTotals = bucketSnapshots.map(snapshot =>
+        (snapshot.exists ? Number(snapshot.data()?.total_usd || 0) : 0) + costUsd,
+      );
+
+      bucketRefs.forEach((ref, index) => {
+        tx.set(ref, {
+          total_usd: nextTotals[index],
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      tx.create(eventRef, {
+        cost_usd: costUsd,
+        created_at: FieldValue.serverTimestamp(),
+        expires_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      });
+      return true;
+    });
+  }
 
   async add(key: string, costUsd: number, ttlSec: number): Promise<number> {
     // ttlSec is accepted for interface parity but Firestore documents are
