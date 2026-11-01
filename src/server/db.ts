@@ -249,7 +249,7 @@ export class DatabaseRepository {
     }
   }
 
-  public static async deleteJob(jobId: string, userId: string): Promise<boolean> {
+  public static async deleteJob(jobId: string, userId: string, cleanupArtifacts?: () => Promise<void>): Promise<boolean> {
     if (!userId) throw new Error('[DB] userId is required for deleteJob');
     try {
       const jobRef = adminDb.collection('jobs').doc(jobId);
@@ -294,7 +294,11 @@ export class DatabaseRepository {
         await batch.commit();
       }
 
-      // Remove the report and parent last, after all event pages are gone.
+      // Remove cloud artifacts while the deletion tombstone still exists.
+      // On failure, keep the tombstone so the authenticated delete can retry.
+      if (cleanupArtifacts) await cleanupArtifacts();
+
+      // Remove the report and parent last, after events and artifacts are gone.
       const finalBatch = adminDb.batch();
       finalBatch.delete(reportRef);
       finalBatch.delete(jobRef);
