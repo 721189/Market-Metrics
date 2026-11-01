@@ -360,15 +360,11 @@ export class ResearchPipelineManager {
   ): Promise<'deleted' | 'not_found' | 'not_terminal'> {
     if (!userId) throw new Error('userId is required for deleteJob');
     const cleanupArtifacts = async () => {
-      try {
-        const storage = new FirestoreArtifactStorage();
-        await storage.deleteJob(jobId);
-      } catch (err) {
-        // In local/dev mode the pipeline uses process-local memory artifacts;
-        // there is no durable bucket to clean up.
-        if (err instanceof Error && err.message.includes('storageBucket is not configured')) return;
-        throw err;
-      }
+      // Resolve the same environment-specific backend as the research pipeline.
+      // Staging/production fail closed if Cloud Storage is unavailable; local
+      // development gets a harmless in-memory cleanup adapter.
+      const storage = createArtifactStorage();
+      await storage.deleteJob(jobId);
     };
     const job = await DatabaseRepository.getJob(jobId, userId);
     if (!job) {
