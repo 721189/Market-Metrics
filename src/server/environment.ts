@@ -99,7 +99,10 @@ function parseEnvironmentLabel(raw: string, source: 'APP_ENV' | 'NODE_ENV'): Env
 export function resolveEnvironmentName(env: NodeJS.ProcessEnv = process.env): EnvironmentName {
   const appEnv = parseEnvironmentLabel(env.APP_ENV || '', 'APP_ENV');
   const nodeEnv = parseEnvironmentLabel(env.NODE_ENV || '', 'NODE_ENV');
-  if (appEnv && nodeEnv && appEnv !== nodeEnv) {
+  // Staging deployments commonly use NODE_ENV=production for optimized
+  // runtime behavior while APP_ENV=staging selects isolated staging resources.
+  const validStagingRuntimePair = appEnv === 'staging' && nodeEnv === 'production';
+  if (appEnv && nodeEnv && appEnv !== nodeEnv && !validStagingRuntimePair) {
     throw new EnvironmentIsolationError(`APP_ENV (${appEnv}) conflicts with NODE_ENV (${nodeEnv}).`);
   }
   return appEnv || nodeEnv || 'development';
