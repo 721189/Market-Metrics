@@ -45,7 +45,7 @@ import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer, ContradictionEngine } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
-import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
+import { InMemoryArtifactStorage, createArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
 import { logEnvelope } from './rate_limits.js';
@@ -480,12 +480,9 @@ export class ResearchPipelineManager {
     const userId = (job as any).user_id || 'unknown';
     const requestId = (job as any).request_id || `req-${job.id}`;
     const costGovernor = new CostGovernor({ userId });
-    let artifactStorage: import('./artifacts.js').ArtifactStorage;
-    try {
-      artifactStorage = new FirestoreArtifactStorage();
-    } catch {
-      artifactStorage = new InMemoryArtifactStorage();
-      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+    const artifactStorage = createArtifactStorage();
+    if (artifactStorage instanceof InMemoryArtifactStorage) {
+      logger.warn('pipeline.artifact_fallback', 'Using in-memory artifact storage outside staging/production', {});
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
