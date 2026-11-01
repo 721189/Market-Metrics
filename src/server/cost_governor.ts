@@ -138,8 +138,11 @@ export class CostGovernor {
     return null;
   }
 
-  allowRetry(): string | null {
-    if (this.requestCost.output_tokens > this.config.maxRetries) {
+  allowRetry(retriesSoFar: number): string | null {
+    if (!Number.isInteger(retriesSoFar) || retriesSoFar < 0) {
+      return 'Retry count must be a non-negative integer';
+    }
+    if (retriesSoFar >= this.config.maxRetries) {
       return `Retry cap exceeded: ${this.config.maxRetries} retries per operation`;
     }
     return null;
