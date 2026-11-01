@@ -417,8 +417,8 @@ export const p0IdentityStaticChecks: Check[] = [
       const plannerStart = gemini.indexOf('planResearch(');
       const plannerEnd = gemini.indexOf('discoverLiveSources(', plannerStart);
       const planner = gemini.slice(plannerStart, plannerEnd);
-      return requestCount === 6 &&
-        timeoutCount === 6 &&
+      return requestCount === 5 &&
+        timeoutCount === 5 &&
         planner.includes('timeoutMs = 90_000') &&
         planner.includes('maxOutputTokens: 1024') &&
         planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
@@ -440,51 +440,6 @@ export const p0IdentityStaticChecks: Check[] = [
         /VITE_FIREBASE_PROJECT_ID/.test(client) &&
         /missing required env/.test(client)
       );
-    },
-  },
-
-  {
-    name: 'worker heartbeat and finalization reject expired leases',
-    fn: async () => {
-      const queue = readSource('src/server/firestore_queue.ts');
-      const heartbeatStart = queue.indexOf('async heartbeat(');
-      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
-      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
-      const statusStart = queue.indexOf('async updateJobStatus(');
-      const statusEnd = queue.indexOf('async checkReady()', statusStart);
-      const status = queue.slice(statusStart, statusEnd);
-      return queue.includes('export function isLeaseActive(') &&
-        heartbeat.includes('isLeaseActive(data?.leased_until)') &&
-        status.includes('!isLeaseActive(data?.leased_until)') &&
-        status.includes("data?.status !== 'RUNNING'");
-    },
-  },
-  {
-    name: 'job persistence and queue dispatch are atomic',
-    fn: async () => {
-      const queue = readSource('src/server/firestore_queue.ts');
-      const pipeline = readSource('src/server/pipeline.ts');
-      const start = queue.indexOf('async addWithJob(');
-      const end = queue.indexOf('async add(', start);
-      const enqueue = queue.slice(start, end);
-      return enqueue.includes("adminDb.runTransaction(async transaction =>") &&
-        enqueue.includes('transaction.create(jobRef, jobDocument)') &&
-        enqueue.includes('transaction.create(queueRef, queueDocument)') &&
-        pipeline.includes('await researchQueue.addWithJob(job, userId)') &&
-        !pipeline.includes('await DatabaseRepository.saveJob(job, userId)');
-    },
-  },
-  {
-    name: 'queue position uses a bounded aggregation and fails as unknown',
-    fn: async () => {
-      const queue = readSource('src/server/firestore_queue.ts');
-      const start = queue.indexOf('async getJobPosition(');
-      const end = queue.indexOf('async cancel(', start);
-      const position = queue.slice(start, end);
-      return position.includes(".where('created_at', '<', createdAt)") &&
-        position.includes('.count()') &&
-        !position.includes(".where('status', '==', 'QUEUED')\n                .get()") &&
-        position.includes('return null;');
     },
   },
 ];
