@@ -185,8 +185,12 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   const cagr = uniqueCandidate(cagrCandidates);
   const currency = currencies.size === 1 ? Array.from(currencies)[0] : null;
   const yearList = Array.from(years).sort((a, b) => a - b);
-  const yearStart = yearList.length >= 2 ? yearList[0] : yearList[0] ?? null;
-  const yearEnd = yearList.length >= 2 ? yearList[yearList.length - 1] : null;
+  const yearStart = yearList.length >= 2
+    ? yearList[0]
+    : (tamBase ? yearList[0] ?? null : null);
+  const yearEnd = yearList.length >= 2
+    ? yearList[yearList.length - 1]
+    : (tamForecast ? yearList[0] ?? null : null);
 
   let forecastValue = tamForecast?.value ?? null;
   let forecastClaimId = tamForecast?.claimId;
