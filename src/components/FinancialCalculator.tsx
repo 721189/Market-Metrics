@@ -68,7 +68,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
       </div>
 
       {/* Input Sliders */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
         <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5 space-y-2">
           <div className="flex justify-between text-xs font-medium">
             <span className="text-slate-400">Annual Contract Value (ARPU)</span>
