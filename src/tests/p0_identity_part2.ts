@@ -265,7 +265,19 @@ export const p0IdentityStaticChecks: Check[] = [
         index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
         index.fields?.some((field: any) => field.fieldPath === 'leased_until' && field.order === 'ASCENDING')
       );
-      return recovery.includes(".where('status', '==', 'RUNNING')") &&
+      const hasFifoIndex = indexConfig.indexes.some((index: any) =>
+        index.collectionGroup === 'job_queue' &&
+        index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
+        index.fields?.some((field: any) => field.fieldPath === 'created_at' && field.order === 'ASCENDING')
+      );
+      const claimStart = queue.indexOf('async claimNextJob(');
+      const claimEnd = queue.indexOf('async observeQueueDepth()', claimStart);
+      const claim = queue.slice(claimStart, claimEnd);
+      return claim.includes(".where('status', '==', 'QUEUED')") &&
+        claim.includes(".orderBy('created_at', 'asc')") &&
+        claim.includes('.limit(25)') &&
+        hasFifoIndex &&
+        recovery.includes(".where('status', '==', 'RUNNING')") &&
         recovery.includes(".where('leased_until', '<=', Timestamp.fromMillis(now))") &&
         recovery.includes(".orderBy('leased_until', 'asc')") &&
         recovery.includes('.limit(100)') &&
