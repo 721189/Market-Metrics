@@ -12,6 +12,7 @@
  *      multi-replica; redis reserved for later and fails closed).
  */
 
+import { createHash } from 'node:crypto';
 import { RequestCost, UserCost, GlobalCost, JobCost, CostSnapshot } from './cost_types.js';
 import { RetrievalArtifact } from './artifacts.js';
 import { logger } from './logger.js';
@@ -114,6 +115,7 @@ export class CostGovernor {
 
   constructor(config: CostGovernorConfig & PersistentBudgetConfig = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.userId = config.userId;
     this.persistent = {
       userDailyBudgetUsd: config.userDailyBudgetUsd ?? DEFAULT_PERSISTENT_BUDGETS.userDailyBudgetUsd,
       userMonthlyBudgetUsd: config.userMonthlyBudgetUsd ?? DEFAULT_PERSISTENT_BUDGETS.userMonthlyBudgetUsd,
@@ -232,19 +234,32 @@ export class CostGovernor {
     }
     return null;
   }
-  async recordJobCost(userId: string, jobId: string, costUsd: number): Promise<void> {
+  async recordJobCost(
+    userId: string,
+    jobId: string,
+    costUsd: number,
+    executionId: string = jobId,
+  ): Promise<void> {
     if (!userId || !(costUsd > 0)) return;
+    if (!Number.isFinite(costUsd)) throw new Error('Job cost must be a finite USD amount');
+    const eventKey = createHash('sha256')
+      .update(userId + '\\n' + jobId + '\\n' + executionId)
+      .digest('hex');
     try {
-      const store = getCostStore();
-      await Promise.all([
-        store.add(userDailyKey(userId), costUsd, 24 * 3600),
-        store.add(userMonthlyKey(userId), costUsd, 31 * 24 * 3600),
-        store.add(globalDailyKey(), costUsd, 24 * 3600),
+      await getCostStore().recordOnce(eventKey, costUsd, [
+        { key: userDailyKey(userId), ttlSec: 24 * 3600 },
+        { key: userMonthlyKey(userId), ttlSec: 31 * 24 * 3600 },
+        { key: globalDailyKey(), ttlSec: 24 * 3600 },
       ]);
     } catch (err) {
-      logger.warn('cost.spend_write_failed', 'Spend-store write failed', {
+      logger.error('cost.spend_write_failed', 'Could not persist completed research execution cost', {
+        user_id: userId,
+        job_id: jobId,
+        store: getCostStore().kind,
         status: (err as Error)?.message || String(err),
       });
+      const isProd = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+      if (isProd) throw err;
     }
   }
 
@@ -309,7 +324,7 @@ export class CostGovernor {
     this.addToUser();
     this.addToJob();
     this.addToGlobal();
-    return null;
+    return this.checkRequestBudget();
   }
 
   recordSearchCall(estimatedCostUsd: number): string | null {
@@ -322,7 +337,7 @@ export class CostGovernor {
     this.addToUser();
     this.addToJob();
     this.addToGlobal();
-    return null;
+    return this.checkRequestBudget();
   }
 
   sourceArtifacts: Map<string, RetrievalArtifact> = new Map();
