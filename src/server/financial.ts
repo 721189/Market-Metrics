@@ -219,7 +219,7 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   if (cagrCandidates.length > 1 && !cagr) limitations.push('Multiple different verified CAGR values were found; no value was selected.');
 
   return {
-    data_status: tamCurrentValue !== null || cagrValue !== null || samValue !== null || somValue !== null
+    data_status: tamCurrentValue !== null || tamForecastValue !== null || cagrValue !== null || samValue !== null || somValue !== null
       ? 'SOURCE_BACKED'
       : 'INSUFFICIENT_EVIDENCE',
     tam_current: tamCurrentValue,
