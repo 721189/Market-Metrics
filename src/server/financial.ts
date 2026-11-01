@@ -470,12 +470,19 @@ export class FinancialEngine {
     currency: string = 'USD',
     baseCustomerCount: number = 0,
     baseSalesCycleMonths: number = 2.8,
+    baseChurnRatePct: number = 7.5,
   ) {
+    const safeBaseChurnRatePct = Number.isFinite(baseChurnRatePct)
+      ? Math.min(100, Math.max(0, baseChurnRatePct))
+      : 7.5;
+    const conservativeChurnRatePct = Math.min(100, safeBaseChurnRatePct * 1.8);
+    const aggressiveChurnRatePct = safeBaseChurnRatePct * 0.55;
+
     // Conservative
     const consEcon = this.calculateUnitEconomics({
       arpu_annual: baseArpu * 0.85,
       gross_margin_pct: Math.max(30, baseMargin - 6),
-      annual_churn_rate_pct: 14,
+      annual_churn_rate_pct: conservativeChurnRatePct,
       cac: baseCac * 1.25,
       sales_cycle_months: Math.max(0, baseSalesCycleMonths * 1.6),
     });
@@ -484,7 +491,7 @@ export class FinancialEngine {
     const baseEcon = this.calculateUnitEconomics({
       arpu_annual: baseArpu,
       gross_margin_pct: baseMargin,
-      annual_churn_rate_pct: 7.5,
+      annual_churn_rate_pct: safeBaseChurnRatePct,
       cac: baseCac,
       sales_cycle_months: Math.max(0, baseSalesCycleMonths),
     });
@@ -493,7 +500,7 @@ export class FinancialEngine {
     const aggEcon = this.calculateUnitEconomics({
       arpu_annual: baseArpu * 1.3,
       gross_margin_pct: Math.min(92, baseMargin + 6),
-      annual_churn_rate_pct: 4,
+      annual_churn_rate_pct: aggressiveChurnRatePct,
       cac: baseCac * 0.8,
       sales_cycle_months: Math.max(0, baseSalesCycleMonths * 0.6),
     });
