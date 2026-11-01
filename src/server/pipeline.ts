@@ -1134,6 +1134,7 @@ export class ResearchPipelineManager {
         currency,
         claims: verifiedClaimRegistry,
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
