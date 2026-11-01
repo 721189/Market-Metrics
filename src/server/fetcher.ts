@@ -690,7 +690,7 @@ export class RealDocumentFetcher {
       if (typeof PDFParse === 'function') {
         // pdf-parse v2 exposes a stateful parser class, not the v1 callable
         // function. Always destroy parser resources after text extraction.
-        const parser = new PDFParse({ data: new Uint8Array(body) });
+        const parser = new PDFParse({ data: body });
         try {
           const result = await parser.getText();
           return this.normalizeText(result?.text || '');
