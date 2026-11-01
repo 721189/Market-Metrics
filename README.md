@@ -685,6 +685,11 @@ so editing the variable and redeploying takes effect immediately.
 
 ---
 
+
+### Production persistence defaults
+
+When `NODE_ENV=production` or `APP_ENV=production`, idempotency, cost accounting, category rate limits, and report caching default to Firestore unless a store is explicitly overridden. The Render Blueprint sets all four selectors to `firestore`, so these guarantees survive restarts and work across replicas. Local development and tests default to in-memory stores.
+
 ## 16. API Reference
 
 ### Public
