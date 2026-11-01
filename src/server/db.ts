@@ -194,9 +194,9 @@ export class DatabaseRepository {
       const docSnap = await adminDb.collection('reports').doc(jobId).get();
       if (!docSnap.exists) return null;
       const data = docSnap.data() as FullResearchReport & { user_id?: string };
-      if (data.user_id && data.user_id !== userId) {
-        return null;
-      }
+      // Reports with missing ownership metadata are inaccessible until
+      // explicitly migrated by an operator with verified provenance.
+      if (data.user_id !== userId) return null;
       return data;
     } catch (err) {
       logger.error('db.get_report_failed', `Error getting report ${jobId}`, {
