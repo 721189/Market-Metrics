@@ -119,6 +119,7 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   const samCandidates: Array<{ value: number; claimId: string }> = [];
   const somCandidates: Array<{ value: number; claimId: string }> = [];
   const cagrCandidates: Array<{ value: number; claimId: string }> = [];
+  const ambiguousTAMClaims: string[] = [];
   const currencies = new Set<string>();
   const years = new Set<number>();
   const sourceClaimIds = new Set<string>();
@@ -150,8 +151,13 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
     if (isTam) {
       amounts.forEach(amount => currencies.add(amount.currency));
       if (amounts.length >= 2) {
+        const hasExplicitRange = yearMatches.length >= 2 || /\bfrom\b[\s\S]*\bto\b/i.test(statement);
+        if (amounts.length !== 2 || !hasExplicitRange) {
+          ambiguousTAMClaims.push(claim.id);
+          continue;
+        }
         tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
-        tamForecastCandidates.push({ value: amounts[amounts.length - 1].value, claimId: claim.id });
+        tamForecastCandidates.push({ value: amounts[1].value, claimId: claim.id });
         sourceClaimIds.add(claim.id);
       } else if (/\b(by|forecast|projected|reach|reaching)\b/i.test(statement)) {
         tamForecastCandidates.push({ value: amounts[0].value, claimId: claim.id });
@@ -221,6 +227,7 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   if (somValue === null) limitations.push('SOM is unavailable because no unambiguous, explicitly stated verified SOM value was found.');
   if (tamBaseCandidates.length > 1 && !tamBase) limitations.push('Multiple different verified TAM base values were found; no value was selected.');
   if (cagrCandidates.length > 1 && !cagr) limitations.push('Multiple different verified CAGR values were found; no value was selected.');
+  if (ambiguousTAMClaims.length > 0) limitations.push('Some verified market-size claims contained multiple amounts without an unambiguous base-to-forecast relationship; they were excluded.');
 
   return {
     data_status: tamCurrentValue !== null || tamForecastValue !== null || cagrValue !== null || samValue !== null || somValue !== null
