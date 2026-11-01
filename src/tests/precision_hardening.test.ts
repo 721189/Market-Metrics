@@ -491,6 +491,32 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ CSV extraction preserves quoted fields, escaped quotes, and multiline cells.');
 
+  const pdfStream = 'BT /F1 12 Tf 72 720 Td (PDF extraction works) Tj ET';
+  const pdfObjects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n',
+    '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+    '5 0 obj\n<< /Length ' + Buffer.byteLength(pdfStream) + ' >>\nstream\n' + pdfStream + '\nendstream\nendobj\n',
+  ];
+  let pdfFixture = '%PDF-1.4\n';
+  const pdfOffsets = [0];
+  for (const object of pdfObjects) {
+    pdfOffsets.push(Buffer.byteLength(pdfFixture));
+    pdfFixture += object;
+  }
+  const xrefOffset = Buffer.byteLength(pdfFixture);
+  pdfFixture += 'xref\n0 6\n0000000000 65535 f \n';
+  for (const offset of pdfOffsets.slice(1)) {
+    pdfFixture += String(offset).padStart(10, '0') + ' 00000 n \n';
+  }
+  pdfFixture += 'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xrefOffset + '\n%%EOF';
+  const pdfText = await RealDocumentFetcher.extractPdfText(Buffer.from(pdfFixture, 'utf8'));
+  if (!pdfText.includes('PDF extraction works')) {
+    return { passed: false, message: 'The installed pdf-parse v2 API must extract text from a real PDF fixture' };
+  }
+  console.log('✔ PDF extraction succeeds through the installed pdf-parse API.');
+
   // ===== 11. Claim verification regression tests =====
   const recentDate = new Date().toISOString();
   const sourceA = makeSource('src-corroboration-a', { domain: 'research-a.example', published_at: recentDate });
