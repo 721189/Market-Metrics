@@ -442,4 +442,49 @@ export const p0IdentityStaticChecks: Check[] = [
       );
     },
   },
+
+  {
+    name: 'worker heartbeat and finalization reject expired leases',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const heartbeatStart = queue.indexOf('async heartbeat(');
+      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
+      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
+      const statusStart = queue.indexOf('async updateJobStatus(');
+      const statusEnd = queue.indexOf('async checkReady()', statusStart);
+      const status = queue.slice(statusStart, statusEnd);
+      return queue.includes('export function isLeaseActive(') &&
+        heartbeat.includes('isLeaseActive(data?.leased_until)') &&
+        status.includes('!isLeaseActive(data?.leased_until)') &&
+        status.includes("data?.status !== 'RUNNING'");
+    },
+  },
+  {
+    name: 'job persistence and queue dispatch are atomic',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const start = queue.indexOf('async addWithJob(');
+      const end = queue.indexOf('async add(', start);
+      const enqueue = queue.slice(start, end);
+      return enqueue.includes("adminDb.runTransaction(async transaction =>") &&
+        enqueue.includes('transaction.create(jobRef, jobDocument)') &&
+        enqueue.includes('transaction.create(queueRef, queueDocument)') &&
+        pipeline.includes('await researchQueue.addWithJob(job, userId)') &&
+        !pipeline.includes('await DatabaseRepository.saveJob(job, userId)');
+    },
+  },
+  {
+    name: 'queue position uses a bounded aggregation and fails as unknown',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const start = queue.indexOf('async getJobPosition(');
+      const end = queue.indexOf('async cancel(', start);
+      const position = queue.slice(start, end);
+      return position.includes(".where('created_at', '<', createdAt)") &&
+        position.includes('.count()') &&
+        !position.includes(".where('status', '==', 'QUEUED')\n                .get()") &&
+        position.includes('return null;');
+    },
+  },
 ];
