@@ -473,6 +473,18 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ HTML extraction preserves paragraphs, order, tables, titles, and verified publication metadata.');
 
+  const reversedMetaHtml = '<html><head><meta content="2025-04-03T10:00:00Z" property="article:published_time"><meta content="Example Research" property="og:site_name"></head></html>';
+  if (RealDocumentFetcher.extractPublicationDate(reversedMetaHtml, new Headers()) !== '2025-04-03T10:00:00.000Z') {
+    return { passed: false, message: 'Publication metadata extraction must not depend on meta attribute order' };
+  }
+  if (RealDocumentFetcher.extractPublisher(reversedMetaHtml, 'https://example.com/report') !== 'Example Research') {
+    return { passed: false, message: 'Publisher extraction must prefer explicit Open Graph site metadata' };
+  }
+  const graphHtml = '<script type="application/ld+json">{"@graph":[{"@type":"NewsArticle","datePublished":"2025-02-01T00:00:00Z"}]}</script>';
+  if (RealDocumentFetcher.extractPublicationDate(graphHtml, new Headers()) !== '2025-02-01T00:00:00.000Z') {
+    return { passed: false, message: 'Publication metadata extraction must support JSON-LD @graph structures' };
+  }
+
   const csvText = RealDocumentFetcher.parseCsvToText('Company,Description,Revenue\r\nAcme,"Research, analytics and forecasting",120\r\nBeta,"Line one\nLine two with ""quoted"" text",240');
   if (!csvText.includes('Research, analytics and forecasting') || !csvText.includes('Line one\nLine two with "quoted" text') || !csvText.includes('120')) {
     return { passed: false, message: 'CSV extraction must preserve quoted commas, escaped quotes, and embedded newlines' };
