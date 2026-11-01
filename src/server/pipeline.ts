@@ -470,13 +470,9 @@ export class ResearchPipelineManager {
       stages,
     };
 
-    await DatabaseRepository.saveJob(job, userId);
-
-    // Enqueue in queue
-    await researchQueue.add(
-      'market-research-execution',
-      { jobId: job.id, job, userId }
-    );
+    // Job + queue row commit atomically. A partial dispatch must never leave
+    // an accepted job visible in history but permanently absent from the queue.
+    await researchQueue.addWithJob(job, userId);
 
     return job;
   }
