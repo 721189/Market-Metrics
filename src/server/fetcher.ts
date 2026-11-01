@@ -540,7 +540,7 @@ export class RealDocumentFetcher {
       .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
       .replace(/<!--[\s\S]*?-->/g, ' ')
       .replace(/<br\b[^>]*\/?>/gi, '\n')
-      .replace(/<\/(?:td|th)\s*>/gi, '\t')
+      .replace(/<\/(?:td|th)\s*>/gi, ' | ')
       .replace(/<\/tr\s*>/gi, '\n\n')
       .replace(/<tr\b[^>]*>/gi, '\n\n')
       .replace(/<\/(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|ul)\s*>/gi, '\n\n')
@@ -571,7 +571,7 @@ export class RealDocumentFetcher {
         .replace(/[ \t]+/g, ' ')
         .replace(/\s*\n\s*/g, ' ')
         .trim())
-      .filter((paragraph: string) => paragraph.length > 50 || (paragraph.includes('\t') && paragraph.length > 3));
+      .filter((paragraph: string) => paragraph.length > 50 || (paragraph.includes('|') && paragraph.length > 3));
 
     if (paragraphs.length === 0) {
       const fallback = text.replace(/\s+/g, ' ').trim();
@@ -608,7 +608,7 @@ export class RealDocumentFetcher {
 
     const selectedIndexes = new Set(selected.map(paragraph => paragraph.index));
     return paragraphs
-      .filter((paragraph, index) => paragraph.includes('\t') || selectedIndexes.has(index))
+      .filter((paragraph, index) => paragraph.includes('|') || selectedIndexes.has(index))
       .join('\n\n');
   }
 
