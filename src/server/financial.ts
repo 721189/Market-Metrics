@@ -118,30 +118,32 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   const years = new Set<number>();
   const sourceClaimIds = new Set<string>();
 
-  for (const claim of supported) {
+  for (const claim of supported.filter(item => item.claim_type === 'MARKET_SIZE')) {
     const statement = String(claim.statement || '');
     const amounts = parseExplicitMoneyAmounts(statement);
-    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
-    yearMatches.forEach(year => years.add(Number(year)));
-    if (amounts.length > 0) amounts.forEach(amount => currencies.add(amount.currency));
     if (amounts.length === 0) continue;
 
+    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
+    yearMatches.forEach(year => years.add(Number(year)));
     const isSam = /\bSAM\b|serviceable available market/i.test(statement);
     const isSom = /\bSOM\b|serviceable obtainable market/i.test(statement);
     const isTam = /\bTAM\b|total addressable market|market size/i.test(statement) ||
       (claim.claim_type === 'MARKET_SIZE' && !isSam && !isSom);
 
     if (isSam) {
+      amounts.forEach(amount => currencies.add(amount.currency));
       if (amounts.length === 1) samCandidates.push({ value: amounts[0].value, claimId: claim.id });
       sourceClaimIds.add(claim.id);
       continue;
     }
     if (isSom) {
+      amounts.forEach(amount => currencies.add(amount.currency));
       if (amounts.length === 1) somCandidates.push({ value: amounts[0].value, claimId: claim.id });
       sourceClaimIds.add(claim.id);
       continue;
     }
     if (isTam) {
+      amounts.forEach(amount => currencies.add(amount.currency));
       if (amounts.length >= 2) {
         tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
         tamForecastCandidates.push({ value: amounts[amounts.length - 1].value, claimId: claim.id });
@@ -158,6 +160,8 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
 
   for (const claim of supported.filter(item => item.claim_type === 'MARKET_GROWTH')) {
     const statement = String(claim.statement || '');
+    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
+    yearMatches.forEach(year => years.add(Number(year)));
     if (!/\bCAGR\b|compound annual growth/i.test(statement)) continue;
     const percent = statement.match(/(\d+(?:\.\d+)?)\s*%/);
     if (percent) {
