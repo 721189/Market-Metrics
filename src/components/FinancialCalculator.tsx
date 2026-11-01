@@ -34,6 +34,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
   const [grossMargin, setGrossMargin] = useState<number>(initialMargin);
   const [churnRate, setChurnRate] = useState<number>(7.5);
   const [customerCount, setCustomerCount] = useState<number>(initialCustomerCount);
+  const [salesCycleMonths, setSalesCycleMonths] = useState<number>(2.8);
 
   // Deterministic Unit Economics calculation
   const economics = FinancialEngine.calculateUnitEconomics({
@@ -41,10 +42,10 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
     gross_margin_pct: grossMargin,
     annual_churn_rate_pct: churnRate,
     cac: cac,
-    sales_cycle_months: 2.8,
+    sales_cycle_months: salesCycleMonths,
   });
 
-  const scenarios = FinancialEngine.generateScenarios(arpu, cac, grossMargin, currency, customerCount);
+  const scenarios = FinancialEngine.generateScenarios(arpu, cac, grossMargin, currency, customerCount, salesCycleMonths);
 
   const formatCurr = (amount: number) => FinancialEngine.formatCurrency(amount, currency);
 
@@ -122,6 +123,21 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
 
         <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5 space-y-2">
           <div className="flex justify-between text-xs font-medium">
+            <span className="text-slate-400">Sales Cycle (months)</span>
+            <span className="font-mono font-bold text-cyan-400">{salesCycleMonths.toFixed(1)}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={18}
+            step={0.1}
+            value={salesCycleMonths}
+            onChange={e => setSalesCycleMonths(Number(e.target.value))}
+            className="w-full accent-cyan-400 cursor-pointer"
+          />
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5 space-y-2">
+          <div className="flex justify-between text-xs font-medium">
             <span className="text-slate-400">Year-3 Customer Count (assumption)</span>
             <span className="font-mono font-bold text-cyan-400">{customerCount.toLocaleString()}</span>
           </div>
@@ -153,7 +169,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
       </div>
 
       {/* Real-time Computed Metrics Strip */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
         <div className="rounded-xl border border-cyan-500/20 bg-slate-950 p-4">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
             Customer Lifetime Value
@@ -203,6 +219,18 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
             </span>
           </div>
           <span className="text-[10px] text-slate-400 block mt-1">Estimated annual retention</span>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+            Sales Cycle
+          </span>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-black text-slate-200 font-mono">
+              {economics.sales_cycle_months === null ? 'N/A' : economics.sales_cycle_months.toFixed(1) + ' mo'}
+            </span>
+          </div>
+          <span className="text-[10px] text-slate-400 block mt-1">Time from qualified lead to close</span>
         </div>
 
         <div className="col-span-2 sm:col-span-1 rounded-xl border border-blue-500/20 bg-slate-950 p-4">
