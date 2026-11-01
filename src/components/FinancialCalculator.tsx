@@ -234,16 +234,20 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
             </div>
             <div className="space-y-1.5 text-xs">
               <div className="flex justify-between">
-                <span className="text-slate-400">3-Year Revenue:</span>
+                <span className="text-slate-400">Year-3 Annual Revenue:</span>
                 <span className="font-mono font-bold text-white">{formatCurr(scenarios.scenario_conservative.year_3_revenue)}</span>
               </div>
               <div className="flex justify-between">
+                <span className="text-slate-400">Year-3 Customers:</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_conservative.customer_count.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-slate-400">LTV:CAC Ratio:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_conservative.ltv_to_cac}x</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_conservative.ltv_to_cac === null ? 'N/A' : scenarios.scenario_conservative.ltv_to_cac + 'x'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Payback Period:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_conservative.payback_months} mo</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_conservative.payback_months === null ? 'N/A' : scenarios.scenario_conservative.payback_months + ' mo'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Gross Margin:</span>
@@ -260,16 +264,20 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
             </div>
             <div className="space-y-1.5 text-xs">
               <div className="flex justify-between">
-                <span className="text-slate-400">3-Year Revenue:</span>
+                <span className="text-slate-400">Year-3 Annual Revenue:</span>
                 <span className="font-mono font-bold text-cyan-400">{formatCurr(scenarios.scenario_base.year_3_revenue)}</span>
               </div>
               <div className="flex justify-between">
+                <span className="text-slate-400">Year-3 Customers:</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_base.customer_count.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-slate-400">LTV:CAC Ratio:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_base.ltv_to_cac}x</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_base.ltv_to_cac === null ? 'N/A' : scenarios.scenario_base.ltv_to_cac + 'x'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Payback Period:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_base.payback_months} mo</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_base.payback_months === null ? 'N/A' : scenarios.scenario_base.payback_months + ' mo'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Gross Margin:</span>
@@ -290,12 +298,16 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
                 <span className="font-mono font-bold text-emerald-400">{formatCurr(scenarios.scenario_aggressive.year_3_revenue)}</span>
               </div>
               <div className="flex justify-between">
+                <span className="text-slate-400">Year-3 Customers:</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_aggressive.customer_count.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-slate-400">LTV:CAC Ratio:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_aggressive.ltv_to_cac}x</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_aggressive.ltv_to_cac === null ? 'N/A' : scenarios.scenario_aggressive.ltv_to_cac + 'x'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Payback Period:</span>
-                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_aggressive.payback_months} mo</span>
+                <span className="font-mono font-bold text-slate-200">{scenarios.scenario_aggressive.payback_months === null ? 'N/A' : scenarios.scenario_aggressive.payback_months + ' mo'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Gross Margin:</span>
