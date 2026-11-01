@@ -17,7 +17,7 @@ import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.j
 import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentName, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { classifyDomainTier } from '../server/pipeline.js';
-import { extractVerifiedMarketSizing } from '../server/financial.js';
+import { extractVerifiedMarketSizing, FinancialEngine } from '../server/financial.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -390,6 +390,47 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+  const unitEconomics = FinancialEngine.calculateUnitEconomics({
+    arpu_annual: 1200,
+    gross_margin_pct: 80,
+    annual_churn_rate_pct: 10,
+    cac: 400,
+    sales_cycle_months: 3,
+  });
+  if (unitEconomics.ltv !== 9600 || unitEconomics.payback_period_months !== 5 ||
+      unitEconomics.net_revenue_retention_pct !== null ||
+      unitEconomics.rule_of_40_score !== null ||
+      unitEconomics.sales_cycle_months !== 3) {
+    return { passed: false, message: 'Unit economics must not fabricate NRR or Rule of 40 without expansion, growth, and operating-margin inputs' };
+  }
+  const fullySpecifiedEconomics = FinancialEngine.calculateUnitEconomics({
+    arpu_annual: 1200,
+    gross_margin_pct: 80,
+    annual_churn_rate_pct: 10,
+    cac: 400,
+    sales_cycle_months: 3,
+    expansion_rate_pct: 20,
+    revenue_growth_pct: 30,
+    operating_margin_pct: 10,
+  });
+  if (fullySpecifiedEconomics.net_revenue_retention_pct !== 110 || fullySpecifiedEconomics.rule_of_40_score !== 40) {
+    return { passed: false, message: 'NRR and Rule of 40 must use explicit expansion, revenue growth, and operating margin' };
+  }
+  const scenarioInputs = FinancialEngine.generateScenarios(1000, 500, 80, 'USD', 200, 3);
+  if (scenarioInputs.scenario_conservative.customer_count !== 100 ||
+      scenarioInputs.scenario_base.customer_count !== 200 ||
+      scenarioInputs.scenario_aggressive.customer_count !== 300 ||
+      scenarioInputs.scenario_base.year_3_revenue !== 200000) {
+    return { passed: false, message: 'Scenario revenue must derive from explicit customer-count assumptions, not fixed invented customer counts' };
+  }
+  const zeroShare = FinancialEngine.calculateMarketSizing({
+    tam_current: 1000, tam_forecast: 1200, year_start: 2025, year_end: 2026,
+    sam_share_pct: 0, som_share_pct: 0, currency: 'USD',
+  });
+  if (zeroShare.sam !== 0 || zeroShare.som !== 0) {
+    return { passed: false, message: 'Market sizing must allow legitimate zero SAM/SOM shares without forcing a 1% floor' };
+  }
+
   const verifiedTam = makeClaim('clm-tam-verified', 1, []);
   verifiedTam.claim_type = 'MARKET_SIZE';
   verifiedTam.verification_status = 'SUPPORTED';
