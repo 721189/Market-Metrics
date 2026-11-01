@@ -465,7 +465,7 @@ export class ResearchPipelineManager {
   /**
    * The True 9-Stage Execution Worker
    */
-  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string): Promise<void> {
+  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string, leaseId?: string): Promise<void> {
     if (isCancelled(job, signal)) return;
     if (workerId) {
       logger.debug('pipeline.worker_start', `Stage worker executing job ${job.id} as ${workerId}`, {
@@ -476,6 +476,8 @@ export class ResearchPipelineManager {
     const userId = (job as any).user_id || 'unknown';
     const requestId = (job as any).request_id || `req-${job.id}`;
     const costGovernor = new CostGovernor({ userId });
+    const executionId = leaseId || String((job as any).lease_id || `${workerId || 'local'}-${Date.now()}`);
+    try {
     const artifactStorage = createArtifactStorage();
     if (artifactStorage instanceof InMemoryArtifactStorage) {
       logger.warn('pipeline.artifact_fallback', 'Using in-memory artifact storage outside staging/production', {});
@@ -515,7 +517,8 @@ export class ResearchPipelineManager {
         job.geography,
         job.time_horizon,
         job.objectives,
-        operationSignal
+        operationSignal,
+        costGovernor
       ),
       5 * 60 * 1000,
       'PLANNING',
@@ -536,7 +539,7 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
 
     const liveDiscovered = await withTimeout(
-      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal),
+      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal, costGovernor),
       5 * 60 * 1000,
       'DISCOVERING',
       signal
@@ -809,6 +812,7 @@ export class ResearchPipelineManager {
           text: sourceTexts.get(s.id) || '',
         })),
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'EXTRACTING',
@@ -984,6 +988,7 @@ export class ResearchPipelineManager {
           text: sourceTexts.get(s.id) || '',
         })),
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'ANALYZING',
@@ -1112,6 +1117,7 @@ export class ResearchPipelineManager {
         claims: verifiedClaimRegistry,
         evidence: synthesisEvidence,
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
@@ -1306,7 +1312,7 @@ export class ResearchPipelineManager {
     recordJobCompleted(Date.now() - pipelineStartedAt, { job_id: job.id });
     // userId threads through so the spend persists into the CostStore and
     // the next canStartJob() call for this user sees the real total.
-    recordCostPerJob(costGovernor.snapshot(job.id).request.estimated_cost_usd, { job_id: job.id }, userId);
+    // Final cost settlement now runs from finally, including failures/cancellation.
 
     await logAndEmitEvent(job, 'completed', 'GENERATING_REPORT', 'Intelligence dossier successfully generated, audited, and persisted to database.', 100, {
       report_id: job.id,
@@ -1315,6 +1321,22 @@ export class ResearchPipelineManager {
       citation_graph: graphValidation.stats,
       grounded_strategic_entities_dropped: droppedEntities,
     });
+    } finally {
+      if (userId && userId !== 'unknown') {
+        const costUsd = costGovernor.snapshot(job.id).request.estimated_cost_usd;
+        try {
+          await costGovernor.recordJobCost(userId, job.id, costUsd, executionId);
+          recordCostPerJob(costUsd, { job_id: job.id }, userId);
+        } catch (costError) {
+          logger.error('pipeline.cost_settlement_failed', 'Could not persist spend for this worker execution', {
+            user_id: userId,
+            job_id: job.id,
+            status: costError instanceof Error ? costError.message : String(costError),
+          });
+          throw costError;
+        }
+      }
+    }
   }
 }
 
@@ -1385,7 +1407,7 @@ export async function startWorker() {
         // stuck in RUNNING indefinitely. The AbortSignal propagates to every
         // Gemini/fetch call inside the pipeline.
         await withTimeout(
-          (operationSignal) => ResearchPipelineManager.executePipelineWorker(pipelineJob, operationSignal, workerId),
+          (operationSignal) => ResearchPipelineManager.executePipelineWorker(pipelineJob, operationSignal, workerId, String(job.lease_id || '')),
           PIPELINE_TIMEOUT_MS,
           `pipeline:${job.id}`,
           controller.signal
