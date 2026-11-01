@@ -893,6 +893,7 @@ export class ResearchPipelineManager {
     job.stats.claims_verified = verifiedClaims.filter(c => claimFullyGrounded(c.verification_status)).length;
     job.stats.claims_contradicted = verifiedClaims.filter(c => c.verification_status === 'CONTRADICTED').length;
     job.stats.claims_insufficient = verifiedClaims.filter(c => c.verification_status === 'INSUFFICIENT').length;
+    const publishableClaims = verifiedClaims.filter(c => claimFullyGrounded(c.verification_status));
     job.stats.evidence_score = evidenceBreakdown.overall_score;
 
     // A claim that could not reach SUPPORTED is a verification failure worth
@@ -1038,14 +1039,14 @@ export class ResearchPipelineManager {
 
     // The synthesizers receive the verified claim registry — the ONLY factual
     // basis they are permitted to reason over. They never see raw imagination.
-    const verifiedClaimRegistry: SynthesisClaimContext[] = verifiedClaims.map(c => ({
+    const verifiedClaimRegistry: SynthesisClaimContext[] = publishableClaims.map(c => ({
       id: c.id,
       citation_number: c.citation_number ?? 0,
       statement: c.statement,
       claim_type: c.claim_type,
       confidence: c.confidence,
     }));
-    const supportedEvidenceIds = new Set(verifiedClaims.flatMap(c => c.supporting_evidence_ids || []));
+    const supportedEvidenceIds = new Set(publishableClaims.flatMap(c => c.supporting_evidence_ids || []));
     const synthesisEvidence: SynthesisEvidenceContext[] = evidencePool
       .filter(e => supportedEvidenceIds.has(e.id))
       .slice(0, 20)
@@ -1088,7 +1089,7 @@ export class ResearchPipelineManager {
     // VERIFIED claim id. Dangling references are stripped; entities left with
     // none are DROPPED (an ungrounded entity is indistinguishable from a
     // hallucinated one and must not be published).
-    const validClaimIds = new Set(verifiedClaims.map(c => c.id));
+    const validClaimIds = new Set(publishableClaims.map(c => c.id));
     const filterClaimIds = (ids?: string[]): string[] => (ids || []).filter(id => validClaimIds.has(id));
     const droppedEntities = { competitors: 0, customerSegments: 0, pricingTiers: 0, regulatoryFactors: 0, risks: 0, trends: 0, opportunities: 0 };
 
@@ -1130,7 +1131,7 @@ export class ResearchPipelineManager {
     // Section citations are DERIVED from actual verified claims by type —
     // never hardcoded claim ids. Empty arrays are honest (no fake citations).
     const claimsOfTypes = (types: Claim['claim_type'][]): string[] =>
-      verifiedClaims.filter(c => types.includes(c.claim_type)).map(c => c.id);
+      publishableClaims.filter(c => types.includes(c.claim_type)).map(c => c.id);
 
     const sections: ReportSection[] = [
       {
