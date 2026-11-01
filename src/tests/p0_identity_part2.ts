@@ -230,7 +230,8 @@ export const p0IdentityStaticChecks: Check[] = [
         middleware.includes('current.lock_token !== options.lockToken') &&
         middleware.includes('respondedAt ?? createdAt') &&
         middleware.includes('(createdAt ?? 0) + IDEMPOTENCY_PENDING_TTL_MS') &&
-        middleware.includes("userId + '|' + method + '|' + path + '|' + idempotencyKey");
+        middleware.includes("userId + '|' + path + '|' + idempotencyKey") &&
+        middleware.includes('idempotencyRequestHash(method, path, req.body ?? null)');
     },
   },
   {
@@ -287,7 +288,10 @@ export const p0IdentityStaticChecks: Check[] = [
         status.includes('data?.lease_id !== leaseId') &&
         pipeline.includes("researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''))") &&
         pipeline.includes("researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''))") &&
-        pipeline.includes("researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''))");
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes('if (!completed)') &&
+        pipeline.includes('if (!failed)') &&
+        pipeline.includes('queue.failure_finalize_suppressed');
     },
   },
   {
