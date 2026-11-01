@@ -475,6 +475,14 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
       verifiedSizing.source_claim_ids.includes(unverifiedFinancial.id)) {
     return { passed: false, message: 'Financial metrics must be extracted only from supported claims with explicit currency and values' };
   }
+  const forecastOnlyClaim = makeClaim('clm-forecast-only', 7, []);
+  forecastOnlyClaim.claim_type = 'MARKET_SIZE';
+  forecastOnlyClaim.verification_status = 'SUPPORTED';
+  forecastOnlyClaim.statement = 'The TAM is projected to reach USD 4 billion by 2030.';
+  const forecastOnlySizing = extractVerifiedMarketSizing([forecastOnlyClaim]);
+  if (forecastOnlySizing.data_status !== 'SOURCE_BACKED' || forecastOnlySizing.tam_forecast !== 4_000_000_000 || forecastOnlySizing.tam_current !== null) {
+    return { passed: false, message: 'A verified forecast-only market value must remain source-backed without inventing a base value' };
+  }
   const currencylessClaim = makeClaim('clm-currencyless', 6, []);
   currencylessClaim.claim_type = 'MARKET_SIZE';
   currencylessClaim.verification_status = 'SUPPORTED';
