@@ -143,11 +143,25 @@ export function classifyDomainTier(domain: string): { tier: Source['source_type'
   const hostname = normalizeSourceHostname(domain);
   if (!hostname) return { tier: 'TIER_D', reliability: 45 };
 
+  // Use explicit official suffixes. A generic regex such as *.gov.<tld>
+  // incorrectly trusts commercial lookalikes like example.gov.com.
+  const governmentSuffixes = [
+    'gov', 'gov.uk', 'gov.in', 'gov.au', 'gov.ca', 'govt.nz',
+    'gov.sg', 'gov.za', 'gov.br', 'gov.cn', 'gov.my', 'gov.ph',
+    'gob.mx', 'gob.es', 'go.jp', 'go.kr',
+  ];
+  const academicSuffixes = [
+    'edu', 'edu.au', 'edu.in', 'edu.sg', 'edu.cn', 'edu.my',
+    'ac.uk', 'ac.in', 'ac.nz', 'ac.jp', 'ac.za', 'ac.kr',
+    'ac.cn', 'ac.id', 'ac.th', 'ac.ke', 'ac.ug', 'ac.tz',
+  ];
+  const matchesSuffix = (suffix: string) =>
+    hostname === suffix || hostname.endsWith('.' + suffix);
   const governmentOrAcademic =
-    /(^|\.)gov(\.[a-z]{2,})?$/.test(hostname) ||
-    /(^|\.)edu(\.[a-z]{2,})?$/.test(hostname) ||
-    /(^|\.)ac\.[a-z]{2,}$/.test(hostname) ||
-    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org'].some(domain => isDomainOrSubdomain(hostname, domain));
+    governmentSuffixes.some(matchesSuffix) ||
+    academicSuffixes.some(matchesSuffix) ||
+    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org']
+      .some(domain => isDomainOrSubdomain(hostname, domain));
 
   if (governmentOrAcademic || isDomainOrSubdomain(hostname, 'sec.gov')) {
     return { tier: 'TIER_A', reliability: 96 };
