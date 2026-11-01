@@ -118,7 +118,8 @@ let rateLimitStore: RateLimitStore | null = null;
 
 function getRateLimitStore(): RateLimitStore {
   if (rateLimitStore) return rateLimitStore;
-  const kind = resolveStoreKind(process.env.RATE_LIMIT_STORE, 'memory');
+  const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+  const kind = resolveStoreKind(process.env.RATE_LIMIT_STORE, productionDefaults ? 'firestore' : 'memory');
   if (kind === 'redis') {
     throwRedisNotProvisioned('rateLimiterByCategory');
   }
