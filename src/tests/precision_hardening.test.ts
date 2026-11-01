@@ -473,6 +473,12 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ HTML extraction preserves paragraphs, order, tables, titles, and verified publication metadata.');
 
+  const csvText = RealDocumentFetcher.parseCsvToText('Company,Description,Revenue\r\nAcme,"Research, analytics and forecasting",120\r\nBeta,"Line one\nLine two with ""quoted"" text",240');
+  if (!csvText.includes('Research, analytics and forecasting') || !csvText.includes('Line one\nLine two with "quoted" text') || !csvText.includes('120')) {
+    return { passed: false, message: 'CSV extraction must preserve quoted commas, escaped quotes, and embedded newlines' };
+  }
+  console.log('✔ CSV extraction preserves quoted fields, escaped quotes, and multiline cells.');
+
   // ===== 11. Claim verification regression tests =====
   const recentDate = new Date().toISOString();
   const sourceA = makeSource('src-corroboration-a', { domain: 'research-a.example', published_at: recentDate });
