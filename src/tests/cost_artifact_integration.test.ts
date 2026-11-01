@@ -6,9 +6,10 @@
  */
 
 import { CostGovernor } from '../server/cost_governor.js';
-import { InMemoryArtifactStorage, artifactRef, RetrievalArtifact } from '../server/artifacts.js';
+import { InMemoryArtifactStorage, artifactRef, parseArtifactRef, RetrievalArtifact } from '../server/artifacts.js';
 import { logEnvelope } from '../server/rate_limits.js';
 import { RealDocumentFetcher } from '../server/fetcher.js';
+import { getGeminiStandardRates } from '../server/gemini.js';
 
 function approxEqual(a: number, b: number, tol = 0.01): boolean {
   return Math.abs(a - b) <= tol;
@@ -16,6 +17,22 @@ function approxEqual(a: number, b: number, tol = 0.01): boolean {
 
 async function runCostGovernorTests(): Promise<{ passed: boolean; message: string }> {
   console.log('[Cost/Artifact Integration] Running cost governor + artifact persistence tests...');
+
+  // --- Gemini Standard-tier pricing table and scheduled effective date ---
+  const flash2026 = getGeminiStandardRates('gemini-3.8-flash', new Date('2026-12-31T23:59:59.000Z'));
+  const flash2027 = getGeminiStandardRates('gemini-3.8-flash', new Date('2027-01-01T00:00:00.000Z'));
+  const liteRates = getGeminiStandardRates('gemini-3.5-flash-lite', new Date('2026-11-02T00:00:00.000Z'));
+  if (
+    flash2026?.inputUsdPerMillion !== 0.75 ||
+    flash2026?.outputUsdPerMillion !== 3.75 ||
+    flash2027?.inputUsdPerMillion !== 1.5 ||
+    flash2027?.outputUsdPerMillion !== 7.5 ||
+    liteRates?.inputUsdPerMillion !== 0.30 ||
+    liteRates?.outputUsdPerMillion !== 2.50 ||
+    getGeminiStandardRates('unpriced-model') !== null
+  ) {
+    return { passed: false, message: 'Gemini token prices must match the configured Standard-tier model schedule and reject unpriced model IDs' };
+  }
 
   // --- Cost governor: cap enforcement ---
   const governor = new CostGovernor({ maxSources: 3, maxDocumentSizeBytes: 1000 });
@@ -34,6 +51,20 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
     return { passed: false, message: 'allowFetch should reject after maxSources exhausted' };
   }
 
+  // Retry budget is measured in retry attempts, never model output tokens.
+  const retryGov = new CostGovernor({ maxRetries: 3 });
+  retryGov.recordModelCall(100, 10000, 0.01);
+  if (
+    retryGov.allowRetry(0) !== null ||
+    retryGov.allowRetry(1) !== null ||
+    retryGov.allowRetry(2) !== null ||
+    retryGov.allowRetry(3) !== 'Retry cap exceeded: 3 retries per operation' ||
+    retryGov.allowRetry(-1) !== 'Retry count must be a non-negative integer' ||
+    retryGov.allowRetry(1.5) !== 'Retry count must be a non-negative integer'
+  ) {
+    return { passed: false, message: 'allowRetry must enforce the retry-attempt count independently of output tokens' };
+  }
+
   // --- Cost governor: budget enforcement ---
   const budgetGov = new CostGovernor({ requestBudgetUsd: 0.05 });
   budgetGov.recordFetch(100, 0.02);
@@ -41,6 +72,30 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
   budgetGov.recordFetch(100, 0.02);
   if (budgetGov.checkRequestBudget() !== 'Request budget exceeded: $0.05 per request') {
     return { passed: false, message: 'checkRequestBudget should fire when estimated cost exceeds budget' };
+  }
+
+  // --- SSRF address classification: special-purpose ranges fail closed --- 
+  const privateAddressCases = [
+    '127.0.0.1',
+    '100.127.0.1',
+    '192.0.2.10',
+    '198.18.0.1',
+    '203.0.113.8',
+    '::1',
+    'fc00::1',
+    'fe80::1',
+    '2001:db8::1',
+    '2002::1',
+    '3fff::1',
+    '::ffff:127.0.0.1',
+    '0:0:0:0:0:ffff:7f00:1',
+  ];
+  if (privateAddressCases.some(address => !RealDocumentFetcher.isPrivateIp(address))) {
+    return { passed: false, message: 'Private, mapped-private, documentation, and special-purpose IP ranges must be blocked' };
+  }
+  const publicAddressCases = ['8.8.8.8', '1.1.1.1', '2001:4860:4860::8888', '2606:4700:4700::1111'];
+  if (publicAddressCases.some(address => RealDocumentFetcher.isPrivateIp(address))) {
+    return { passed: false, message: 'Globally-routable IPv4 and IPv6 addresses must remain fetchable' };
   }
 
   // --- Artifact persistence ---
@@ -63,6 +118,30 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
   await storage.delete('src-1', 'job-1');
   if (await storage.getRaw(ref) !== null) {
     return { passed: false, message: 'delete should remove the raw artifact' };
+  }
+
+  // Job-scoped cleanup removes both artifact kinds for the selected job.
+  // Other jobs' files must remain untouched.
+  await storage.putRaw('src-2', 'job-2', 'https://example.test/src-2', 'text/plain', Buffer.from('other job'));
+  await storage.putNormalizedText('src-2', 'job-2', 'other normalized content');
+  await storage.putRaw('src-3', 'job-1', 'https://example.test/src-3', 'text/plain', Buffer.from('second source'));
+  await storage.deleteJob('job-1');
+  if (
+    await storage.getRaw(ref) !== null ||
+    await storage.getNormalizedText(textRef) !== null ||
+    await storage.getRaw(artifactRef('src-3', 'job-1', 'raw')) !== null ||
+    (await storage.getRaw(artifactRef('src-2', 'job-2', 'raw')))?.toString() !== 'other job'
+  ) {
+    return { passed: false, message: 'Job-scoped artifact cleanup must remove all artifacts for one job without touching another job' };
+  }
+
+  const parsedArtifactRef = parseArtifactRef(ref);
+  if (
+    parsedArtifactRef?.job_id !== 'job-1' ||
+    parsedArtifactRef?.source_id !== 'src-1' ||
+    parsedArtifactRef?.kind !== 'raw'
+  ) {
+    return { passed: false, message: 'Artifact references must preserve job_id and source_id path segments in their correct fields' };
   }
 
   // --- RetrievalArtifact shape ---

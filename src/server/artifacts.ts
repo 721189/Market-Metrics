@@ -56,6 +56,8 @@ export interface ArtifactStorage {
    * Delete an artifact (for cleanup / retention policies).
    */
   delete(source_id: string, job_id: string): Promise<void>;
+  /** Remove every raw and normalized artifact belonging to one job. */
+  deleteJob(job_id: string): Promise<void>;
 }
 
 /**
@@ -66,6 +68,7 @@ export interface ArtifactStorage {
  * real object storage provider.
  */
 export class InMemoryArtifactStorage implements ArtifactStorage {
+  readonly kind = 'memory';
   private readonly store = new Map<string, Buffer>();
   private readonly textStore = new Map<string, string>();
 
@@ -96,6 +99,16 @@ export class InMemoryArtifactStorage implements ArtifactStorage {
     this.textStore.delete(textRef);
     return Promise.resolve();
   }
+  async deleteJob(job_id: string): Promise<void> {
+    const prefix = `artifacts/${job_id}/`;
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) this.store.delete(key);
+    }
+    for (const key of this.textStore.keys()) {
+      if (key.startsWith(prefix)) this.textStore.delete(key);
+    }
+  }
+
 }
 
 export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'normalized'): string {
@@ -107,8 +120,9 @@ export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'no
 // ---------------------------------------------------------------------------
 // Firestore / Firebase Storage-backed artifact store (production)
 // ---------------------------------------------------------------------------
-// Stores raw bytes and normalized text in Firebase Cloud Storage.
-// Falls back to InMemoryArtifactStorage when STORAGE_BUCKET is not configured.
+// Stores raw bytes and normalized text in Firebase Cloud Storage. The selector
+// below permits in-memory fallback only for local development and tests;
+// staging/production fail closed when a durable bucket is unavailable.
 // ---------------------------------------------------------------------------
 
 export class FirestoreArtifactStorage implements ArtifactStorage {
@@ -131,9 +145,9 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
       metadata: {
         cacheControl: 'no-cache',
         metadata: {
-          source_id: storageRef.split('/')[1] || 'unknown',
-          job_id: storageRef.split('/')[2] || 'unknown',
-          kind: storageRef.split('/').slice(-1)[0] || 'unknown',
+          source_id: parseArtifactRef(storageRef)?.source_id || 'unknown',
+          job_id: parseArtifactRef(storageRef)?.job_id || 'unknown',
+          kind: parseArtifactRef(storageRef)?.kind || 'unknown',
         },
       },
     });
@@ -183,6 +197,30 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
       // Best-effort cleanup.
     }
   }
+  async deleteJob(job_id: string): Promise<void> {
+    const bucket = getStorageInstance();
+    const prefix = `artifacts/${job_id}/`;
+    const [files] = await bucket.getFiles({ prefix });
+
+    // Bound concurrency to avoid an unbounded burst against Cloud Storage.
+    const concurrency = 40;
+    for (let index = 0; index < files.length; index += concurrency) {
+      const chunk = files.slice(index, index + concurrency);
+      const results = await Promise.allSettled(
+        chunk.map(file => file.delete({ ignoreNotFound: true })),
+      );
+      const failures = results.filter((result): result is PromiseRejectedResult =>
+        result.status === 'rejected',
+      );
+      if (failures.length > 0) {
+        throw new Error(
+          `Artifact cleanup failed for job ${job_id}: ${failures.length} of ${chunk.length} object deletions failed. `
+          + String(failures[0].reason?.message || failures[0].reason),
+        );
+      }
+    }
+  }
+
 }
 
 export function parseArtifactRef(ref: string): { job_id: string; source_id: string; kind: string } | null {
@@ -196,4 +234,34 @@ export function parseArtifactRef(ref: string): { job_id: string; source_id: stri
     };
   }
   return null;
+}
+
+/**
+ * Select an artifact backend without silently weakening production durability.
+ * Local development and tests may use memory when Storage is not configured.
+ * Staging/production must have a durable Cloud Storage bucket or fail the job.
+ */
+export function createArtifactStorage(
+  env: NodeJS.ProcessEnv = process.env,
+  durableFactory: () => ArtifactStorage = () => new FirestoreArtifactStorage(),
+): ArtifactStorage {
+  try {
+    return durableFactory();
+  } catch (error) {
+    const appEnv = (env.APP_ENV || '').trim().toLowerCase();
+    const nodeEnv = (env.NODE_ENV || '').trim().toLowerCase();
+    const requiresDurability =
+      appEnv === 'production' ||
+      appEnv === 'staging' ||
+      nodeEnv === 'production';
+
+    if (requiresDurability) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        '[ArtifactStorage] Durable Cloud Storage is required in staging/production; refusing in-memory fallback. '
+        + detail,
+      );
+    }
+    return new InMemoryArtifactStorage();
+  }
 }

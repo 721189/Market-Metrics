@@ -45,7 +45,7 @@ import { RealDocumentFetcher } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer, ContradictionEngine } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
-import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
+import { InMemoryArtifactStorage, createArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
 import { logEnvelope } from './rate_limits.js';
@@ -119,17 +119,53 @@ function isCancelled(job: ResearchJob, signal?: AbortSignal): boolean {
  * Deterministic publisher-credibility tiering by domain — a documented,
  * reproducible scoring heuristic (never a fabricated metadata claim).
  */
-function classifyDomainTier(domain: string): { tier: Source['source_type']; reliability: number } {
-  if (domain.includes('.gov') || domain.includes('.edu') || domain.includes('sec.gov') || domain.includes('worldbank.org') || domain.includes('imf.org')) {
+function normalizeSourceHostname(domain: string): string {
+  const raw = String(domain || '').trim().toLowerCase();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw.includes('://') ? raw : 'https://' + raw);
+    return parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function isDomainOrSubdomain(hostname: string, registrableDomain: string): boolean {
+  return hostname === registrableDomain || hostname.endsWith('.' + registrableDomain);
+}
+
+/**
+ * Conservative publisher credibility tiers. Trust is granted only to canonical
+ * hostnames or their true subdomains; lookalike hostnames and unknown domains
+ * remain below the verifier's source-reliability acceptance threshold.
+ */
+export function classifyDomainTier(domain: string): { tier: Source['source_type']; reliability: number } {
+  const hostname = normalizeSourceHostname(domain);
+  if (!hostname) return { tier: 'TIER_D', reliability: 45 };
+
+  const governmentOrAcademic =
+    /(^|\.)gov(\.[a-z]{2,})?$/.test(hostname) ||
+    /(^|\.)edu(\.[a-z]{2,})?$/.test(hostname) ||
+    /(^|\.)ac\.[a-z]{2,}$/.test(hostname) ||
+    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org'].some(domain => isDomainOrSubdomain(hostname, domain));
+
+  if (governmentOrAcademic || isDomainOrSubdomain(hostname, 'sec.gov')) {
     return { tier: 'TIER_A', reliability: 96 };
   }
-  if (domain.includes('gartner') || domain.includes('mckinsey') || domain.includes('bain') || domain.includes('bloomberg') || domain.includes('statista') || domain.includes('idc.com')) {
+
+  const tierB = ['gartner.com', 'mckinsey.com', 'bain.com', 'bloomberg.com', 'statista.com', 'idc.com'];
+  if (tierB.some(domain => isDomainOrSubdomain(hostname, domain))) {
     return { tier: 'TIER_B', reliability: 91 };
   }
-  if (domain.includes('reuters') || domain.includes('techcrunch') || domain.includes('wsj') || domain.includes('forbes') || domain.includes('ft.com')) {
+
+  const tierC = ['reuters.com', 'techcrunch.com', 'wsj.com', 'forbes.com', 'ft.com'];
+  if (tierC.some(domain => isDomainOrSubdomain(hostname, domain))) {
     return { tier: 'TIER_C', reliability: 84 };
   }
-  return { tier: 'TIER_D', reliability: 76 };
+
+  // Unknown sources are still retained for transparency and discovery, but
+  // they cannot satisfy the verifier's >=70 reliability gate by default.
+  return { tier: 'TIER_D', reliability: 55 };
 }
 
 async function logAndEmitEvent(
@@ -212,7 +248,8 @@ async function logAndEmitEvent(
     }
     return false;
   }
-  await DatabaseRepository.addEvent(job.id, event);
+  const eventSaved = await DatabaseRepository.addEvent(job.id, event, userId);
+  if (!eventSaved) return false;
   pipelineEmitter.emit('event:' + job.id, event);
   return true;
 }
@@ -322,8 +359,24 @@ export class ResearchPipelineManager {
     userId: string
   ): Promise<'deleted' | 'not_found' | 'not_terminal'> {
     if (!userId) throw new Error('userId is required for deleteJob');
+    const cleanupArtifacts = async () => {
+      // Resolve the same environment-specific backend as the research pipeline.
+      // Staging/production fail closed if Cloud Storage is unavailable; local
+      // development gets a harmless in-memory cleanup adapter.
+      const storage = createArtifactStorage();
+      await storage.deleteJob(jobId);
+    };
     const job = await DatabaseRepository.getJob(jobId, userId);
-    if (!job) return 'not_found';
+    if (!job) {
+      // A prior deletion attempt may have committed its tombstone but failed
+      // during chunked cleanup. Retry cleanup idempotently without exposing the
+      // tombstoned job to ordinary reads.
+      const resumed = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts);
+      if (!resumed) return 'not_found';
+      const { CacheLayer } = await import('./cache.js');
+      await CacheLayer.invalidateReportCache(jobId, userId);
+      return 'deleted';
+    }
 
     // Compare as plain strings: JobStatus includes stage-prefixed values
     // (PLANNING..) that are not part of the terminal QueueExecutionStatus union.
@@ -335,7 +388,10 @@ export class ResearchPipelineManager {
     // (or after) its documents are removed.
     cancellationRegistry.abort(jobId, 'USER_CANCEL');
 
-    await DatabaseRepository.deleteJob(jobId, userId);
+    const deleted = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts);
+    if (!deleted) return 'not_found';
+    const { CacheLayer } = await import('./cache.js');
+    await CacheLayer.invalidateReportCache(jobId, userId);
     logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
     return 'deleted';
   }
@@ -399,13 +455,9 @@ export class ResearchPipelineManager {
       stages,
     };
 
-    await DatabaseRepository.saveJob(job, userId);
-
-    // Enqueue in queue
-    await researchQueue.add(
-      'market-research-execution',
-      { jobId: job.id, job, userId }
-    );
+    // Job + queue row commit atomically. A partial dispatch must never leave
+    // an accepted job visible in history but permanently absent from the queue.
+    await researchQueue.addWithJob(job, userId);
 
     return job;
   }
@@ -413,7 +465,7 @@ export class ResearchPipelineManager {
   /**
    * The True 9-Stage Execution Worker
    */
-  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string): Promise<void> {
+  public static async executePipelineWorker(job: ResearchJob, signal?: AbortSignal, workerId?: string, leaseId?: string): Promise<void> {
     if (isCancelled(job, signal)) return;
     if (workerId) {
       logger.debug('pipeline.worker_start', `Stage worker executing job ${job.id} as ${workerId}`, {
@@ -424,12 +476,11 @@ export class ResearchPipelineManager {
     const userId = (job as any).user_id || 'unknown';
     const requestId = (job as any).request_id || `req-${job.id}`;
     const costGovernor = new CostGovernor({ userId });
-    let artifactStorage: import('./artifacts.js').ArtifactStorage;
+    const executionId = leaseId || String((job as any).lease_id || `${workerId || 'local'}-${Date.now()}`);
     try {
-      artifactStorage = new FirestoreArtifactStorage();
-    } catch {
-      artifactStorage = new InMemoryArtifactStorage();
-      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+    const artifactStorage = createArtifactStorage();
+    if (artifactStorage instanceof InMemoryArtifactStorage) {
+      logger.warn('pipeline.artifact_fallback', 'Using in-memory artifact storage outside staging/production', {});
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
@@ -466,7 +517,8 @@ export class ResearchPipelineManager {
         job.geography,
         job.time_horizon,
         job.objectives,
-        operationSignal
+        operationSignal,
+        costGovernor
       ),
       5 * 60 * 1000,
       'PLANNING',
@@ -487,7 +539,7 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
 
     const liveDiscovered = await withTimeout(
-      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal),
+      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal, costGovernor),
       5 * 60 * 1000,
       'DISCOVERING',
       signal
@@ -760,6 +812,7 @@ export class ResearchPipelineManager {
           text: sourceTexts.get(s.id) || '',
         })),
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'EXTRACTING',
@@ -935,6 +988,7 @@ export class ResearchPipelineManager {
           text: sourceTexts.get(s.id) || '',
         })),
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'ANALYZING',
@@ -1063,6 +1117,7 @@ export class ResearchPipelineManager {
         claims: verifiedClaimRegistry,
         evidence: synthesisEvidence,
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
@@ -1079,6 +1134,7 @@ export class ResearchPipelineManager {
         currency,
         claims: verifiedClaimRegistry,
         signal: operationSignal,
+        costGovernor,
       }),
       5 * 60 * 1000,
       'SYNTHESIZING',
@@ -1257,7 +1313,7 @@ export class ResearchPipelineManager {
     recordJobCompleted(Date.now() - pipelineStartedAt, { job_id: job.id });
     // userId threads through so the spend persists into the CostStore and
     // the next canStartJob() call for this user sees the real total.
-    recordCostPerJob(costGovernor.snapshot(job.id).request.estimated_cost_usd, { job_id: job.id }, userId);
+    // Final cost settlement now runs from finally, including failures/cancellation.
 
     await logAndEmitEvent(job, 'completed', 'GENERATING_REPORT', 'Intelligence dossier successfully generated, audited, and persisted to database.', 100, {
       report_id: job.id,
@@ -1266,6 +1322,22 @@ export class ResearchPipelineManager {
       citation_graph: graphValidation.stats,
       grounded_strategic_entities_dropped: droppedEntities,
     });
+    } finally {
+      if (userId && userId !== 'unknown') {
+        const costUsd = costGovernor.snapshot(job.id).request.estimated_cost_usd;
+        try {
+          await costGovernor.recordJobCost(userId, job.id, costUsd, executionId);
+          recordCostPerJob(costUsd, { job_id: job.id }, userId);
+        } catch (costError) {
+          logger.error('pipeline.cost_settlement_failed', 'Could not persist spend for this worker execution', {
+            user_id: userId,
+            job_id: job.id,
+            status: costError instanceof Error ? costError.message : String(costError),
+          });
+          throw costError;
+        }
+      }
+    }
   }
 }
 
@@ -1316,7 +1388,7 @@ export async function startWorker() {
         if (heartbeatInFlight) return; // never stack overlapping heartbeats
         heartbeatInFlight = true;
         try {
-          const hb = await researchQueue.heartbeat(job!.id, workerId);
+          const hb = await researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''));
           if (!hb.owned && hb.definitive) {
             // Lease ownership was definitively lost (expired and re-claimed by
             // another worker, or the job was cancelled): STOP this worker.
@@ -1336,7 +1408,7 @@ export async function startWorker() {
         // stuck in RUNNING indefinitely. The AbortSignal propagates to every
         // Gemini/fetch call inside the pipeline.
         await withTimeout(
-          (operationSignal) => ResearchPipelineManager.executePipelineWorker(pipelineJob, operationSignal, workerId),
+          (operationSignal) => ResearchPipelineManager.executePipelineWorker(pipelineJob, operationSignal, workerId, String(job.lease_id || '')),
           PIPELINE_TIMEOUT_MS,
           `pipeline:${job.id}`,
           controller.signal
@@ -1346,7 +1418,15 @@ export async function startWorker() {
         } else if (!leaseOwned) {
           logger.info('queue.job_abandoned', `Job ${job.id} abandoned after lease loss; ownership transferred.`, { job_id: job.id });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId);
+          const completed = await researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''));
+          if (!completed) {
+            leaseOwned = false;
+            cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+            controller.abort();
+            logger.warn('queue.completion_suppressed', 'Completion refused because this worker no longer owns the exact lease.', {
+              job_id: researchJobId,
+            });
+          }
         }
       } catch (err) {
         const rawFailure = err instanceof Error ? err.message : String(err || 'Unknown worker failure');
@@ -1361,8 +1441,15 @@ export async function startWorker() {
         } else if (controller.signal.aborted && cancellationRegistry.abortReason(researchJobId) === 'USER_CANCEL') {
           logger.info('queue.job_aborted', 'User cancellation preserved; research worker is stopping.', { job_id: researchJobId });
         } else {
-          await researchQueue.updateJobStatus(job.id, 'FAILED', workerId);
-          if (ownerUserId) {
+          const failed = await researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''));
+          if (!failed) {
+            leaseOwned = false;
+            cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+            controller.abort();
+            logger.warn('queue.failure_finalize_suppressed', 'Failure finalization refused because this worker no longer owns the exact lease.', {
+              job_id: researchJobId,
+            });
+          } else if (ownerUserId) {
             try {
               await ResearchPipelineManager.failJob(researchJobId, ownerUserId, err, String(pipelineJob.current_stage || 'PLANNING'));
             } catch (finalizeError) {

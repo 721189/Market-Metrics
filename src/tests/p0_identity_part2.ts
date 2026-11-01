@@ -109,6 +109,287 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'global admin guard verifies Firebase identity before checking admin role',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const rateLimits = readSource('src/server/rate_limits.ts');
+      const coarseLimit = server.indexOf('app.use(rateLimiterMiddleware(');
+      const adminGuard = server.indexOf('app.use(adminPathBlocker())');
+      const metricsStart = server.indexOf("app.get('/metrics'");
+      const metricsRoute = server.slice(metricsStart, metricsStart + 180);
+      return coarseLimit >= 0 && adminGuard > coarseLimit &&
+        metricsStart >= 0 && metricsRoute.includes('rateLimiterByCategory()') &&
+        rateLimits.includes('return authMiddleware(req, res, authorizeAdmin)');
+    },
+  },
+  {
+    name: 'identity-aware rate limits run only after user authentication',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const researchAuth = server.indexOf("app.use('/api/v1/research', authMiddleware)");
+      const userAuth = server.indexOf("app.use('/api/v1/user', authMiddleware)");
+      const categoryLimiter = server.indexOf('app.use(rateLimiterByCategory())');
+      return researchAuth >= 0 && userAuth > researchAuth && categoryLimiter > userAuth;
+    },
+  },
+  {
+    name: 'job and report repository reads reject missing owner metadata',
+    fn: async () => {
+      const db = readSource('src/server/db.ts');
+      const getJobStart = db.indexOf('public static async getJob');
+      const getJobEnd = db.indexOf('public static async listJobs', getJobStart);
+      const getJob = db.slice(getJobStart, getJobEnd);
+      const getReportStart = db.indexOf('public static async getReport');
+      const getReportEnd = db.indexOf('public static async deleteJob', getReportStart);
+      const getReport = db.slice(getReportStart, getReportEnd);
+      return getJob.includes('data.user_id !== userId') &&
+        getJob.includes('data.deletion_requested_at') &&
+        getReport.includes('jobData?.user_id !== userId') &&
+        getReport.includes('jobData.deletion_requested_at') &&
+        db.includes('!existing?.user_id || existing.user_id !== userId');
+    },
+  },
+  {
+    name: 'deletion tombstones prevent stale workers recreating jobs, reports, or orphaned events',
+    fn: async () => {
+      const db = readSource('src/server/db.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const guardedSaveStart = db.indexOf('public static async saveJobIfNonTerminal');
+      const guardedSaveEnd = db.indexOf('public static async getJob', guardedSaveStart);
+      const guardedSave = db.slice(guardedSaveStart, guardedSaveEnd);
+      const addEventStart = db.indexOf('public static async addEvent');
+      const addEventEnd = db.indexOf('public static async getEvents', addEventStart);
+      const addEvent = db.slice(addEventStart, addEventEnd);
+      const saveReportStart = db.indexOf('public static async saveReport');
+      const saveReportEnd = db.indexOf('public static async getReport', saveReportStart);
+      const saveReport = db.slice(saveReportStart, saveReportEnd);
+      const deleteStart = db.indexOf('public static async deleteJob');
+      const deleteJob = db.slice(deleteStart);
+      return guardedSave.includes('if (!snapshot.exists) return false;') &&
+        guardedSave.includes('existing.deletion_requested_at') &&
+        addEvent.includes('transaction.get(jobRef)') &&
+        addEvent.includes('jobData.deletion_requested_at') &&
+        saveReport.includes('transaction.get(jobRef)') &&
+        saveReport.includes('jobData.deletion_requested_at') &&
+        deleteJob.includes('deletion_requested_at: FieldValue.serverTimestamp()') &&
+        deleteJob.includes('const chunkSize = 450') &&
+        pipeline.includes('DatabaseRepository.addEvent(job.id, event, userId)') &&
+        pipeline.includes('if (!eventSaved) return false') &&
+        pipeline.includes('A prior deletion attempt may have committed its tombstone') &&
+        pipeline.includes('const resumed = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts)') &&
+        pipeline.includes('await storage.deleteJob(jobId)') &&
+        db.includes('if (cleanupArtifacts) await cleanupArtifacts()');
+    },
+  },
+  {
+    name: 'production defaults all persistence-critical stores to Firestore',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      const cost = readSource('src/server/cost_governor.ts');
+      const rate = readSource('src/server/rate_limits.ts');
+      const cache = readSource('src/server/cache.ts');
+      const render = readSource('render.yaml');
+      const productionDefault = /productionDefaults = process\.env\.NODE_ENV === 'production' \|\| process\.env\.APP_ENV === 'production'/;
+      return productionDefault.test(middleware) &&
+        productionDefault.test(cost) &&
+        productionDefault.test(rate) &&
+        productionDefault.test(cache) &&
+        render.includes('key: IDEMPOTENCY_STORE\n        value: firestore') &&
+        render.includes('key: COST_STORE\n        value: firestore') &&
+        render.includes('key: RATE_LIMIT_STORE\n        value: firestore') &&
+        render.includes('key: CACHE_STORE\n        value: firestore');
+    },
+  },
+  {
+    name: 'idempotency reserves before handler and fails closed when Firestore is unavailable',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      const claimStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('export function idempotencyMiddleware'));
+      const claimEnd = middleware.indexOf("}).then((decision: IdempotencyDecision)", claimStart);
+      if (claimStart < 0 || claimEnd < 0) return false;
+      const claim = middleware.slice(claimStart, claimEnd);
+      const completionStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('function installIdempotencyResponse'));
+      const completionEnd = middleware.indexOf("}).then(committed => {", completionStart);
+      if (completionStart < 0 || completionEnd < 0) return false;
+      const completion = middleware.slice(completionStart, completionEnd);
+      return !/res\.json|res\.status/.test(claim) &&
+        claim.includes("state: 'IN_FLIGHT'") &&
+        claim.includes('lock_token: lockToken') &&
+        completion.includes("state: 'COMPLETED'") &&
+        completion.includes('data.lock_token !== options.lockToken') &&
+        completion.includes('transaction.update(ref') &&
+        middleware.includes('IDEMPOTENCY_STORE_UNAVAILABLE') &&
+        middleware.includes('sendIdempotencyError(\n      res, 503');
+    },
+  },
+  {
+    name: 'expired idempotency reservations are fenced and legacy records receive bounded expiry',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      return middleware.includes('data.lock_token !== options.lockToken') &&
+        middleware.includes('current.lock_token !== options.lockToken') &&
+        middleware.includes('respondedAt ?? createdAt') &&
+        middleware.includes('(createdAt ?? 0) + IDEMPOTENCY_PENDING_TTL_MS') &&
+        middleware.includes("userId + '|' + path + '|' + idempotencyKey") &&
+        middleware.includes('idempotencyRequestHash(method, path, req.body ?? null)');
+    },
+  },
+  {
+    name: 'Render readiness probes critical dependencies with one bounded Firestore read',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const server = readSource('server.ts');
+      const render = readSource('render.yaml');
+      const probeStart = queue.indexOf('async checkReady()');
+      const probeEnd = queue.indexOf('async getStats()', probeStart);
+      const probe = queue.slice(probeStart, probeEnd);
+      const readyStart = server.indexOf("app.get('/ready'");
+      const readyEnd = server.indexOf('// OPERATIONAL METRICS', readyStart);
+      const ready = server.slice(readyStart, readyEnd);
+      return probe.includes('collection(this.collectionName).limit(1).get()') &&
+        ready.includes('researchQueue.checkReady()') &&
+        ready.includes('GEMINI_API_KEY') &&
+        ready.includes('res.status(503)') &&
+        !ready.includes('researchQueue.getStats()') &&
+        render.includes('healthCheckPath: /ready');
+    },
+  },
+  {
+    name: 'stale queue recovery is expiry-indexed and scans beyond healthy running jobs',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const indexConfig = JSON.parse(readSource('firestore.indexes.json'));
+      const start = queue.indexOf('async recoverStaleJobs()');
+      const end = queue.indexOf('private async _recoverStaleJobTransaction', start);
+      const recovery = queue.slice(start, end);
+      const hasIndex = indexConfig.indexes.some((index: any) =>
+        index.collectionGroup === 'job_queue' &&
+        index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
+        index.fields?.some((field: any) => field.fieldPath === 'leased_until' && field.order === 'ASCENDING')
+      );
+      const hasFifoIndex = indexConfig.indexes.some((index: any) =>
+        index.collectionGroup === 'job_queue' &&
+        index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
+        index.fields?.some((field: any) => field.fieldPath === 'created_at' && field.order === 'ASCENDING')
+      );
+      const claimStart = queue.indexOf('async claimNextJob(');
+      const claimEnd = queue.indexOf('async observeQueueDepth()', claimStart);
+      const claim = queue.slice(claimStart, claimEnd);
+      return claim.includes(".where('status', '==', 'QUEUED')") &&
+        claim.includes(".orderBy('created_at', 'asc')") &&
+        claim.includes('.limit(25)') &&
+        hasFifoIndex &&
+        recovery.includes(".where('status', '==', 'RUNNING')") &&
+        recovery.includes(".where('leased_until', '<=', Timestamp.fromMillis(now))") &&
+        recovery.includes(".orderBy('leased_until', 'asc')") &&
+        recovery.includes('.limit(100)') &&
+        hasIndex;
+    },
+  },
+  {
+    name: 'worker heartbeat and terminal writes require the exact per-claim lease token',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const heartbeatStart = queue.indexOf('async heartbeat(');
+      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
+      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
+      const statusStart = queue.indexOf('async updateJobStatus(');
+      const statusEnd = queue.indexOf('async getStats()', statusStart);
+      const status = queue.slice(statusStart, statusEnd);
+      return heartbeat.includes('leaseId: string') &&
+        heartbeat.includes('data?.lease_id === leaseId') &&
+        status.includes('data?.lease_id !== leaseId') &&
+        pipeline.includes("researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes('if (!completed)') &&
+        pipeline.includes('if (!failed)') &&
+        pipeline.includes('queue.failure_finalize_suppressed');
+    },
+  },
+  {
+    name: 'every Gemini provider call is cost-governed and uses token usage metadata',
+    fn: async () => {
+      const gemini = readSource('src/server/gemini.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const providerCalls = gemini.split('ai.models.generateContent({').length - 1;
+      const trackedCalls = gemini.split('generateWithCostTracking(').length - 1;
+      const trackingHelperStart = gemini.indexOf('async function generateWithCostTracking');
+      const trackingHelperEnd = gemini.indexOf('\n}\n', trackingHelperStart);
+      const trackingHelper = trackingHelperStart >= 0 && trackingHelperEnd > trackingHelperStart
+        ? gemini.slice(trackingHelperStart, trackingHelperEnd)
+        : '';
+      // Count actual call sites rather than a brittle fixed number. Each direct
+      // provider invocation must be wrapped by the shared cost-tracking helper.
+      return providerCalls > 0 &&
+        providerCalls === trackedCalls &&
+        trackingHelper.includes('readGeminiTokenUsage(response)') &&
+        trackingHelper.includes('costGovernor.allowModelCall()') &&
+        trackingHelper.includes('costGovernor.checkRequestBudget()') &&
+        trackingHelper.includes('costGovernor.recordModelCall(') &&
+        gemini.includes('response?.usageMetadata') &&
+        gemini.includes('GEMINI_MODEL_PRICING_JSON') &&
+        pipeline.includes('signal: operationSignal,') && pipeline.includes('costGovernor,') &&
+        pipeline.includes('await costGovernor.recordJobCost(userId, job.id, costUsd, executionId)') &&
+        pipeline.includes('} finally {');
+    },
+  },
+  {
+    name: 'persistent spend settlement is idempotent per worker execution',
+    fn: async () => {
+      const stores = readSource('src/server/stores.ts');
+      const governor = readSource('src/server/cost_governor.ts');
+      const indexes = JSON.parse(readSource('firestore.indexes.json'));
+      const hasTtl = indexes.fieldOverrides?.some((field: any) =>
+        field.collectionGroup === 'cost_usage_events' &&
+        field.fieldPath === 'expires_at' &&
+        field.ttl === true
+      );
+      return stores.includes('recordOnce(idempotencyKey') &&
+        stores.includes("collection('cost_usage_events')") &&
+        stores.includes('tx.create(eventRef') &&
+        governor.includes('.recordOnce(eventKey, costUsd') &&
+        governor.includes("executionId: string = jobId") &&
+        hasTtl;
+    },
+  },
+  {
+    name: 'report cache refuses stale entries after parent job deletion or tombstoning',
+    fn: async () => {
+      const cache = readSource('src/server/cache.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const cacheStart = cache.indexOf('static async getReportCached');
+      const cacheEnd = cache.indexOf('static async invalidateReportCache', cacheStart);
+      const readPath = cache.slice(cacheStart, cacheEnd);
+      return readPath.includes('DatabaseRepository.getJob(jobId, userId)') &&
+        readPath.includes('if (!liveJob)') &&
+        readPath.includes('await store.del(key)') &&
+        pipeline.includes('await CacheLayer.invalidateReportCache(jobId, userId)');
+    },
+  },
+  {
+    name: 'environment labels fail closed and staging cannot mount Vite dev middleware',
+    fn: async () => {
+      const environment = readSource('src/server/environment.ts');
+      return environment.includes('Unknown \${source} value') &&
+        environment.includes('conflicts with NODE_ENV') &&
+        environment.includes("allowViteDevServer: name === 'development' || name === 'test'") &&
+        environment.includes("cfg.name === 'staging'") &&
+        environment.includes('APPLET_DEV_PROJECT_ID');
+    },
+  },
+  {
+    name: 'research job creation applies idempotency after authentication',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const routeStart = server.indexOf("app.post('/api/v1/research'");
+      const route = server.slice(routeStart, routeStart + 160);
+      const auth = server.indexOf("app.use('/api/v1/research', authMiddleware)");
+      return routeStart >= 0 && route.includes('idempotencyMiddleware') && auth >= 0 && auth < routeStart;
+    },
+  },
+  {
     name: 'all nine pipeline stages have explicit start and completion transitions',
     fn: async () => {
       const pipeline = readSource('src/server/pipeline.ts');
@@ -205,6 +486,51 @@ export const p0IdentityStaticChecks: Check[] = [
         /VITE_FIREBASE_PROJECT_ID/.test(client) &&
         /missing required env/.test(client)
       );
+    },
+  },
+
+  {
+    name: 'worker heartbeat and finalization reject expired leases',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const heartbeatStart = queue.indexOf('async heartbeat(');
+      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
+      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
+      const statusStart = queue.indexOf('async updateJobStatus(');
+      const statusEnd = queue.indexOf('async checkReady()', statusStart);
+      const status = queue.slice(statusStart, statusEnd);
+      return queue.includes('export function isLeaseActive(') &&
+        heartbeat.includes('isLeaseActive(data?.leased_until)') &&
+        status.includes('!isLeaseActive(data?.leased_until)') &&
+        status.includes("data?.status !== 'RUNNING'");
+    },
+  },
+  {
+    name: 'job persistence and queue dispatch are atomic',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const start = queue.indexOf('async addWithJob(');
+      const end = queue.indexOf('async add(', start);
+      const enqueue = queue.slice(start, end);
+      return enqueue.includes("adminDb.runTransaction(async transaction =>") &&
+        enqueue.includes('transaction.create(jobRef, jobDocument)') &&
+        enqueue.includes('transaction.create(queueRef, queueDocument)') &&
+        pipeline.includes('await researchQueue.addWithJob(job, userId)') &&
+        !pipeline.includes('await DatabaseRepository.saveJob(job, userId)');
+    },
+  },
+  {
+    name: 'queue position uses a bounded aggregation and fails as unknown',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const start = queue.indexOf('async getJobPosition(');
+      const end = queue.indexOf('async cancel(', start);
+      const position = queue.slice(start, end);
+      return position.includes(".where('created_at', '<', createdAt)") &&
+        position.includes('.count()') &&
+        !position.includes(".where('status', '==', 'QUEUED')\n                .get()") &&
+        position.includes('return null;');
     },
   },
 ];

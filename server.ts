@@ -188,14 +188,12 @@ async function startServer() {
 
   // Global Security & Optimization Middleware
   
-  // Server-side administrative path lockdown (must precede any route handlers).
-  app.use(adminPathBlocker());
-
-  // Identity-aware rate limiting by IP + Firebase UID + endpoint category.
-  app.use(rateLimiterByCategory());
-
-  // Coarse global safety rate limit (kept as a backstop; category limits above are the real control).
+  // Coarse IP safety limit applies before authentication as a backstop.
+  // Identity-aware category limits are mounted only after auth has populated UID.
   app.use(rateLimiterMiddleware({ maxRequests: 300, windowSec: 60 }));
+
+  // Admin paths authenticate before role checks; public paths pass through.
+  app.use(adminPathBlocker());
 
   // -------------------------------------------------------------
   // HEALTH & READINESS ENDPOINTS
@@ -210,28 +208,39 @@ async function startServer() {
   });
 
   app.get('/ready', async (req: Request, res: Response) => {
-    // Readiness must not fabricate a tenant. Queue depth is tenant-independent
-    // and comes from the queue collection; per-tenant job counts are not
-    // probed here (that would require inventing an identity).
-    const queueStats = await researchQueue.getStats();
-
-    res.status(200).json({
-      status: 'ready',
-      gemini_configured: Boolean(process.env.GEMINI_API_KEY),
-      environment: process.env.NODE_ENV || 'development',
-      queue: queueStats,
-      version: '2.0.0',
-    });
+    // A platform probe runs every few seconds. Verify the critical Firestore
+    // dependency with a bounded one-document read, not five queue-wide counts.
+    try {
+      await researchQueue.checkReady();
+      if (!process.env.GEMINI_API_KEY?.trim()) {
+        return res.status(503).json({
+          status: 'not_ready',
+          error: { code: 'GEMINI_NOT_CONFIGURED', message: 'Research provider is not configured.' },
+        });
+      }
+      return res.status(200).json({
+        status: 'ready',
+        environment: process.env.APP_ENV || process.env.NODE_ENV || 'development',
+        dependencies: { firestore: 'available', gemini: 'configured' },
+        version: '2.0.0',
+      });
+    } catch (err) {
+      logger.warn('health.readiness_failed', 'Critical dependency readiness probe failed', {
+        status: (err as Error)?.message || String(err),
+      });
+      return res.status(503).json({
+        status: 'not_ready',
+        error: { code: 'FIRESTORE_UNAVAILABLE', message: 'A required data dependency could not be reached.' },
+      });
+    }
   });
 
   // -------------------------------------------------------------
   // OPERATIONAL METRICS (admin only)
   // -------------------------------------------------------------
-  // adminPathBlocker() (installed before every route) returns 404 to any caller
-  // that is not an authenticated admin, so this handler is reachable only by an
-  // authorized operator. Front-end visibility is irrelevant — the authorization
-  // decision is made server-side, on every request.
-  app.get('/metrics', (req: Request, res: Response) => {
+  // The global admin-path guard authenticates first, then applies the admin
+  // allow-list. Front-end visibility is irrelevant to this server-side check.
+  app.get('/metrics', rateLimiterByCategory(), (req: Request, res: Response) => {
     const snapshot = observabilitySnapshot();
     res.status(200).json({
       ...snapshot,
@@ -274,7 +283,11 @@ async function startServer() {
   app.use('/api/v1/research', authMiddleware);
   app.use('/api/v1/user', authMiddleware);
 
-  app.post('/api/v1/research', async (req: Request, res: Response) => {
+  // Run identity-aware budgets after Firebase verification. Otherwise every
+  // authenticated request is charged to the shared anonymous bucket.
+  app.use(rateLimiterByCategory());
+
+  app.post('/api/v1/research', idempotencyMiddleware, async (req: Request, res: Response) => {
     try {
       const tenantId = getUserId(req);
       const { question, industry, geography, time_horizon, objectives, target_company, competitors, scope_depth } = req.body;

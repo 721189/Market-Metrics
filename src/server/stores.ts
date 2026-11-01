@@ -31,12 +31,44 @@ export interface RateLimitStore {
   hit(key: string, limit: number, windowSec: number): Promise<RateLimitVerdict>;
 }
 
+export interface CostBucketUpdate {
+  key: string;
+  ttlSec: number;
+}
+
+export interface CostBudgetScope {
+  spendKey: string;
+  reservedKey: string;
+  limitUsd: number;
+}
+
+export interface CostReservationResult {
+  reserved: boolean;
+  reservedUsd: number;
+  reason?: string;
+}
+
 export interface CostStore {
   readonly kind: string;
   /** Atomically add costUsd to the bucket and return the new total. */
   add(key: string, costUsd: number, ttlSec: number): Promise<number>;
   /** Read the current bucket total (0 when absent). */
   get(key: string): Promise<number>;
+  /**
+   * Reserve available spend headroom across all scopes in one transaction.
+   * A reservation is idempotent by job key and counts against the limits.
+   */
+  reserveJobBudget(reservationId: string, requestedUsd: number, scopes: CostBudgetScope[]): Promise<CostReservationResult>;
+  /**
+   * Convert a live reservation into actual spend and release unused headroom.
+   * Returns false when no live reservation remains (e.g. duplicate finalizer).
+   */
+  settleJobBudget(reservationId: string, actualCostUsd: number): Promise<boolean>;
+  /**
+   * Atomically add one execution's cost to every spend bucket exactly once.
+   * Implementations must deduplicate idempotencyKey across retries/recovery.
+   */
+  recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean>;
 }
 
 export interface CacheStore {
@@ -95,6 +127,12 @@ export class InMemoryRateLimitStore implements RateLimitStore {
 export class InMemoryCostStore implements CostStore {
   readonly kind = 'memory';
   private readonly totals = new Map<string, number>();
+  private readonly recordedEvents = new Set<string>();
+  private readonly reservations = new Map<string, {
+    status: 'RESERVED' | 'SETTLED';
+    reservedUsd: number;
+    scopes: CostBudgetScope[];
+  }>();
 
   async add(key: string, costUsd: number): Promise<number> {
     const next = (this.totals.get(key) || 0) + costUsd;
@@ -104,6 +142,55 @@ export class InMemoryCostStore implements CostStore {
 
   async get(key: string): Promise<number> {
     return this.totals.get(key) || 0;
+  }
+
+  async reserveJobBudget(reservationId: string, requestedUsd: number, scopes: CostBudgetScope[]): Promise<CostReservationResult> {
+    if (!Number.isFinite(requestedUsd) || requestedUsd <= 0) throw new Error('Cost reservation must be a finite positive USD amount');
+    const existing = this.reservations.get(reservationId);
+    if (existing) {
+      return existing.status === 'RESERVED'
+        ? { reserved: true, reservedUsd: existing.reservedUsd }
+        : { reserved: false, reservedUsd: 0, reason: 'This job budget has already been settled.' };
+    }
+
+    const available = scopes.reduce((minimum, scope) => {
+      const spent = this.totals.get(scope.spendKey) || 0;
+      const reserved = this.totals.get(scope.reservedKey) || 0;
+      return Math.min(minimum, scope.limitUsd - spent - reserved);
+    }, requestedUsd);
+    const reserveUsd = Math.min(requestedUsd, available);
+    if (!(reserveUsd > 0)) {
+      return { reserved: false, reservedUsd: 0, reason: 'No budget headroom remains in at least one spend scope.' };
+    }
+
+    for (const scope of scopes) {
+      this.totals.set(scope.reservedKey, (this.totals.get(scope.reservedKey) || 0) + reserveUsd);
+    }
+    this.reservations.set(reservationId, { status: 'RESERVED', reservedUsd: reserveUsd, scopes });
+    return { reserved: true, reservedUsd: reserveUsd };
+  }
+
+  async settleJobBudget(reservationId: string, actualCostUsd: number): Promise<boolean> {
+    if (!Number.isFinite(actualCostUsd) || actualCostUsd < 0) throw new Error('Actual job cost must be a finite non-negative USD amount');
+    const reservation = this.reservations.get(reservationId);
+    if (!reservation || reservation.status !== 'RESERVED') return false;
+    for (const scope of reservation.scopes) {
+      this.totals.set(scope.spendKey, (this.totals.get(scope.spendKey) || 0) + actualCostUsd);
+      this.totals.set(scope.reservedKey, Math.max(0, (this.totals.get(scope.reservedKey) || 0) - reservation.reservedUsd));
+    }
+    reservation.status = 'SETTLED';
+    return true;
+  }
+
+  async recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean> {
+    if (this.recordedEvents.has(idempotencyKey)) return false;
+    if (!Number.isFinite(costUsd) || costUsd < 0) throw new Error('Cost event must be a finite non-negative USD amount');
+    // A single synchronous section makes this atomic within one Node process.
+    for (const bucket of buckets) {
+      this.totals.set(bucket.key, (this.totals.get(bucket.key) || 0) + costUsd);
+    }
+    this.recordedEvents.add(idempotencyKey);
+    return true;
   }
 }
 
@@ -153,6 +240,136 @@ const RATE_LIMIT_COLLECTION = 'rate_limit_buckets';
  */
 export class FirestoreCostStore implements CostStore {
   readonly kind = 'firestore';
+
+  async reserveJobBudget(
+    reservationId: string,
+    requestedUsd: number,
+    scopes: CostBudgetScope[],
+  ): Promise<CostReservationResult> {
+    if (!Number.isFinite(requestedUsd) || requestedUsd <= 0) throw new Error('Cost reservation must be a finite positive USD amount');
+    if (!reservationId || reservationId.includes('/')) throw new Error('Cost reservation id is invalid');
+    const reservationRef = adminDb.collection('cost_job_reservations').doc(reservationId);
+    const bucketRefs = scopes.flatMap(scope => [
+      adminDb.collection(COST_COLLECTION).doc(scope.spendKey),
+      adminDb.collection(COST_COLLECTION).doc(scope.reservedKey),
+    ]);
+
+    return adminDb.runTransaction(async tx => {
+      const reservationSnapshot = await tx.get(reservationRef);
+      if (reservationSnapshot.exists) {
+        const existing = reservationSnapshot.data();
+        return existing?.status === 'RESERVED'
+          ? { reserved: true, reservedUsd: Number(existing.reserved_usd || 0) }
+          : { reserved: false, reservedUsd: 0, reason: 'This job budget has already been settled.' };
+      }
+
+      const bucketSnapshots = await Promise.all(bucketRefs.map(ref => tx.get(ref)));
+      let available = requestedUsd;
+      scopes.forEach((scope, index) => {
+        const spent = bucketSnapshots[index * 2].exists
+          ? Number(bucketSnapshots[index * 2].data()?.total_usd || 0)
+          : 0;
+        const reserved = bucketSnapshots[index * 2 + 1].exists
+          ? Number(bucketSnapshots[index * 2 + 1].data()?.total_usd || 0)
+          : 0;
+        available = Math.min(available, scope.limitUsd - spent - reserved);
+      });
+      const reserveUsd = Math.min(requestedUsd, available);
+      if (!(reserveUsd > 0)) {
+        return { reserved: false, reservedUsd: 0, reason: 'No budget headroom remains in at least one spend scope.' };
+      }
+
+      scopes.forEach((scope, index) => {
+        const oldReserved = bucketSnapshots[index * 2 + 1].exists
+          ? Number(bucketSnapshots[index * 2 + 1].data()?.total_usd || 0)
+          : 0;
+        tx.set(bucketRefs[index * 2 + 1], {
+          total_usd: oldReserved + reserveUsd,
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      tx.create(reservationRef, {
+        status: 'RESERVED',
+        reserved_usd: reserveUsd,
+        scopes,
+        created_at: FieldValue.serverTimestamp(),
+      });
+      return { reserved: true, reservedUsd: reserveUsd };
+    });
+  }
+
+  async settleJobBudget(reservationId: string, actualCostUsd: number): Promise<boolean> {
+    if (!Number.isFinite(actualCostUsd) || actualCostUsd < 0) throw new Error('Actual job cost must be a finite non-negative USD amount');
+    if (!reservationId || reservationId.includes('/')) throw new Error('Cost reservation id is invalid');
+    const reservationRef = adminDb.collection('cost_job_reservations').doc(reservationId);
+
+    return adminDb.runTransaction(async tx => {
+      const reservationSnapshot = await tx.get(reservationRef);
+      if (!reservationSnapshot.exists || reservationSnapshot.data()?.status !== 'RESERVED') return false;
+      const reservation = reservationSnapshot.data() as {
+        reserved_usd?: number;
+        scopes?: CostBudgetScope[];
+      };
+      const scopes = reservation.scopes || [];
+      const bucketRefs = scopes.flatMap(scope => [
+        adminDb.collection(COST_COLLECTION).doc(scope.spendKey),
+        adminDb.collection(COST_COLLECTION).doc(scope.reservedKey),
+      ]);
+      const bucketSnapshots = await Promise.all(bucketRefs.map(ref => tx.get(ref)));
+      scopes.forEach((scope, index) => {
+        const spent = bucketSnapshots[index * 2].exists
+          ? Number(bucketSnapshots[index * 2].data()?.total_usd || 0)
+          : 0;
+        const reserved = bucketSnapshots[index * 2 + 1].exists
+          ? Number(bucketSnapshots[index * 2 + 1].data()?.total_usd || 0)
+          : 0;
+        tx.set(bucketRefs[index * 2], {
+          total_usd: spent + actualCostUsd,
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        tx.set(bucketRefs[index * 2 + 1], {
+          total_usd: Math.max(0, reserved - Number(reservation.reserved_usd || 0)),
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      tx.update(reservationRef, {
+        status: 'SETTLED',
+        actual_cost_usd: actualCostUsd,
+        settled_at: FieldValue.serverTimestamp(),
+        expires_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      });
+      return true;
+    });
+  }
+
+  async recordOnce(idempotencyKey: string, costUsd: number, buckets: CostBucketUpdate[]): Promise<boolean> {
+    if (!Number.isFinite(costUsd) || costUsd < 0) throw new Error('Cost event must be a finite non-negative USD amount');
+    if (!idempotencyKey || idempotencyKey.includes('/')) throw new Error('Cost idempotency key is invalid');
+    const eventRef = adminDb.collection('cost_usage_events').doc(idempotencyKey);
+    const bucketRefs = buckets.map(bucket => adminDb.collection(COST_COLLECTION).doc(bucket.key));
+    return adminDb.runTransaction(async tx => {
+      const eventSnapshot = await tx.get(eventRef);
+      if (eventSnapshot.exists) return false;
+
+      const bucketSnapshots = await Promise.all(bucketRefs.map(ref => tx.get(ref)));
+      const nextTotals = bucketSnapshots.map(snapshot =>
+        (snapshot.exists ? Number(snapshot.data()?.total_usd || 0) : 0) + costUsd,
+      );
+
+      bucketRefs.forEach((ref, index) => {
+        tx.set(ref, {
+          total_usd: nextTotals[index],
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      tx.create(eventRef, {
+        cost_usd: costUsd,
+        created_at: FieldValue.serverTimestamp(),
+        expires_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      });
+      return true;
+    });
+  }
 
   async add(key: string, costUsd: number, ttlSec: number): Promise<number> {
     // ttlSec is accepted for interface parity but Firestore documents are

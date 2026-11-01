@@ -15,6 +15,7 @@ import { Source, Evidence, Claim, CompetitorProfile, CustomerSegment, PricingTie
 import { recordProviderCall } from './observability.js';
 import { logEnvelope } from './rate_limits.js';
 import { logger } from './logger.js';
+import type { CostGovernor } from './cost_governor.js';
 
 /**
  * Compact, serializable projection of a verified claim handed to every
@@ -75,6 +76,111 @@ export function resolveModel(role?: GeminiModelRole): string {
   const global = process.env.GEMINI_MODEL;
   if (global && global.trim()) return global.trim();
   return DEFAULT_GEMINI_MODEL;
+}
+
+type GeminiStandardRates = {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+};
+
+/**
+ * Standard-tier Gemini API token rates. The scheduled 2027 change is encoded
+ * explicitly so a long-lived deployment does not silently keep using the
+ * 2026 rate after the provider's announced effective date. Operators may
+ * override model rates with GEMINI_MODEL_PRICING_JSON.
+ */
+export function getGeminiStandardRates(model: string, now = new Date()): GeminiStandardRates | null {
+  const configured = process.env.GEMINI_MODEL_PRICING_JSON?.trim();
+  if (configured) {
+    let parsed: Record<string, any>;
+    try {
+      parsed = JSON.parse(configured);
+    } catch {
+      throw new Error('GEMINI_MODEL_PRICING_JSON must be valid JSON');
+    }
+    const rate = parsed[model];
+    if (rate) {
+      const inputUsdPerMillion = Number(rate.inputUsdPerMillion);
+      const outputUsdPerMillion = Number(rate.outputUsdPerMillion);
+      if (
+        !Number.isFinite(inputUsdPerMillion) || inputUsdPerMillion < 0 ||
+        !Number.isFinite(outputUsdPerMillion) || outputUsdPerMillion < 0
+      ) {
+        throw new Error('GEMINI_MODEL_PRICING_JSON contains an invalid rate for ' + model);
+      }
+      return { inputUsdPerMillion, outputUsdPerMillion };
+    }
+  }
+
+  const newRatesEffective = now.getTime() >= Date.parse('2027-01-01T00:00:00.000Z');
+  if (model === 'gemini-3.8-flash' || model === 'gemini-3.6-flash') {
+    return newRatesEffective
+      ? { inputUsdPerMillion: 1.5, outputUsdPerMillion: 7.5 }
+      : { inputUsdPerMillion: 0.75, outputUsdPerMillion: 3.75 };
+  }
+  if (model === 'gemini-3.5-flash-lite') {
+    return { inputUsdPerMillion: 0.30, outputUsdPerMillion: 2.50 };
+  }
+  if (model === 'gemini-3.5-flash') {
+    return { inputUsdPerMillion: 1.50, outputUsdPerMillion: 9.00 };
+  }
+  return null;
+}
+
+function readGeminiTokenUsage(response: any): { inputTokens: number; outputTokens: number } | null {
+  const usage = response?.usageMetadata;
+  if (!usage) return null;
+  const inputTokens = Number(usage.promptTokenCount);
+  const candidateTokens = Number(usage.candidatesTokenCount ?? 0);
+  const thinkingTokens = Number(usage.thoughtsTokenCount ?? 0);
+  const totalTokens = Number(usage.totalTokenCount);
+  const outputFromParts = candidateTokens + thinkingTokens;
+  const outputFromTotal = Number.isFinite(totalTokens) && Number.isFinite(inputTokens)
+    ? Math.max(0, totalTokens - inputTokens)
+    : 0;
+  const outputTokens = Math.max(outputFromParts, outputFromTotal);
+  if (
+    !Number.isSafeInteger(inputTokens) || inputTokens < 0 ||
+    !Number.isSafeInteger(outputTokens) || outputTokens < 0
+  ) return null;
+  return { inputTokens, outputTokens };
+}
+
+async function generateWithCostTracking<T>(
+  model: string,
+  costGovernor: CostGovernor | undefined,
+  request: () => Promise<T>,
+): Promise<T> {
+  if (!costGovernor) return request();
+
+  const rates = getGeminiStandardRates(model);
+  if (!rates) {
+    throw new Error(
+      'Cost governor has no Standard-tier token pricing for Gemini model "' + model +
+      '". Configure GEMINI_MODEL_PRICING_JSON before enabling this model.',
+    );
+  }
+
+  const capError = costGovernor.allowModelCall() || costGovernor.checkRequestBudget();
+  if (capError) throw new Error(capError);
+
+  const response = await request();
+  const usage = readGeminiTokenUsage(response);
+  if (!usage) {
+    throw new Error(
+      'Gemini response omitted valid usageMetadata; refusing to publish a report with unmeasured model spend.',
+    );
+  }
+
+  const estimatedCostUsd =
+    (usage.inputTokens * rates.inputUsdPerMillion + usage.outputTokens * rates.outputUsdPerMillion) / 1_000_000;
+  const budgetError = costGovernor.recordModelCall(
+    usage.inputTokens,
+    usage.outputTokens,
+    estimatedCostUsd,
+  );
+  if (budgetError) throw new Error(budgetError);
+  return response;
 }
 
 /**
@@ -247,7 +353,8 @@ export class GeminiResearchEngine {
     geography: string,
     timeHorizon: string,
     objectives: string[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    costGovernor?: CostGovernor
   ): Promise<PlannerOutput> {
     const ai = getGemini();
 
@@ -297,7 +404,10 @@ Return a strict JSON object matching:
       executeWithRetry(async () => {
         if (signal?.aborted) throw new Error('Operation aborted');
 
-        const response = await ai.models.generateContent({
+        const response = await generateWithCostTracking(
+          selectedModel,
+          costGovernor,
+          () => ai.models.generateContent({
           model: selectedModel,
           contents: prompt,
           config: {
@@ -327,7 +437,8 @@ Return a strict JSON object matching:
               ],
             },
           },
-        });
+        }),
+        );
 
         return JSON.parse(response.text || '{}') as PlannerOutput;
       }, { maxRetries: maxAttempts, signal, operation: 'research_planning' });
@@ -385,7 +496,8 @@ Return a strict JSON object matching:
    */
   public static async discoverLiveSources(
     queries: string[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    costGovernor?: CostGovernor
   ): Promise<Array<{ title: string; url: string; snippet: string; publisher: string }>> {
     const ai = getGemini();
     if (!ai) {
@@ -399,7 +511,10 @@ Return a strict JSON object matching:
       return await executeWithRetry(async () => {
         if (signal?.aborted) throw new Error('Operation aborted');
 
-        const response = await ai.models.generateContent({
+        const response = await generateWithCostTracking(
+          resolveModel('DISCOVERY'),
+          costGovernor,
+          () => ai.models.generateContent({
           model: resolveModel('DISCOVERY'),
           contents: prompt,
           config: {
@@ -421,7 +536,8 @@ Return a strict JSON object matching:
               }
             }
           },
-        });
+        }),
+        );
 
         const text = response.text || '[]';
         return JSON.parse(text);
@@ -450,6 +566,7 @@ Return a strict JSON object matching:
     currency: string;
     claims: SynthesisClaimContext[];
     signal?: AbortSignal;
+    costGovernor?: CostGovernor;
   }): Promise<{
     competitors: CompetitorProfile[];
     customerSegments: CustomerSegment[];
@@ -482,7 +599,10 @@ ${JSON.stringify(params.claims, null, 1)}`;
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
-      const response = await ai.models.generateContent({
+      const response = await generateWithCostTracking(
+          resolveModel('COMPETITORS'),
+          params.costGovernor,
+          () => ai.models.generateContent({
         model: resolveModel('COMPETITORS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
@@ -612,7 +732,8 @@ ${JSON.stringify(params.claims, null, 1)}`;
             required: ["competitors", "customerSegments", "pricingTiers", "regulatoryFactors", "risks", "trends", "opportunities"]
           }
         }
-      });
+      }),
+        );
       return JSON.parse(response.text || '{}');
     }, { signal: params.signal });
   }
@@ -625,6 +746,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
     geography: string;
     sourceDocuments: Array<{ id: string; domain: string; title: string; text: string }>;
     signal?: AbortSignal;
+    costGovernor?: CostGovernor;
   }): Promise<Array<{ statement: string; claim_type: string; source_id: string; extracted_quote: string }>> {
     const ai = getGemini();
     if (!ai) {
@@ -644,7 +766,10 @@ Documents: `;
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
-      const response = await ai.models.generateContent({
+      const response = await generateWithCostTracking(
+          resolveModel('EXTRACTION'),
+          params.costGovernor,
+          () => ai.models.generateContent({
         model: resolveModel('EXTRACTION'),
         contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
         config: {
@@ -665,7 +790,8 @@ Documents: `;
             }
           }
         }
-      });
+      }),
+        );
       return JSON.parse(response.text || '[]');
     }, { signal: params.signal });
   }
@@ -678,6 +804,7 @@ Documents: `;
     geography: string;
     sourceDocuments: Array<{ id: string; domain: string; title: string; text: string }>;
     signal?: AbortSignal;
+    costGovernor?: CostGovernor;
   }): Promise<{ tam: number; cagr: number; currency: string; year_start: number; year_end: number }> {
     const ai = getGemini();
     if (!ai) {
@@ -703,7 +830,10 @@ Return a strict JSON object:
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
-      const response = await ai.models.generateContent({
+      const response = await generateWithCostTracking(
+          resolveModel('FORECAST'),
+          params.costGovernor,
+          () => ai.models.generateContent({
         model: resolveModel('FORECAST'),
         contents: prompt,
         config: {
@@ -722,7 +852,8 @@ Return a strict JSON object:
             required: ["tam", "cagr", "currency", "year_start", "year_end"]
           }
         }
-      });
+      }),
+        );
       return JSON.parse(response.text || '{}');
     }, { signal: params.signal });
   }
@@ -740,6 +871,7 @@ Return a strict JSON object:
     claims: SynthesisClaimContext[];
     evidence: SynthesisEvidenceContext[];
     signal?: AbortSignal;
+    costGovernor?: CostGovernor;
   }): Promise<{ summary: string; section1: string; section2: string; section3: string }> {
     const ai = getGemini();
     if (!ai) {
@@ -773,7 +905,10 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
 
     return await executeWithRetry(async () => {
       if (params.signal?.aborted) throw new Error('Operation aborted');
-      const response = await ai.models.generateContent({
+      const response = await generateWithCostTracking(
+          resolveModel('SYNTHESIS'),
+          params.costGovernor,
+          () => ai.models.generateContent({
         model: resolveModel('SYNTHESIS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
@@ -791,7 +926,8 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
             required: ["summary", "section1", "section2", "section3"]
           }
         }
-      });
+      }),
+        );
       return JSON.parse(response.text || '{}');
     }, { signal: params.signal });
   }

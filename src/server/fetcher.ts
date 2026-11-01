@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import dns from 'dns';
+import { isIP } from 'node:net';
 import http from 'http';
 import https from 'https';
 import zlib from 'zlib';
@@ -27,6 +28,51 @@ function asAbortError(signal?: AbortSignal): Error {
   if (reason instanceof DocumentFetchTimeoutError) return reason;
   if (reason instanceof DocumentFetchAbortedError) return reason;
   return new DocumentFetchAbortedError(reason instanceof Error ? reason.message : undefined);
+}
+
+
+function parseIpv6BigInt(raw: string): bigint | null {
+  let address = raw.toLowerCase().split('%')[0];
+  if (address.includes('.')) {
+    const colon = address.lastIndexOf(':');
+    const ipv4 = address.slice(colon + 1);
+    const octets = ipv4.split('.').map(Number);
+    if (octets.length !== 4 || octets.some(value =>
+      !Number.isInteger(value) || value < 0 || value > 255
+    )) return null;
+    const high = ((octets[0] << 8) | octets[1]).toString(16);
+    const low = ((octets[2] << 8) | octets[3]).toString(16);
+    address = address.slice(0, colon + 1) + high + ':' + low;
+  }
+
+  const halves = address.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups: string[];
+
+  if (halves.length === 1) {
+    if (left.length !== 8) return null;
+    groups = left;
+  } else {
+    const missing = 8 - left.length - right.length;
+    if (missing < 1) return null;
+    groups = [...left, ...Array(missing).fill('0'), ...right];
+  }
+
+  if (groups.length !== 8 || groups.some(group => !/^[0-9a-f]{1,4}$/i.test(group))) {
+    return null;
+  }
+  return groups.reduce((value, group) =>
+    (value << 16n) | BigInt('0x' + group), 0n,
+  );
+}
+
+function ipv6InPrefix(address: bigint, network: string, prefixLength: number): boolean {
+  const networkValue = parseIpv6BigInt(network);
+  if (networkValue === null) return false;
+  const shift = 128n - BigInt(prefixLength);
+  return (address >> shift) === (networkValue >> shift);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -127,25 +173,67 @@ export class RealDocumentFetcher {
 
   /** True when a resolved literal IP is non-routable. Second layer behind validateUrl. */
   public static isPrivateIp(ip: string): boolean {
-    if (!ip) return false;
-    const v = ip.toLowerCase().replace(/^\[|\]$/g, '');
-    if (v === 'localhost' || v === '::1' || v === '::' || v === '0.0.0.0') return true;
-    if (v.startsWith('::ffff:')) return this.isPrivateIp(v.slice('::ffff:'.length));
-    if (v.includes(':')) {
-      return v === '::1' || v.startsWith('fe80:') || v.startsWith('fc') || v.startsWith('fd') || v === '::';
+    if (!ip) return true;
+    const value = ip.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+    const family = isIP(value);
+    if (!family) return true;
+
+    if (family === 4) {
+      const parts = value.split('.').map(Number);
+      if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) {
+        return true;
+      }
+      const [a, b, c, d] = parts;
+
+      // Non-public, special-purpose, documentation, benchmarking, multicast,
+      // and reserved IPv4 ranges. Block entire special-purpose prefixes rather
+      // than relying on the narrower RFC1918 list.
+      return (
+        a === 0 ||
+        a === 10 ||
+        a === 127 ||
+        a >= 224 ||
+        (a === 169 && b === 254) ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 100 && b >= 64 && b <= 127) ||
+        (a === 192 && b === 0 && c === 0) ||
+        (a === 192 && b === 0 && c === 2) ||
+        (a === 192 && b === 88 && c === 99) ||
+        (a === 192 && b === 168) ||
+        (a === 198 && (b === 18 || b === 19)) ||
+        (a === 198 && b === 51 && c === 100) ||
+        (a === 203 && b === 0 && c === 113) ||
+        (a === 255 && b === 255 && c === 255 && d === 255)
+      );
     }
-    const parts = v.split('.');
-    if (parts.length !== 4 || parts.some((p) => !/^\d+$/.test(p))) return true;
-    const a = Number(parts[0]);
-    const b = Number(parts[1]);
-    if (a === 10) return true;
-    if (a === 127) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a === 0 || a >= 224) return true;
-    return false;
+
+    const address = parseIpv6BigInt(value);
+    if (address === null) return true;
+
+    // IPv4-mapped IPv6 addresses inherit the IPv4 policy. This covers both
+    // compressed and fully-expanded mapped-address notation.
+    if (ipv6InPrefix(address, '::ffff:0:0', 96)) {
+      const mappedV4 = Number(address & 0xffffffffn);
+      const octets = [
+        (mappedV4 >>> 24) & 255,
+        (mappedV4 >>> 16) & 255,
+        (mappedV4 >>> 8) & 255,
+        mappedV4 & 255,
+      ].join('.');
+      return this.isPrivateIp(octets);
+    }
+
+    // Only global-unicast IPv6 (2000::/3) is eligible for outbound fetching.
+    // Explicitly exclude documentation, deprecated transition, and IANA
+    // special-purpose ranges within that allocation.
+    if (!ipv6InPrefix(address, '2000::', 3)) return true;
+    return (
+      ipv6InPrefix(address, '2001::', 23) ||
+      ipv6InPrefix(address, '2001:db8::', 32) ||
+      ipv6InPrefix(address, '2002::', 16) ||
+      ipv6InPrefix(address, '2001:20::', 28) ||
+      ipv6InPrefix(address, '3fff::', 20)
+    );
   }
 
   /** Resolve a hostname, dropping non-routable answers. Throws when none remain. */

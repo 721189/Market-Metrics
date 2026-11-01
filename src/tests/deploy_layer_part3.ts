@@ -18,6 +18,9 @@ const cacheChecks: Check[] = [
       __setCacheStoreForTests(backing);
       const db = await import('../server/db.js');
       const orig = (db.DatabaseRepository as any).getReport;
+      const origGetJob = (db.DatabaseRepository as any).getJob;
+      (db.DatabaseRepository as any).getJob = async (jobId: string, userId: string) =>
+        ({ id: jobId, user_id: userId, status: 'COMPLETED' });
       let calls = 0;
       (db.DatabaseRepository as any).getReport = async (jobId: string, userId: string) => {
         calls++;
@@ -26,6 +29,7 @@ const cacheChecks: Check[] = [
       const first = await CacheLayer.getReportCached('job-cache-1', 'usr-a');
       const second = await CacheLayer.getReportCached('job-cache-1', 'usr-a');
       (db.DatabaseRepository as any).getReport = orig;
+      (db.DatabaseRepository as any).getJob = origGetJob;
       __setCacheStoreForTests(null);
       return calls === 1 && (first as any)?.title === 'cached dossier' && (second as any)?.title === 'cached dossier';
     },
@@ -37,6 +41,9 @@ const cacheChecks: Check[] = [
       __setCacheStoreForTests(backing);
       const db = await import('../server/db.js');
       const orig = (db.DatabaseRepository as any).getReport;
+      const origGetJob = (db.DatabaseRepository as any).getJob;
+      (db.DatabaseRepository as any).getJob = async (jobId: string, userId: string) =>
+        ({ id: jobId, user_id: userId, status: 'COMPLETED' });
       let calls = 0;
       (db.DatabaseRepository as any).getReport = async (jobId: string, userId: string) => {
         calls++;
@@ -45,6 +52,7 @@ const cacheChecks: Check[] = [
       await CacheLayer.getReportCached('job-shared', 'usr-a');
       const other = await CacheLayer.getReportCached('job-shared', 'usr-b');
       (db.DatabaseRepository as any).getReport = orig;
+      (db.DatabaseRepository as any).getJob = origGetJob;
       __setCacheStoreForTests(null);
       return calls === 2 && (other as any)?.title === 'dossier-for-usr-b';
     },
@@ -56,6 +64,9 @@ const cacheChecks: Check[] = [
       __setCacheStoreForTests(backing);
       const db = await import('../server/db.js');
       const orig = (db.DatabaseRepository as any).getReport;
+      const origGetJob = (db.DatabaseRepository as any).getJob;
+      (db.DatabaseRepository as any).getJob = async (jobId: string, userId: string) =>
+        ({ id: jobId, user_id: userId, status: 'COMPLETED' });
       let version = 1;
       (db.DatabaseRepository as any).getReport = async (jobId: string, userId: string) => {
         return { job_id: jobId, user_id: userId, title: `v${version}` } as any;
@@ -65,8 +76,29 @@ const cacheChecks: Check[] = [
       await CacheLayer.invalidateReportCache('job-inv', 'usr-a');
       const fresh = await CacheLayer.getReportCached('job-inv', 'usr-a');
       (db.DatabaseRepository as any).getReport = orig;
+      (db.DatabaseRepository as any).getJob = origGetJob;
       __setCacheStoreForTests(null);
       return (fresh as any)?.title === 'v2';
+    },
+  },
+  {
+    name: 'deleted or tombstoned jobs cannot be served from report cache',
+    fn: async () => {
+      const backing: CacheStore = new InMemoryCacheStore();
+      __setCacheStoreForTests(backing);
+      const db = await import('../server/db.js');
+      const origGetJob = (db.DatabaseRepository as any).getJob;
+      (db.DatabaseRepository as any).getJob = async () => null;
+      await backing.set('report:usr-a:job-deleted', JSON.stringify({
+        job_id: 'job-deleted',
+        user_id: 'usr-a',
+        title: 'stale private report',
+      }), 3600);
+      const result = await CacheLayer.getReportCached('job-deleted', 'usr-a');
+      const stale = await backing.get('report:usr-a:job-deleted');
+      (db.DatabaseRepository as any).getJob = origGetJob;
+      __setCacheStoreForTests(null);
+      return result === null && stale === null;
     },
   },
 ];

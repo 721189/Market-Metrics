@@ -66,6 +66,20 @@ export const limiterBudgetChecks: Check[] = [
     },
   },
   {
+    name: 'cost settlement is idempotent per worker lease and charges a reclaimed execution once',
+    fn: async () => {
+      __setCostStoreForTests(new InMemoryCostStore());
+      const gov = new CostGovernor({ userDailyBudgetUsd: 100, userMonthlyBudgetUsd: 1000, globalDailyBudgetUsd: 5000 });
+      await gov.recordJobCost('usr-lease', 'job-lease', 2.5, 'lease-a');
+      await gov.recordJobCost('usr-lease', 'job-lease', 2.5, 'lease-a');
+      await gov.recordJobCost('usr-lease', 'job-lease', 1.5, 'lease-b');
+      const breakdown = await gov.getUserCostBreakdown('usr-lease');
+      __setCostStoreForTests(null);
+      return Math.abs(breakdown.today_usd - 4) < 1e-9 &&
+        Math.abs(breakdown.this_month_usd - 4) < 1e-9;
+    },
+  },
+  {
     name: 'canStartJob returns BUDGET_EXCEEDED once the daily budget is hit',
     fn: async () => {
       __setCostStoreForTests(new InMemoryCostStore());

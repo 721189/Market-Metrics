@@ -20,7 +20,8 @@ let cacheStore: CacheStore | null = null;
 
 function getCacheStore(): CacheStore {
   if (cacheStore) return cacheStore;
-  const kind = resolveStoreKind(process.env.CACHE_STORE, 'memory');
+  const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+  const kind = resolveStoreKind(process.env.CACHE_STORE, productionDefaults ? 'firestore' : 'memory');
   if (kind === 'redis') throwRedisNotProvisioned('CacheLayer');
   if (kind === 'firestore') {
     cacheStore = new FirestoreCacheStore(); return cacheStore;
@@ -46,6 +47,15 @@ export class CacheLayer {
     if (!userId) throw new Error('[Cache] userId is required for getReportCached');
     const store = getCacheStore();
     const key = cacheKey(userId, jobId);
+
+    // A cached report must never outlive its tenant-owned parent job. This
+    // check also makes deletion tombstones effective when cache invalidation
+    // is unavailable or a cache replica still holds an old value.
+    const liveJob = await DatabaseRepository.getJob(jobId, userId);
+    if (!liveJob) {
+      await store.del(key).catch(() => undefined);
+      return null;
+    }
 
     let cached: string | null = null;
     try {
