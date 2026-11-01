@@ -68,6 +68,7 @@ export interface ArtifactStorage {
  * real object storage provider.
  */
 export class InMemoryArtifactStorage implements ArtifactStorage {
+  readonly kind = 'memory';
   private readonly store = new Map<string, Buffer>();
   private readonly textStore = new Map<string, string>();
 
@@ -119,8 +120,9 @@ export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'no
 // ---------------------------------------------------------------------------
 // Firestore / Firebase Storage-backed artifact store (production)
 // ---------------------------------------------------------------------------
-// Stores raw bytes and normalized text in Firebase Cloud Storage.
-// Falls back to InMemoryArtifactStorage when STORAGE_BUCKET is not configured.
+// Stores raw bytes and normalized text in Firebase Cloud Storage. The selector
+// below permits in-memory fallback only for local development and tests;
+// staging/production fail closed when a durable bucket is unavailable.
 // ---------------------------------------------------------------------------
 
 export class FirestoreArtifactStorage implements ArtifactStorage {
@@ -232,4 +234,34 @@ export function parseArtifactRef(ref: string): { job_id: string; source_id: stri
     };
   }
   return null;
+}
+
+/**
+ * Select an artifact backend without silently weakening production durability.
+ * Local development and tests may use memory when Storage is not configured.
+ * Staging/production must have a durable Cloud Storage bucket or fail the job.
+ */
+export function createArtifactStorage(
+  env: NodeJS.ProcessEnv = process.env,
+  durableFactory: () => ArtifactStorage = () => new FirestoreArtifactStorage(),
+): ArtifactStorage {
+  try {
+    return durableFactory();
+  } catch (error) {
+    const appEnv = (env.APP_ENV || '').trim().toLowerCase();
+    const nodeEnv = (env.NODE_ENV || '').trim().toLowerCase();
+    const requiresDurability =
+      appEnv === 'production' ||
+      appEnv === 'staging' ||
+      nodeEnv === 'production';
+
+    if (requiresDurability) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        '[ArtifactStorage] Durable Cloud Storage is required in staging/production; refusing in-memory fallback. '
+        + detail,
+      );
+    }
+    return new InMemoryArtifactStorage();
+  }
 }
