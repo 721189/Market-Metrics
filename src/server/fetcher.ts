@@ -6,6 +6,7 @@ import zlib from 'zlib';
 import { URL } from 'url';
 import { logger } from './logger.js';
 import { DocumentChunk } from '../types.js';
+import { PDFParse } from 'pdf-parse';
 
 export class DocumentFetchAbortedError extends Error {
   constructor(message = 'Document fetch was cancelled') {
@@ -684,48 +685,19 @@ export class RealDocumentFetcher {
   }
 
   public static async extractPdfText(body: Buffer): Promise<string> {
-    let parserFailure = '';
+    // Use the package's documented v2 class API. A static import is important
+    // here: this code runs as an ES module in tests and is bundled as CJS for
+    // production, so the old implicit require() path is not available.
+    const parser = new PDFParse({ data: body });
     try {
-      const pdfModule = require('pdf-parse');
-      const PDFParse = pdfModule?.PDFParse || pdfModule?.default?.PDFParse;
-      if (typeof PDFParse === 'function') {
-        // pdf-parse v2 exposes a stateful parser class, not the v1 callable
-        // function. Always destroy parser resources after text extraction.
-        const parser = new PDFParse({ data: body });
-        try {
-          const result = await parser.getText();
-          return this.normalizeText(result?.text || '');
-        } finally {
-          await parser.destroy();
-        }
-      }
-
-      // Compatibility path for installations still exposing the v1 function.
-      if (typeof pdfModule === 'function') {
-        const result = await pdfModule(body);
-        return this.normalizeText(result?.text || '');
-      }
-    } catch (error) {
-      parserFailure = error instanceof Error ? error.message : String(error);
-      logger.warn('fetcher.pdf_parse_failed', 'Installed pdf-parse API could not parse document', { reason: parserFailure });
+      const result = await parser.getText();
+      const text = this.normalizeText(result?.text || '');
+      if (!text) throw new Error('PDF parser returned no extractable text');
+      return text;
+    } finally {
+      await parser.destroy();
     }
-    try {
-      const pdfjs = require('pdfjs-dist');
-      if (typeof pdfjs !== 'undefined' && typeof pdfjs.getDocument === 'function') {
-        const doc = await pdfjs.getDocument({ data: body.slice(0) }).promise;
-        const pages = await Promise.all(Array.from({ length: doc.numPages }, async (_: any, i: number) => {
-          const page = await doc.getPage(i + 1); const content = await page.getTextContent();
-          return content.items.map((item: any) => item.str).join(' ');
-        }));
-        return this.normalizeText(pages.join('\n\n'));
-      }
-    } catch (error) {
-      const fallbackFailure = error instanceof Error ? error.message : String(error);
-      parserFailure = parserFailure ? parserFailure + '; pdfjs-dist fallback: ' + fallbackFailure : fallbackFailure;
-    }
-    throw new Error('PDF extraction failed. Install a compatible pdf-parse parser. ' + parserFailure);
   }
-
 
   private static normalizeText(text: string): string {
     return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
