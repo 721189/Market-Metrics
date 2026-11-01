@@ -119,17 +119,53 @@ function isCancelled(job: ResearchJob, signal?: AbortSignal): boolean {
  * Deterministic publisher-credibility tiering by domain — a documented,
  * reproducible scoring heuristic (never a fabricated metadata claim).
  */
-function classifyDomainTier(domain: string): { tier: Source['source_type']; reliability: number } {
-  if (domain.includes('.gov') || domain.includes('.edu') || domain.includes('sec.gov') || domain.includes('worldbank.org') || domain.includes('imf.org')) {
+function normalizeSourceHostname(domain: string): string {
+  const raw = String(domain || '').trim().toLowerCase();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw.includes('://') ? raw : 'https://' + raw);
+    return parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function isDomainOrSubdomain(hostname: string, registrableDomain: string): boolean {
+  return hostname === registrableDomain || hostname.endsWith('.' + registrableDomain);
+}
+
+/**
+ * Conservative publisher credibility tiers. Trust is granted only to canonical
+ * hostnames or their true subdomains; lookalike hostnames and unknown domains
+ * remain below the verifier's source-reliability acceptance threshold.
+ */
+export function classifyDomainTier(domain: string): { tier: Source['source_type']; reliability: number } {
+  const hostname = normalizeSourceHostname(domain);
+  if (!hostname) return { tier: 'TIER_D', reliability: 45 };
+
+  const governmentOrAcademic =
+    /(^|\.)gov(\.[a-z]{2,})?$/.test(hostname) ||
+    /(^|\.)edu(\.[a-z]{2,})?$/.test(hostname) ||
+    /(^|\.)ac\.[a-z]{2,}$/.test(hostname) ||
+    ['worldbank.org', 'imf.org', 'who.int', 'oecd.org', 'un.org'].some(domain => isDomainOrSubdomain(hostname, domain));
+
+  if (governmentOrAcademic || isDomainOrSubdomain(hostname, 'sec.gov')) {
     return { tier: 'TIER_A', reliability: 96 };
   }
-  if (domain.includes('gartner') || domain.includes('mckinsey') || domain.includes('bain') || domain.includes('bloomberg') || domain.includes('statista') || domain.includes('idc.com')) {
+
+  const tierB = ['gartner.com', 'mckinsey.com', 'bain.com', 'bloomberg.com', 'statista.com', 'idc.com'];
+  if (tierB.some(domain => isDomainOrSubdomain(hostname, domain))) {
     return { tier: 'TIER_B', reliability: 91 };
   }
-  if (domain.includes('reuters') || domain.includes('techcrunch') || domain.includes('wsj') || domain.includes('forbes') || domain.includes('ft.com')) {
+
+  const tierC = ['reuters.com', 'techcrunch.com', 'wsj.com', 'forbes.com', 'ft.com'];
+  if (tierC.some(domain => isDomainOrSubdomain(hostname, domain))) {
     return { tier: 'TIER_C', reliability: 84 };
   }
-  return { tier: 'TIER_D', reliability: 76 };
+
+  // Unknown sources are still retained for transparency and discovery, but
+  // they cannot satisfy the verifier's >=70 reliability gate by default.
+  return { tier: 'TIER_D', reliability: 55 };
 }
 
 async function logAndEmitEvent(
