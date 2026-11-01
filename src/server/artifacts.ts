@@ -56,6 +56,8 @@ export interface ArtifactStorage {
    * Delete an artifact (for cleanup / retention policies).
    */
   delete(source_id: string, job_id: string): Promise<void>;
+  /** Remove every raw and normalized artifact belonging to one job. */
+  deleteJob(job_id: string): Promise<void>;
 }
 
 /**
@@ -96,6 +98,16 @@ export class InMemoryArtifactStorage implements ArtifactStorage {
     this.textStore.delete(textRef);
     return Promise.resolve();
   }
+  async deleteJob(job_id: string): Promise<void> {
+    const prefix = `artifacts/${job_id}/`;
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) this.store.delete(key);
+    }
+    for (const key of this.textStore.keys()) {
+      if (key.startsWith(prefix)) this.textStore.delete(key);
+    }
+  }
+
 }
 
 export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'normalized'): string {
@@ -183,6 +195,30 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
       // Best-effort cleanup.
     }
   }
+  async deleteJob(job_id: string): Promise<void> {
+    const bucket = getStorageInstance();
+    const prefix = `artifacts/${job_id}/`;
+    const [files] = await bucket.getFiles({ prefix });
+
+    // Bound concurrency to avoid an unbounded burst against Cloud Storage.
+    const concurrency = 40;
+    for (let index = 0; index < files.length; index += concurrency) {
+      const chunk = files.slice(index, index + concurrency);
+      const results = await Promise.allSettled(
+        chunk.map(file => file.delete({ ignoreNotFound: true })),
+      );
+      const failures = results.filter((result): result is PromiseRejectedResult =>
+        result.status === 'rejected',
+      );
+      if (failures.length > 0) {
+        throw new Error(
+          `Artifact cleanup failed for job ${job_id}: ${failures.length} of ${chunk.length} object deletions failed. `
+          + String(failures[0].reason?.message || failures[0].reason),
+        );
+      }
+    }
+  }
+
 }
 
 export function parseArtifactRef(ref: string): { job_id: string; source_id: string; kind: string } | null {
