@@ -272,6 +272,25 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'worker heartbeat and terminal writes require the exact per-claim lease token',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const heartbeatStart = queue.indexOf('async heartbeat(');
+      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
+      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
+      const statusStart = queue.indexOf('async updateJobStatus(');
+      const statusEnd = queue.indexOf('async getStats()', statusStart);
+      const status = queue.slice(statusStart, statusEnd);
+      return heartbeat.includes('leaseId: string') &&
+        heartbeat.includes('data?.lease_id === leaseId') &&
+        status.includes('data?.lease_id !== leaseId') &&
+        pipeline.includes("researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''))");
+    },
+  },
+  {
     name: 'report cache refuses stale entries after parent job deletion or tombstoning',
     fn: async () => {
       const cache = readSource('src/server/cache.ts');
