@@ -130,7 +130,6 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
     if (amounts.length === 0) continue;
 
     const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
-    yearMatches.forEach(year => years.add(Number(year)));
     const isSam = /\bSAM\b|serviceable available market/i.test(statement);
     const isSom = /\bSOM\b|serviceable obtainable market/i.test(statement);
     const isTam = /\bTAM\b|total addressable market|market size/i.test(statement) ||
@@ -149,6 +148,7 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
       continue;
     }
     if (isTam) {
+      yearMatches.forEach(year => years.add(Number(year)));
       amounts.forEach(amount => currencies.add(amount.currency));
       if (amounts.length >= 2) {
         const hasExplicitRange = yearMatches.length >= 2 || /\bfrom\b[\s\S]*\bto\b/i.test(statement);
