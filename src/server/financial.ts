@@ -1,3 +1,5 @@
+import type { Claim } from '../types.js';
+
 /**
  * Deterministic Financial & Analytical Engine
  * Blueprint Rules:
@@ -30,6 +32,199 @@ export interface SensitivityMatrixCell {
   ltv: number;
   ltv_to_cac: number;
   payback_months: number;
+}
+
+export interface VerifiedMarketSizing {
+  data_status: 'SOURCE_BACKED' | 'INSUFFICIENT_EVIDENCE';
+  tam_current: number | null;
+  tam_forecast: number | null;
+  sam: number | null;
+  som: number | null;
+  cagr_pct: number | null;
+  currency: string | null;
+  year_start: number | null;
+  year_end: number | null;
+  source_claim_ids: string[];
+  metric_claim_ids: {
+    tam_current?: string;
+    tam_forecast?: string;
+    sam?: string;
+    som?: string;
+    cagr?: string;
+  };
+  limitations: string[];
+}
+
+type ParsedMoney = { value: number; currency: string; index: number };
+
+function parseExplicitMoneyAmounts(statement: string): ParsedMoney[] {
+  const suffixMultipliers: Record<string, number> = {
+    trillion: 1e12, tn: 1e12, billion: 1e9, bn: 1e9, b: 1e9,
+    million: 1e6, mn: 1e6, m: 1e6, thousand: 1e3, k: 1e3,
+    crore: 1e7, cr: 1e7, lakh: 1e5, lac: 1e5,
+  };
+  const markerCurrencies: Record<string, string> = {
+    USD: 'USD', INR: 'INR', EUR: 'EUR', GBP: 'GBP',
+    '₹': 'INR', '€': 'EUR', '£': 'GBP',
+  };
+  const results: ParsedMoney[] = [];
+  const patterns = [
+    /(USD|INR|EUR|GBP|₹|€|£)\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(trillion|billion|million|thousand|tn|bn|mn|crore|lakh|lac|cr|b|m|k)?/gi,
+    /([0-9][0-9,]*(?:\.[0-9]+)?)\s*(trillion|billion|million|thousand|tn|bn|mn|crore|lakh|lac|cr|b|m|k)?\s*(USD|INR|EUR|GBP)\b/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of statement.matchAll(pattern)) {
+      const prefixCurrency = match[1] && markerCurrencies[match[1].toUpperCase()];
+      const suffixCurrency = match[3] && markerCurrencies[match[3].toUpperCase()];
+      const rawNumber = match[prefixCurrency ? 2 : 1];
+      const rawUnit = (match[prefixCurrency ? 3 : 2] || '').toLowerCase();
+      const currency = prefixCurrency || suffixCurrency;
+      if (!currency) continue; // "$" is deliberately not assumed to mean USD.
+      const amount = Number(rawNumber.replace(/,/g, ''));
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      results.push({
+        value: amount * (suffixMultipliers[rawUnit] || 1),
+        currency,
+        index: match.index ?? 0,
+      });
+    }
+  }
+  const unique = new Map<string, ParsedMoney>();
+  for (const item of results) unique.set(item.currency + ':' + item.value + ':' + item.index, item);
+  return Array.from(unique.values()).sort((a, b) => a.index - b.index);
+}
+
+function uniqueCandidate<T>(candidates: Array<{ value: T; claimId: string }>): { value: T; claimId: string } | null {
+  const distinct = new Map<string, { value: T; claimId: string }>();
+  for (const candidate of candidates) distinct.set(JSON.stringify(candidate.value), candidate);
+  return distinct.size === 1 ? Array.from(distinct.values())[0] : null;
+}
+
+/**
+ * Extract only explicitly stated monetary values and growth rates from claims
+ * that already passed the evidence verifier. Ambiguous or currency-less values
+ * remain unavailable rather than being guessed from geography or model output.
+ */
+export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizing {
+  const supported = claims.filter(claim =>
+    claim.verification_status === 'SUPPORTED' || claim.verification_status === 'CORROBORATED',
+  );
+  const tamBaseCandidates: Array<{ value: number; claimId: string }> = [];
+  const tamForecastCandidates: Array<{ value: number; claimId: string }> = [];
+  const samCandidates: Array<{ value: number; claimId: string }> = [];
+  const somCandidates: Array<{ value: number; claimId: string }> = [];
+  const cagrCandidates: Array<{ value: number; claimId: string }> = [];
+  const currencies = new Set<string>();
+  const years = new Set<number>();
+  const sourceClaimIds = new Set<string>();
+
+  for (const claim of supported) {
+    const statement = String(claim.statement || '');
+    const amounts = parseExplicitMoneyAmounts(statement);
+    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
+    yearMatches.forEach(year => years.add(Number(year)));
+    if (amounts.length > 0) amounts.forEach(amount => currencies.add(amount.currency));
+    if (amounts.length === 0) continue;
+
+    const isSam = /\bSAM\b|serviceable available market/i.test(statement);
+    const isSom = /\bSOM\b|serviceable obtainable market/i.test(statement);
+    const isTam = /\bTAM\b|total addressable market|market size/i.test(statement) ||
+      (claim.claim_type === 'MARKET_SIZE' && !isSam && !isSom);
+
+    if (isSam) {
+      if (amounts.length === 1) samCandidates.push({ value: amounts[0].value, claimId: claim.id });
+      sourceClaimIds.add(claim.id);
+      continue;
+    }
+    if (isSom) {
+      if (amounts.length === 1) somCandidates.push({ value: amounts[0].value, claimId: claim.id });
+      sourceClaimIds.add(claim.id);
+      continue;
+    }
+    if (isTam) {
+      if (amounts.length >= 2) {
+        tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
+        tamForecastCandidates.push({ value: amounts[amounts.length - 1].value, claimId: claim.id });
+        sourceClaimIds.add(claim.id);
+      } else if (/\b(by|forecast|projected|reach|reaching)\b/i.test(statement)) {
+        tamForecastCandidates.push({ value: amounts[0].value, claimId: claim.id });
+        sourceClaimIds.add(claim.id);
+      } else {
+        tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
+        sourceClaimIds.add(claim.id);
+      }
+    }
+  }
+
+  for (const claim of supported.filter(item => item.claim_type === 'MARKET_GROWTH')) {
+    const statement = String(claim.statement || '');
+    if (!/\bCAGR\b|compound annual growth/i.test(statement)) continue;
+    const percent = statement.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (percent) {
+      const value = Number(percent[1]);
+      if (Number.isFinite(value) && value >= 0 && value <= 200) {
+        cagrCandidates.push({ value, claimId: claim.id });
+        sourceClaimIds.add(claim.id);
+      }
+    }
+  }
+
+  const tamBase = uniqueCandidate(tamBaseCandidates);
+  const tamForecast = uniqueCandidate(tamForecastCandidates);
+  const sam = uniqueCandidate(samCandidates);
+  const som = uniqueCandidate(somCandidates);
+  const cagr = uniqueCandidate(cagrCandidates);
+  const currency = currencies.size === 1 ? Array.from(currencies)[0] : null;
+  const yearList = Array.from(years).sort((a, b) => a - b);
+  const yearStart = yearList.length >= 2 ? yearList[0] : yearList[0] ?? null;
+  const yearEnd = yearList.length >= 2 ? yearList[yearList.length - 1] : null;
+
+  let forecastValue = tamForecast?.value ?? null;
+  let forecastClaimId = tamForecast?.claimId;
+  if (forecastValue === null && tamBase && cagr && yearStart !== null && yearEnd !== null && yearEnd > yearStart) {
+    forecastValue = Math.round(tamBase.value * Math.pow(1 + cagr.value / 100, yearEnd - yearStart));
+    forecastClaimId = cagr.claimId;
+  }
+
+  const currencyConsistent = currency !== null;
+  const tamCurrentValue = currencyConsistent ? tamBase?.value ?? null : null;
+  const tamForecastValue = currencyConsistent ? forecastValue : null;
+  const samValue = currencyConsistent ? sam?.value ?? null : null;
+  const somValue = currencyConsistent ? som?.value ?? null : null;
+  const cagrValue = cagr?.value ?? null;
+  const metricClaimIds: VerifiedMarketSizing['metric_claim_ids'] = {};
+  if (tamCurrentValue !== null && tamBase) metricClaimIds.tam_current = tamBase.claimId;
+  if (tamForecastValue !== null && forecastClaimId) metricClaimIds.tam_forecast = forecastClaimId;
+  if (samValue !== null && sam) metricClaimIds.sam = sam.claimId;
+  if (somValue !== null && som) metricClaimIds.som = som.claimId;
+  if (cagrValue !== null && cagr) metricClaimIds.cagr = cagr.claimId;
+
+  const limitations: string[] = [];
+  if (!currencyConsistent) limitations.push('A single explicit currency could not be established from verified market-size claims.');
+  if (tamCurrentValue === null) limitations.push('No unambiguous, currency-explicit verified TAM base value was found.');
+  if (cagrValue === null) limitations.push('No verified CAGR claim with an explicit percentage was found.');
+  if (tamForecastValue === null) limitations.push('Forecast TAM is unavailable without a verified forecast value or verified TAM, CAGR, and year range.');
+  if (samValue === null) limitations.push('SAM is unavailable because no unambiguous, explicitly stated verified SAM value was found.');
+  if (somValue === null) limitations.push('SOM is unavailable because no unambiguous, explicitly stated verified SOM value was found.');
+  if (tamBaseCandidates.length > 1 && !tamBase) limitations.push('Multiple different verified TAM base values were found; no value was selected.');
+  if (cagrCandidates.length > 1 && !cagr) limitations.push('Multiple different verified CAGR values were found; no value was selected.');
+
+  return {
+    data_status: tamCurrentValue !== null || cagrValue !== null || samValue !== null || somValue !== null
+      ? 'SOURCE_BACKED'
+      : 'INSUFFICIENT_EVIDENCE',
+    tam_current: tamCurrentValue,
+    tam_forecast: tamForecastValue,
+    sam: samValue,
+    som: somValue,
+    cagr_pct: cagrValue,
+    currency: currencyConsistent ? currency : null,
+    year_start: yearStart,
+    year_end: yearEnd,
+    source_claim_ids: Array.from(sourceClaimIds),
+    metric_claim_ids: metricClaimIds,
+    limitations,
+  };
 }
 
 export class FinancialEngine {
