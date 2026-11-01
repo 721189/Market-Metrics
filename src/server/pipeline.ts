@@ -248,7 +248,8 @@ async function logAndEmitEvent(
     }
     return false;
   }
-  await DatabaseRepository.addEvent(job.id, event);
+  const eventSaved = await DatabaseRepository.addEvent(job.id, event, userId);
+  if (!eventSaved) return false;
   pipelineEmitter.emit('event:' + job.id, event);
   return true;
 }
