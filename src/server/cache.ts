@@ -48,6 +48,15 @@ export class CacheLayer {
     const store = getCacheStore();
     const key = cacheKey(userId, jobId);
 
+    // A cached report must never outlive its tenant-owned parent job. This
+    // check also makes deletion tombstones effective when cache invalidation
+    // is unavailable or a cache replica still holds an old value.
+    const liveJob = await DatabaseRepository.getJob(jobId, userId);
+    if (!liveJob) {
+      await store.del(key).catch(() => undefined);
+      return null;
+    }
+
     let cached: string | null = null;
     try {
       cached = await store.get(key);

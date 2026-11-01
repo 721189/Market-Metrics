@@ -221,6 +221,20 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'report cache refuses stale entries after parent job deletion or tombstoning',
+    fn: async () => {
+      const cache = readSource('src/server/cache.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const cacheStart = cache.indexOf('static async getReportCached');
+      const cacheEnd = cache.indexOf('static async invalidateReportCache', cacheStart);
+      const readPath = cache.slice(cacheStart, cacheEnd);
+      return readPath.includes('DatabaseRepository.getJob(jobId, userId)') &&
+        readPath.includes('if (!liveJob)') &&
+        readPath.includes('await store.del(key)') &&
+        pipeline.includes('await CacheLayer.invalidateReportCache(jobId, userId)');
+    },
+  },
+  {
     name: 'environment labels fail closed and staging cannot mount Vite dev middleware',
     fn: async () => {
       const environment = readSource('src/server/environment.ts');
@@ -315,8 +329,8 @@ export const p0IdentityStaticChecks: Check[] = [
       const plannerStart = gemini.indexOf('planResearch(');
       const plannerEnd = gemini.indexOf('discoverLiveSources(', plannerStart);
       const planner = gemini.slice(plannerStart, plannerEnd);
-      return requestCount === 5 &&
-        timeoutCount === 5 &&
+      return requestCount === 6 &&
+        timeoutCount === 6 &&
         planner.includes('timeoutMs = 90_000') &&
         planner.includes('maxOutputTokens: 1024') &&
         planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
