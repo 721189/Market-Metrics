@@ -24,6 +24,11 @@ export interface UnitEconomicsInputs {
   annual_churn_rate_pct: number;
   cac: number;
   sales_cycle_months: number;
+  /** Optional measured expansion beyond retained recurring revenue. */
+  expansion_rate_pct?: number;
+  /** Required with operating_margin_pct for a valid Rule of 40 calculation. */
+  revenue_growth_pct?: number;
+  operating_margin_pct?: number;
 }
 
 export interface SensitivityMatrixCell {
@@ -252,8 +257,8 @@ export class FinancialEngine {
     const years = Math.max(1, inputs.year_end - inputs.year_start);
     const cagr_pct = this.calculateCAGR(inputs.tam_current, inputs.tam_forecast, years);
 
-    const safeSamPct = Math.min(100, Math.max(1, inputs.sam_share_pct));
-    const safeSomPct = Math.min(100, Math.max(1, inputs.som_share_pct));
+    const safeSamPct = Math.min(100, Math.max(0, inputs.sam_share_pct));
+    const safeSomPct = Math.min(100, Math.max(0, inputs.som_share_pct));
 
     const sam = Math.round((inputs.tam_current * safeSamPct) / 100);
     const som = Math.round((sam * safeSomPct) / 100);
@@ -287,31 +292,51 @@ export class FinancialEngine {
    * SaaS Unit Economics Engine
    */
   public static calculateUnitEconomics(inputs: UnitEconomicsInputs) {
-    const grossMarginDecimal = Math.min(0.99, Math.max(0.01, inputs.gross_margin_pct / 100));
-    const churnDecimal = Math.min(0.99, Math.max(0.01, inputs.annual_churn_rate_pct / 100));
-    const safeCac = Math.max(1, inputs.cac);
+    const grossMarginDecimal = Math.min(1, Math.max(0, inputs.gross_margin_pct / 100));
+    const churnDecimal = Math.min(1, Math.max(0, inputs.annual_churn_rate_pct / 100));
+    const safeArpu = Number.isFinite(inputs.arpu_annual) ? Math.max(0, inputs.arpu_annual) : 0;
+    const safeCac = Number.isFinite(inputs.cac) ? Math.max(0, inputs.cac) : 0;
 
-    // Customer Lifetime Value: (ARPU * Gross Margin) / Churn Rate
-    const ltv = Math.round((inputs.arpu_annual * grossMarginDecimal) / churnDecimal);
+    // Customer Lifetime Value: annual ARPU × gross margin ÷ annual churn.
+    // Zero/unknown churn has no finite evidence-based LTV; do not invent a cap.
+    const ltv = churnDecimal > 0
+      ? Math.round((safeArpu * grossMarginDecimal) / churnDecimal)
+      : null;
 
-    // LTV : CAC Ratio
-    const ltv_to_cac = Math.round((ltv / safeCac) * 10) / 10;
+    // LTV:CAC is undefined when CAC is zero or LTV cannot be established.
+    const ltv_to_cac = ltv !== null && safeCac > 0
+      ? Math.round((ltv / safeCac) * 10) / 10
+      : null;
 
-    // CAC Payback Period (in months): (CAC / (ARPU * Gross Margin)) * 12
-    const monthlyGrossProfit = (inputs.arpu_annual * grossMarginDecimal) / 12;
-    const payback_period_months = monthlyGrossProfit > 0 ? Math.round((safeCac / monthlyGrossProfit) * 10) / 10 : 0;
+    // CAC payback is measured after customer acquisition; sales-cycle duration
+    // is kept separate and is not silently folded into the payback formula.
+    const monthlyGrossProfit = (safeArpu * grossMarginDecimal) / 12;
+    const payback_period_months = monthlyGrossProfit > 0
+      ? Math.round((safeCac / monthlyGrossProfit) * 10) / 10
+      : null;
 
-    // SaaS Quick Ratio & Magic Number proxies
-    const netRevenueRetentionEstimated = Math.round((1 - churnDecimal + 0.15) * 100); // estimated baseline expansion
-    const ruleOf40Score = Math.round(28.4 + (inputs.gross_margin_pct - 60) * 0.4);
+    // NRR requires an observed expansion rate; churn alone is insufficient.
+    const expansion = inputs.expansion_rate_pct;
+    const netRevenueRetention = expansion !== undefined && Number.isFinite(expansion)
+      ? Math.round((1 - churnDecimal + expansion / 100) * 100)
+      : null;
+
+    // Rule of 40 uses revenue growth + operating margin, never gross margin.
+    const ruleOf40Score =
+      inputs.revenue_growth_pct !== undefined &&
+      inputs.operating_margin_pct !== undefined &&
+      Number.isFinite(inputs.revenue_growth_pct) &&
+      Number.isFinite(inputs.operating_margin_pct)
+        ? Math.round((inputs.revenue_growth_pct + inputs.operating_margin_pct) * 10) / 10
+        : null;
 
     return {
       ltv,
       cac: inputs.cac,
       ltv_to_cac,
       payback_period_months,
-      annual_gross_profit_per_user: Math.round(inputs.arpu_annual * grossMarginDecimal),
-      net_revenue_retention_pct: netRevenueRetentionEstimated,
+      annual_gross_profit_per_user: Math.round(safeArpu * grossMarginDecimal),
+      net_revenue_retention_pct: netRevenueRetention,
       rule_of_40_score: ruleOf40Score,
     };
   }
@@ -443,8 +468,9 @@ export class FinancialEngine {
   /**
    * Deterministic Currency Normalizer and Formatter
    */
-  public static formatCurrency(amount: number, currency: string = 'USD'): string {
-    if (isNaN(amount) || amount === null || amount === undefined) return '0';
+  public static formatCurrency(amount: number | null | undefined, currency: string = 'USD'): string {
+    if (amount === null || amount === undefined) return 'Not established';
+    if (!Number.isFinite(amount)) return 'Not available';
     const abs = Math.abs(amount);
     const sign = amount < 0 ? '-' : '';
 
