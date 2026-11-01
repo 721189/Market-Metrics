@@ -26,8 +26,8 @@ export class TestableDatabaseRepository {
     const docSnap = await this.db.collection('jobs').doc(jobId).get();
     if (!docSnap.exists) return null;
     const data = docSnap.data();
-    if (data.user_id && data.user_id !== userId) {
-      return null; // Enforce strict ownership: forbidden to non-owners
+    if (data.user_id !== userId) {
+      return null; // Missing ownership metadata is inaccessible until audited migration.
     }
     return data;
   }
@@ -61,8 +61,8 @@ export class TestableDatabaseRepository {
     const docSnap = await this.db.collection('reports').doc(jobId).get();
     if (!docSnap.exists) return null;
     const data = docSnap.data();
-    if (data.user_id && data.user_id !== userId) {
-      return null; // Enforce strict ownership: forbidden to non-owners
+    if (data.user_id !== userId) {
+      return null; // Missing ownership metadata is inaccessible until audited migration.
     }
     return data;
   }
@@ -140,6 +140,26 @@ export async function runSecurityRulesTest() {
     throw new Error('Failed to reject unauthenticated request with missing userId');
   }
   console.log('✓ Verified: Unauthenticated requests without userId are rejected immediately.');
+
+  // 7. Legacy records with no tenant owner must not be readable by any tenant.
+  await mockDb.collection('jobs').doc('legacy-unowned-job').set({
+    id: 'legacy-unowned-job',
+    industry: 'Confidential legacy data',
+    status: 'COMPLETED',
+  });
+  await mockDb.collection('reports').doc('legacy-unowned-job').set({
+    job_id: 'legacy-unowned-job',
+    executive_summary: 'Confidential legacy report',
+  });
+  if (await repo.getJob('legacy-unowned-job', aliceId) !== null ||
+      await repo.getJob('legacy-unowned-job', bobId) !== null) {
+    throw new Error('SECURITY VIOLATION: a legacy job without user_id was exposed to a tenant');
+  }
+  if (await repo.getReport('legacy-unowned-job', aliceId) !== null ||
+      await repo.getReport('legacy-unowned-job', bobId) !== null) {
+    throw new Error('SECURITY VIOLATION: a legacy report without user_id was exposed to a tenant');
+  }
+  console.log('✓ Verified: legacy jobs and reports without user_id fail closed for every tenant.');
 
   // 7. Verify static firestore.rules file syntax and lock-downs
   const rulesPath = path.join(process.cwd(), 'firestore.rules');
