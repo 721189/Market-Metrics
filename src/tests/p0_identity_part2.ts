@@ -141,6 +141,34 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'deletion tombstones prevent stale workers recreating jobs, reports, or orphaned events',
+    fn: async () => {
+      const db = readSource('src/server/db.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const guardedSaveStart = db.indexOf('public static async saveJobIfNonTerminal');
+      const guardedSaveEnd = db.indexOf('public static async getJob', guardedSaveStart);
+      const guardedSave = db.slice(guardedSaveStart, guardedSaveEnd);
+      const addEventStart = db.indexOf('public static async addEvent');
+      const addEventEnd = db.indexOf('public static async getEvents', addEventStart);
+      const addEvent = db.slice(addEventStart, addEventEnd);
+      const saveReportStart = db.indexOf('public static async saveReport');
+      const saveReportEnd = db.indexOf('public static async getReport', saveReportStart);
+      const saveReport = db.slice(saveReportStart, saveReportEnd);
+      const deleteStart = db.indexOf('public static async deleteJob');
+      const deleteJob = db.slice(deleteStart);
+      return guardedSave.includes('if (!snapshot.exists) return false;') &&
+        guardedSave.includes('existing.deletion_requested_at') &&
+        addEvent.includes('transaction.get(jobRef)') &&
+        addEvent.includes('jobData.deletion_requested_at') &&
+        saveReport.includes('transaction.get(jobRef)') &&
+        saveReport.includes('jobData.deletion_requested_at') &&
+        deleteJob.includes('deletion_requested_at: FieldValue.serverTimestamp()') &&
+        deleteJob.includes('const chunkSize = 450') &&
+        pipeline.includes('DatabaseRepository.addEvent(job.id, event, userId)') &&
+        pipeline.includes('if (!eventSaved) return false');
+    },
+  },
+  {
     name: 'environment labels fail closed and staging cannot mount Vite dev middleware',
     fn: async () => {
       const environment = readSource('src/server/environment.ts');
