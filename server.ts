@@ -225,8 +225,8 @@ async function startServer() {
   // -------------------------------------------------------------
   // OPERATIONAL METRICS (admin only)
   // -------------------------------------------------------------
-  // Authentication runs before the admin allow-list check on this route.
-  // Front-end visibility is irrelevant — authorization is enforced server-side.
+  // The global admin-path guard authenticates first, then applies the admin
+  // allow-list. Front-end visibility is irrelevant to this server-side check.
   app.get('/metrics', rateLimiterByCategory(), (req: Request, res: Response) => {
     const snapshot = observabilitySnapshot();
     res.status(200).json({
