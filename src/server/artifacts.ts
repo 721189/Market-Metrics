@@ -120,8 +120,9 @@ export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'no
 // ---------------------------------------------------------------------------
 // Firestore / Firebase Storage-backed artifact store (production)
 // ---------------------------------------------------------------------------
-// Stores raw bytes and normalized text in Firebase Cloud Storage.
-// Falls back to InMemoryArtifactStorage when STORAGE_BUCKET is not configured.
+// Stores raw bytes and normalized text in Firebase Cloud Storage. The selector
+// below permits in-memory fallback only for local development and tests;
+// staging/production fail closed when a durable bucket is unavailable.
 // ---------------------------------------------------------------------------
 
 export class FirestoreArtifactStorage implements ArtifactStorage {
