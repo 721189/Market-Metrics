@@ -417,8 +417,8 @@ export const p0IdentityStaticChecks: Check[] = [
       const plannerStart = gemini.indexOf('planResearch(');
       const plannerEnd = gemini.indexOf('discoverLiveSources(', plannerStart);
       const planner = gemini.slice(plannerStart, plannerEnd);
-      return requestCount === 6 &&
-        timeoutCount === 6 &&
+      return requestCount === 5 &&
+        timeoutCount === 5 &&
         planner.includes('timeoutMs = 90_000') &&
         planner.includes('maxOutputTokens: 1024') &&
         planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
