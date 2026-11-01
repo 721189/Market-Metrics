@@ -74,7 +74,11 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
   };
 
   const handleCopySummary = () => {
-    const content = `${report.title}\n\nExecutive Summary:\n${report.executive_summary}\n\nVerified Evidence Score: ${report.evidence_score_breakdown.overall_score}/100\nForecast TAM: ${FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency)} (${report.financial_models.cagr_pct}% CAGR)`;
+    const forecastSummary = report.financial_models.tam_forecast === null
+      ? 'Forecast TAM: Not established from verified claims'
+      : 'Forecast TAM: ' + FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency) +
+        ' (' + (report.financial_models.cagr_pct === null ? 'CAGR not established' : report.financial_models.cagr_pct + '% CAGR') + ')';
+    const content = `${report.title}\n\nExecutive Summary:\n${report.executive_summary}\n\nVerified Evidence Score: ${report.evidence_score_breakdown.overall_score}/100\n${forecastSummary}`;
     navigator.clipboard.writeText(content);
     setCopiedSummary(true);
     setTimeout(() => setCopiedSummary(false), 2000);
@@ -274,7 +278,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           <section id="sizing" className="space-y-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
               <TrendingUp className="h-5 w-5 text-blue-400" />
-              <h2 className="text-xl font-bold text-white">2. Market Sizing & Deterministic CAGR</h2>
+              <h2 className="text-xl font-bold text-white">2. Verified Market Metrics</h2>
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -283,29 +287,40 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
                 <div className="text-2xl font-black text-white font-mono">
                   {FinancialEngine.formatCurrency(report.financial_models.tam_current, report.financial_models.currency)}
                 </div>
-                <span className="text-[11px] text-slate-400">Validated Year {report.financial_models.year_start}</span>
+                <span className="text-[11px] text-slate-400">Source year {report.financial_models.year_start ?? "not established"}</span>
               </div>
 
               <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-1">
-                <span className="text-xs font-medium text-slate-400">Deterministic Forecast ({report.financial_models.year_end})</span>
+                <span className="text-xs font-medium text-slate-400">Verified Forecast ({report.financial_models.year_end ?? "year not established"})</span>
                 <div className="text-2xl font-black text-cyan-400 font-mono">
                   {FinancialEngine.formatCurrency(report.financial_models.tam_forecast, report.financial_models.currency)}
                 </div>
                 <span className="text-[11px] text-emerald-400 font-semibold">
-                  Verified CAGR: {report.financial_models.cagr_pct}%
+                  {report.financial_models.cagr_pct === null ? "CAGR not established" : "Verified CAGR: " + report.financial_models.cagr_pct + "%"}
                 </span>
               </div>
 
               <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-1">
-                <span className="text-xs font-medium text-slate-400">Serviceable Market (SAM &bull; SOM)</span>
-                <div className="text-2xl font-black text-blue-400 font-mono">
-                  {FinancialEngine.formatCurrency(report.financial_models.som, report.financial_models.currency)}
+                <span className="text-xs font-medium text-slate-400">Serviceable Markets</span>
+                <div className="text-sm font-bold text-blue-400 font-mono">
+                  SAM: {FinancialEngine.formatCurrency(report.financial_models.sam, report.financial_models.currency)}
                 </div>
-                <span className="text-[11px] text-slate-400">
-                  Target Serviceable Obtainable Pool
-                </span>
+                <div className="text-sm font-bold text-blue-300 font-mono">
+                  SOM: {FinancialEngine.formatCurrency(report.financial_models.som, report.financial_models.currency)}
+                </div>
+                <span className="text-[11px] text-slate-400">Only explicit, verified values are shown</span>
               </div>
             </div>
+            {report.financial_models.limitations && report.financial_models.limitations.length > 0 && (
+              <div className="rounded-xl border border-amber-500/20 bg-slate-900/40 p-4 text-xs text-slate-300 space-y-2">
+                <h3 className="font-semibold text-amber-300">Financial evidence limitations</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  {report.financial_models.limitations.map((limitation, index) => (
+                    <li key={index}>{limitation}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
 
           {/* 3. Competitor Matrix */}
@@ -470,15 +485,10 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
 
           {/* 6. Deterministic Financial Scenarios Engine */}
           <section id="financials" className="space-y-4">
-            <FinancialCalculator
-              initialArpu={report.financial_models.currency === 'INR' ? 48000 : 4800}
-              initialCac={report.financial_models.currency === 'INR' ? 38000 : 3800}
-              initialMargin={78}
-              tamCurrent={report.financial_models.tam_current}
-              tamForecast={report.financial_models.tam_forecast}
-              cagr={report.financial_models.cagr_pct}
-              currency={report.financial_models.currency}
-            />
+            <div className="rounded-xl border border-amber-500/20 bg-slate-900/40 p-3 text-xs text-amber-200">
+              The calculator below is an illustrative assumption sandbox, not a researched forecast. Its editable ARPU, CAC, margin, churn, and customer-count inputs are not claims about the market or any company.
+            </div>
+            <FinancialCalculator currency={report.financial_models.currency || 'USD'} />
           </section>
 
           {/* 7. Regulatory Policies */}

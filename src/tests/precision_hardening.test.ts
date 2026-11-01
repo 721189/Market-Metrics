@@ -17,6 +17,7 @@ import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.j
 import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentName, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { classifyDomainTier } from '../server/pipeline.js';
+import { extractVerifiedMarketSizing, FinancialEngine } from '../server/financial.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -389,12 +390,196 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+  const unitEconomics = FinancialEngine.calculateUnitEconomics({
+    arpu_annual: 1200,
+    gross_margin_pct: 80,
+    annual_churn_rate_pct: 10,
+    cac: 400,
+    sales_cycle_months: 3,
+  });
+  if (unitEconomics.ltv !== 9600 || unitEconomics.payback_period_months !== 5 ||
+      unitEconomics.net_revenue_retention_pct !== null ||
+      unitEconomics.rule_of_40_score !== null ||
+      unitEconomics.sales_cycle_months !== 3) {
+    return { passed: false, message: 'Unit economics must not fabricate NRR or Rule of 40 without expansion, growth, and operating-margin inputs' };
+  }
+  const fullySpecifiedEconomics = FinancialEngine.calculateUnitEconomics({
+    arpu_annual: 1200,
+    gross_margin_pct: 80,
+    annual_churn_rate_pct: 10,
+    cac: 400,
+    sales_cycle_months: 3,
+    expansion_rate_pct: 20,
+    revenue_growth_pct: 30,
+    operating_margin_pct: 10,
+  });
+  if (fullySpecifiedEconomics.net_revenue_retention_pct !== 110 || fullySpecifiedEconomics.rule_of_40_score !== 40) {
+    return { passed: false, message: 'NRR and Rule of 40 must use explicit expansion, revenue growth, and operating margin' };
+  }
+  const scenarioInputs = FinancialEngine.generateScenarios(1000, 500, 80, 'USD', 200, 3);
+  if (scenarioInputs.scenario_conservative.customer_count !== 100 ||
+      scenarioInputs.scenario_base.customer_count !== 200 ||
+      scenarioInputs.scenario_aggressive.customer_count !== 300 ||
+      scenarioInputs.scenario_base.year_3_revenue !== 200000) {
+    return { passed: false, message: 'Scenario revenue must derive from explicit customer-count assumptions, not fixed invented customer counts' };
+  }
+  const zeroShare = FinancialEngine.calculateMarketSizing({
+    tam_current: 1000, tam_forecast: 1200, year_start: 2025, year_end: 2026,
+    sam_share_pct: 0, som_share_pct: 0, currency: 'USD',
+  });
+  if (zeroShare.sam !== 0 || zeroShare.som !== 0) {
+    return { passed: false, message: 'Market sizing must allow legitimate zero SAM/SOM shares without forcing a 1% floor' };
+  }
+
+  if (FinancialEngine.calculateCAGR(0, 100, 5) !== null ||
+      FinancialEngine.calculateCAGR(100, 200, 0) !== null) {
+    return { passed: false, message: 'Invalid CAGR inputs must be represented as unavailable, not zero growth' };
+  }
+  if (
+    FinancialEngine.formatCurrency(1_000_000, 'USD') !== '$1.00M' ||
+    FinancialEngine.formatCurrency(1_000_000, 'EUR') !== '€1.00M' ||
+    FinancialEngine.formatCurrency(1_000_000, 'GBP') !== '£1.00M' ||
+    FinancialEngine.formatCurrency(100_000_000, 'INR') !== '₹1.00 Cr' ||
+    FinancialEngine.formatCurrency(1_000_000, 'JPY') !== '1,000,000 JPY'
+  ) {
+    return { passed: false, message: 'Currency formatting must preserve the explicit currency and never label EUR/GBP/unknown amounts as USD' };
+  }
+
+  const tenPercentChurnScenarios = FinancialEngine.generateScenarios(1000, 1000, 80, 'USD', 100, 2.8, 10);
+  if (tenPercentChurnScenarios.scenario_base.ltv !== 8000) {
+    return { passed: false, message: 'Scenario base-case LTV must use the live churn assumption supplied by the calculator' };
+  }
+
+  const invalidSizing = FinancialEngine.calculateMarketSizing({
+    tam_current: 1000, tam_forecast: 1200, year_start: 2030, year_end: 2025,
+    sam_share_pct: 40, som_share_pct: 10, currency: 'USD',
+  });
+  if (invalidSizing.cagr_pct !== null || invalidSizing.years !== 0) {
+    return { passed: false, message: 'Market sizing must reject reversed forecast periods' };
+  }
+
+  const verifiedTam = makeClaim('clm-tam-verified', 1, []);
+  verifiedTam.claim_type = 'MARKET_SIZE';
+  verifiedTam.verification_status = 'SUPPORTED';
+  verifiedTam.statement = 'The total addressable market was USD 8.4 billion in 2025 and is projected to reach USD 41.2 billion by 2030.';
+  const verifiedCagr = makeClaim('clm-cagr-verified', 2, []);
+  verifiedCagr.claim_type = 'MARKET_GROWTH';
+  verifiedCagr.verification_status = 'CORROBORATED';
+  verifiedCagr.statement = 'The market is expected to grow at a 37.4% CAGR from 2025 to 2030.';
+  const verifiedSam = makeClaim('clm-sam-verified', 3, []);
+  verifiedSam.claim_type = 'MARKET_SIZE';
+  verifiedSam.verification_status = 'SUPPORTED';
+  verifiedSam.statement = 'The serviceable available market (SAM) is USD 2.5 billion.';
+  const verifiedSom = makeClaim('clm-som-verified', 4, []);
+  verifiedSom.claim_type = 'MARKET_SIZE';
+  verifiedSom.verification_status = 'SUPPORTED';
+  verifiedSom.statement = 'The serviceable obtainable market (SOM) is USD 500 million.';
+  const unverifiedFinancial = makeClaim('clm-tam-unverified', 5, []);
+  unverifiedFinancial.claim_type = 'MARKET_SIZE';
+  unverifiedFinancial.verification_status = 'INSUFFICIENT';
+  unverifiedFinancial.statement = 'The total addressable market is USD 999 billion.';
+  const verifiedSizing = extractVerifiedMarketSizing([
+    verifiedTam, verifiedCagr, verifiedSam, verifiedSom, unverifiedFinancial,
+  ]);
+  if (verifiedSizing.tam_current !== 8_400_000_000 ||
+      verifiedSizing.tam_forecast !== 41_200_000_000 ||
+      verifiedSizing.cagr_pct !== 37.4 ||
+      verifiedSizing.sam !== 2_500_000_000 ||
+      verifiedSizing.som !== 500_000_000 ||
+      verifiedSizing.currency !== 'USD' ||
+      verifiedSizing.source_claim_ids.includes(unverifiedFinancial.id)) {
+    return { passed: false, message: 'Financial metrics must be extracted only from supported claims with explicit currency and values' };
+  }
+  const forecastOnlyClaim = makeClaim('clm-forecast-only', 7, []);
+  forecastOnlyClaim.claim_type = 'MARKET_SIZE';
+  forecastOnlyClaim.verification_status = 'SUPPORTED';
+  forecastOnlyClaim.statement = 'The TAM is projected to reach USD 4 billion by 2030.';
+  const forecastOnlySizing = extractVerifiedMarketSizing([forecastOnlyClaim]);
+  if (forecastOnlySizing.data_status !== 'SOURCE_BACKED' || forecastOnlySizing.tam_forecast !== 4_000_000_000 || forecastOnlySizing.tam_current !== null || forecastOnlySizing.year_start !== null || forecastOnlySizing.year_end !== 2030) {
+    return { passed: false, message: 'A verified forecast-only market value must remain source-backed without inventing a base value' };
+  }
+  const ambiguousTamClaim = makeClaim('clm-tam-ambiguous', 8, []);
+  ambiguousTamClaim.claim_type = 'MARKET_SIZE';
+  ambiguousTamClaim.verification_status = 'SUPPORTED';
+  ambiguousTamClaim.statement = 'The TAM includes USD 8 billion for enterprise and USD 4 billion for small business.';
+  const ambiguousTam = extractVerifiedMarketSizing([ambiguousTamClaim]);
+  if (ambiguousTam.tam_current !== null || ambiguousTam.tam_forecast !== null ||
+      !ambiguousTam.limitations.some(note => note.includes('ambiguous base-to-forecast'))) {
+    return { passed: false, message: 'Multiple market amounts without an explicit base-to-forecast relationship must not be misclassified as TAM and forecast' };
+  }
+  const currencylessClaim = makeClaim('clm-currencyless', 6, []);
+  currencylessClaim.claim_type = 'MARKET_SIZE';
+  currencylessClaim.verification_status = 'SUPPORTED';
+  currencylessClaim.statement = 'The total addressable market is $8.4 billion.';
+  const currencylessSizing = extractVerifiedMarketSizing([currencylessClaim]);
+  if (currencylessSizing.tam_current !== null || currencylessSizing.currency !== null) {
+    return { passed: false, message: 'Ambiguous dollar symbols must not be assumed to mean USD' };
+  }
+
+  const mismatchedBaseYear = makeClaim('clm-tam-base-2025', 9, []);
+  mismatchedBaseYear.claim_type = 'MARKET_SIZE';
+  mismatchedBaseYear.verification_status = 'SUPPORTED';
+  mismatchedBaseYear.statement = 'The TAM was USD 100 million in 2025.';
+  const mismatchedCagr = makeClaim('clm-cagr-2024-2030', 10, []);
+  mismatchedCagr.claim_type = 'MARKET_GROWTH';
+  mismatchedCagr.verification_status = 'SUPPORTED';
+  mismatchedCagr.statement = 'The TAM CAGR was 10% from 2024 to 2030.';
+  const mismatchedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, mismatchedCagr]);
+  if (
+    mismatchedSizing.tam_current !== 100_000_000 ||
+    mismatchedSizing.tam_forecast !== null ||
+    mismatchedSizing.year_start !== 2025 ||
+    mismatchedSizing.year_end !== null ||
+    !mismatchedSizing.limitations.some(note => note.includes('CAGR period could not be matched'))
+  ) {
+    return { passed: false, message: 'A CAGR period beginning before the verified TAM baseline must not be applied to that baseline' };
+  }
+
+  const alignedCagr = makeClaim('clm-cagr-2025-2030', 11, []);
+  alignedCagr.claim_type = 'MARKET_GROWTH';
+  alignedCagr.verification_status = 'SUPPORTED';
+  alignedCagr.statement = 'The TAM CAGR was 10% from 2025 to 2030.';
+  const alignedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, alignedCagr]);
+  if (
+    alignedSizing.tam_forecast !== 161_051_000 ||
+    alignedSizing.year_start !== 2025 ||
+    alignedSizing.year_end !== 2030
+  ) {
+    return { passed: false, message: 'A CAGR may extrapolate a verified TAM only when its stated start year matches the TAM baseline year' };
+  }
+
+  const cagrWithEarlierPercentage = makeClaim('clm-cagr-adjacent-percent', 12, []);
+  cagrWithEarlierPercentage.claim_type = 'MARKET_GROWTH';
+  cagrWithEarlierPercentage.verification_status = 'SUPPORTED';
+  cagrWithEarlierPercentage.statement = 'The annual retention improved 14%, while the TAM CAGR was 10% from 2025 to 2030.';
+  const cagrBoundedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, cagrWithEarlierPercentage]);
+  if (cagrBoundedSizing.cagr_pct !== 10 || cagrBoundedSizing.tam_forecast !== 161_051_000) {
+    return { passed: false, message: 'CAGR extraction must bind to the percentage adjacent to the CAGR phrase, not an earlier unrelated percentage' };
+  }
+
+  const cagrWithLaterPercentage = makeClaim('clm-cagr-later-percent', 13, []);
+  cagrWithLaterPercentage.claim_type = 'MARKET_GROWTH';
+  cagrWithLaterPercentage.verification_status = 'SUPPORTED';
+  cagrWithLaterPercentage.statement = 'The TAM CAGR was 10%, while gross margin reached 14% from 2025 to 2030.';
+  const cagrNearestSizing = extractVerifiedMarketSizing([mismatchedBaseYear, cagrWithLaterPercentage]);
+  if (cagrNearestSizing.cagr_pct !== 10 || cagrNearestSizing.tam_forecast !== 161_051_000) {
+    return { passed: false, message: 'CAGR extraction must prefer the percentage nearest the CAGR phrase over a later unrelated percentage' };
+  }
+
+  console.log('✔ Market sizing accepts only verified claims and explicit, unambiguous currency values.');
+
   const trustedGovernment = classifyDomainTier('https://www.sec.gov/reports');
   const trustedPublisher = classifyDomainTier('research.bloomberg.com');
   const lookalikePublisher = classifyDomainTier('bloomberg.com.attacker.example');
   const unknownPublisher = classifyDomainTier('unlisted-research.example');
+  const fakeGovernmentDomain = classifyDomainTier('reports.fake.gov.com');
+  const fakeAcademicDomain = classifyDomainTier('research.fake.edu.com');
+  const trustedUkGovernment = classifyDomainTier('department.gov.uk');
+  const trustedUkUniversity = classifyDomainTier('research.example.ac.uk');
   if (trustedGovernment.tier !== 'TIER_A' || trustedPublisher.tier !== 'TIER_B' ||
-      lookalikePublisher.reliability >= 70 || unknownPublisher.reliability >= 70) {
+      lookalikePublisher.reliability >= 70 || unknownPublisher.reliability >= 70 ||
+      fakeGovernmentDomain.tier === 'TIER_A' || fakeAcademicDomain.tier === 'TIER_A' ||
+      trustedUkGovernment.tier !== 'TIER_A' || trustedUkUniversity.tier !== 'TIER_A') {
     return { passed: false, message: 'Source credibility must use canonical host allowlists and keep unknown domains below the verification threshold' };
   }
   console.log('✔ Source credibility rejects lookalike domains and conservatively scores unknown publishers.');
