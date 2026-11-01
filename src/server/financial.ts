@@ -222,8 +222,14 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
 
   const tamBase = uniqueCandidate(tamBaseCandidates);
   const tamForecast = uniqueCandidate(tamForecastCandidates);
-  const tamBaseYear = uniqueCandidate(tamBaseYearCandidates);
-  const tamForecastYear = uniqueCandidate(tamForecastYearCandidates);
+  // Keep year attribution tied to the exact claim selected for the amount.
+  // Equal amounts in distinct years must not borrow one another's period.
+  const tamBaseYear = tamBase
+    ? tamBaseYearCandidates.find(candidate => candidate.claimId === tamBase.claimId) ?? null
+    : null;
+  const tamForecastYear = tamForecast
+    ? tamForecastYearCandidates.find(candidate => candidate.claimId === tamForecast.claimId) ?? null
+    : null;
   const sam = uniqueCandidate(samCandidates);
   const som = uniqueCandidate(somCandidates);
   const cagr = uniqueCandidate(cagrCandidates);
@@ -545,23 +551,34 @@ export class FinancialEngine {
 
     if (currency === 'INR') {
       if (abs >= 100_000_000) {
-        return `${sign}₹${(abs / 100_000_000).toFixed(2)} Cr`;
+        return sign + '₹' + (abs / 100_000_000).toFixed(2) + ' Cr';
       }
       if (abs >= 100_000) {
-        return `${sign}₹${(abs / 100_000).toFixed(2)} Lakh`;
+        return sign + '₹' + (abs / 100_000).toFixed(2) + ' Lakh';
       }
-      return `${sign}₹${abs.toLocaleString('en-IN')}`;
+      return sign + '₹' + abs.toLocaleString('en-IN');
+    }
+
+    const currencySymbols: Record<string, string> = {
+      USD: '$',
+      EUR: '€',
+      GBP: '£',
+    };
+    const symbol = currencySymbols[currency];
+    if (!symbol) {
+      return sign + abs.toLocaleString('en-US') + ' ' + currency;
     }
 
     if (abs >= 1_000_000_000) {
-      return `${sign}$${(abs / 1_000_000_000).toFixed(2)}B`;
+      return sign + symbol + (abs / 1_000_000_000).toFixed(2) + 'B';
     }
     if (abs >= 1_000_000) {
-      return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+      return sign + symbol + (abs / 1_000_000).toFixed(2) + 'M';
     }
     if (abs >= 1_000) {
-      return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+      return sign + symbol + (abs / 1_000).toFixed(1) + 'K';
     }
-    return `${sign}$${abs.toLocaleString('en-US')}`;
+    return sign + symbol + abs.toLocaleString('en-US');
+  }
   }
 }
