@@ -209,15 +209,89 @@ export const p0IdentityStaticChecks: Check[] = [
       if (claimStart < 0 || claimEnd < 0) return false;
       const claim = middleware.slice(claimStart, claimEnd);
       const completionStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('function installIdempotencyResponse'));
-      const completionEnd = middleware.indexOf("}).then(() => {", completionStart);
+      const completionEnd = middleware.indexOf("}).then(committed => {", completionStart);
       if (completionStart < 0 || completionEnd < 0) return false;
       const completion = middleware.slice(completionStart, completionEnd);
       return !/res\.json|res\.status/.test(claim) &&
         claim.includes("state: 'IN_FLIGHT'") &&
+        claim.includes('lock_token: lockToken') &&
         completion.includes("state: 'COMPLETED'") &&
+        completion.includes('data.lock_token !== options.lockToken') &&
         completion.includes('transaction.update(ref') &&
         middleware.includes('IDEMPOTENCY_STORE_UNAVAILABLE') &&
         middleware.includes('sendIdempotencyError(\n      res, 503');
+    },
+  },
+  {
+    name: 'expired idempotency reservations are fenced and legacy records receive bounded expiry',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      return middleware.includes('data.lock_token !== options.lockToken') &&
+        middleware.includes('current.lock_token !== options.lockToken') &&
+        middleware.includes('respondedAt ?? createdAt') &&
+        middleware.includes('(createdAt ?? 0) + IDEMPOTENCY_PENDING_TTL_MS') &&
+        middleware.includes("userId + '|' + path + '|' + idempotencyKey") &&
+        middleware.includes('idempotencyRequestHash(method, path, req.body ?? null)');
+    },
+  },
+  {
+    name: 'queue readiness uses aggregate counts and fails closed when Firestore is unavailable',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const server = readSource('server.ts');
+      const statsStart = queue.indexOf('async getStats()');
+      const statsEnd = queue.indexOf('async getJobPosition', statsStart);
+      const stats = queue.slice(statsStart, statsEnd);
+      const readyStart = server.indexOf("app.get('/ready'");
+      const readyEnd = server.indexOf('// OPERATIONAL METRICS', readyStart);
+      const ready = server.slice(readyStart, readyEnd);
+      return stats.includes('collection.count().get()') &&
+        stats.includes("collection.where('status', '==', 'QUEUED').count().get()") &&
+        !stats.includes('collection.get()') &&
+        ready.includes('researchQueue.getStats()') &&
+        ready.includes('res.status(503)');
+    },
+  },
+  {
+    name: 'stale queue recovery is expiry-indexed and scans beyond healthy running jobs',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const indexConfig = JSON.parse(readSource('firestore.indexes.json'));
+      const start = queue.indexOf('async recoverStaleJobs()');
+      const end = queue.indexOf('private async _recoverStaleJobTransaction', start);
+      const recovery = queue.slice(start, end);
+      const hasIndex = indexConfig.indexes.some((index: any) =>
+        index.collectionGroup === 'job_queue' &&
+        index.fields?.some((field: any) => field.fieldPath === 'status' && field.order === 'ASCENDING') &&
+        index.fields?.some((field: any) => field.fieldPath === 'leased_until' && field.order === 'ASCENDING')
+      );
+      return recovery.includes(".where('status', '==', 'RUNNING')") &&
+        recovery.includes(".where('leased_until', '<=', Timestamp.fromMillis(now))") &&
+        recovery.includes(".orderBy('leased_until', 'asc')") &&
+        recovery.includes('.limit(100)') &&
+        hasIndex;
+    },
+  },
+  {
+    name: 'worker heartbeat and terminal writes require the exact per-claim lease token',
+    fn: async () => {
+      const queue = readSource('src/server/firestore_queue.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const heartbeatStart = queue.indexOf('async heartbeat(');
+      const heartbeatEnd = queue.indexOf('async recoverStaleJobs', heartbeatStart);
+      const heartbeat = queue.slice(heartbeatStart, heartbeatEnd);
+      const statusStart = queue.indexOf('async updateJobStatus(');
+      const statusEnd = queue.indexOf('async getStats()', statusStart);
+      const status = queue.slice(statusStart, statusEnd);
+      return heartbeat.includes('leaseId: string') &&
+        heartbeat.includes('data?.lease_id === leaseId') &&
+        status.includes('data?.lease_id !== leaseId') &&
+        pipeline.includes("researchQueue.heartbeat(job!.id, workerId, String(job!.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'COMPLETED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes("researchQueue.updateJobStatus(job.id, 'FAILED', workerId, String(job.lease_id || ''))") &&
+        pipeline.includes('if (!completed)') &&
+        pipeline.includes('if (!failed)') &&
+        pipeline.includes('queue.failure_finalize_suppressed');
     },
   },
   {
