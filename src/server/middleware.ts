@@ -100,11 +100,14 @@ function installIdempotencyResponse(
     if (options.storeKind === 'memory') {
       const current = inMemoryIdempotencyCache.get(options.docKey);
       if (!current || current.lock_token !== options.lockToken) {
-        return sendIdempotencyError(
-          res, 409, 'IDEMPOTENCY_LEASE_LOST',
-          'This request no longer owns the idempotency reservation. Retry with the same key.',
-          2,
-        );
+        res.setHeader('Retry-After', '2');
+        res.status(409);
+        return originalJson({
+          error: {
+            code: 'IDEMPOTENCY_LEASE_LOST',
+            message: 'This request no longer owns the idempotency reservation. Retry with the same key.',
+          },
+        });
       }
       inMemoryIdempotencyCache.set(options.docKey, {
         state: 'COMPLETED',
@@ -142,11 +145,14 @@ function installIdempotencyResponse(
       return true;
     }).then(committed => {
       if (!committed) {
-        sendIdempotencyError(
-          res, 409, 'IDEMPOTENCY_LEASE_LOST',
-          'This request no longer owns the idempotency reservation. Retry with the same key.',
-          2,
-        );
+        res.setHeader('Retry-After', '2');
+        res.status(409);
+        originalJson({
+          error: {
+            code: 'IDEMPOTENCY_LEASE_LOST',
+            message: 'This request no longer owns the idempotency reservation. Retry with the same key.',
+          },
+        });
         return;
       }
       originalJson(body);
