@@ -683,7 +683,7 @@ export class RealDocumentFetcher {
     return String(json);
   }
 
-  private static async extractPdfText(body: Buffer): Promise<string> {
+  public static async extractPdfText(body: Buffer): Promise<string> {
     try {
       const pdfModule = require('pdf-parse');
       const PDFParse = pdfModule?.PDFParse || pdfModule?.default?.PDFParse;
