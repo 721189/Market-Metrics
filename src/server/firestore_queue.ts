@@ -70,34 +70,19 @@ export class FirestoreQueue {
             // constant-cost server-side count — never a full collection scan.
             await this.observeQueueDepth();
 
-            // IMPORTANT: the candidate query runs OUTSIDE the transaction and
-            // without orderBy().
-            //
-            //  * `status ==` + `orderBy('created_at')` requires a COMPOSITE
-            //    Firestore index. A fresh project has none, so the query fails
-            //    with FAILED_PRECONDITION, claimNextJob swallows it and returns
-            //    null — every job then sits in QUEUED forever while the UI
-            //    streams heartbeats and never finishes. That is the "search
-            //    never completes" failure.
-            //  * Running a query inside runTransaction() is also not portable
-            //    across SDK versions.
-            //
-            // So: fetch a bounded page of QUEUED docs, sort in memory, and let
-            // the transaction claim exactly one document by id.
+            // The composite status + created_at index is deployed through
+            // firestore.indexes.json. Use it to retrieve the oldest queued jobs
+            // first; sorting only an unordered 25-document sample can starve
+            // older jobs behind newer document IDs.
             const snap = await adminDb.collection(this.collectionName)
                 .where('status', '==', 'QUEUED')
+                .orderBy('created_at', 'asc')
                 .limit(25)
                 .get();
-
             if (snap.empty) return null;
 
             const candidates = snap.docs
-                .map(doc => ({ id: doc.id, ...(doc.data() as QueueJob) }))
-                .sort((a, b) => {
-                    const ta = a.created_at?.toMillis ? a.created_at.toMillis() : 0;
-                    const tb = b.created_at?.toMillis ? b.created_at.toMillis() : 0;
-                    return ta - tb;
-                });
+                .map(doc => ({ id: doc.id, ...(doc.data() as QueueJob) }));
 
             for (const target of candidates) {
                 const jobRef = adminDb.collection(this.collectionName).doc(target.id);
