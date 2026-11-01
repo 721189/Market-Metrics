@@ -212,14 +212,14 @@ export const p0IdentityStaticChecks: Check[] = [
       const completionEnd = middleware.indexOf("}).then(committed => {", completionStart);
       if (completionStart < 0 || completionEnd < 0) return false;
       const completion = middleware.slice(completionStart, completionEnd);
-      return !/res\\.json|res\\.status/.test(claim) &&
+      return !/res\.json|res\.status/.test(claim) &&
         claim.includes("state: 'IN_FLIGHT'") &&
         claim.includes('lock_token: lockToken') &&
         completion.includes("state: 'COMPLETED'") &&
         completion.includes('data.lock_token !== options.lockToken') &&
         completion.includes('transaction.update(ref') &&
         middleware.includes('IDEMPOTENCY_STORE_UNAVAILABLE') &&
-        middleware.includes('sendIdempotencyError(\\n      res, 503');
+        middleware.includes('sendIdempotencyError(\n      res, 503');
     },
   },
   {
