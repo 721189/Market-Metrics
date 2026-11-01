@@ -176,7 +176,9 @@ export const p0IdentityStaticChecks: Check[] = [
         pipeline.includes('DatabaseRepository.addEvent(job.id, event, userId)') &&
         pipeline.includes('if (!eventSaved) return false') &&
         pipeline.includes('A prior deletion attempt may have committed its tombstone') &&
-        pipeline.includes('const resumed = await DatabaseRepository.deleteJob(jobId, userId)');
+        pipeline.includes('const resumed = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts)') &&
+        pipeline.includes('await storage.deleteJob(jobId)') &&
+        db.includes('if (cleanupArtifacts) await cleanupArtifacts()');
     },
   },
   {
