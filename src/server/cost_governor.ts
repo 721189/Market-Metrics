@@ -151,7 +151,8 @@ export class CostGovernor {
   }
 
   checkRequestBudget(): string | null {
-    if (this.requestCost.estimated_cost_usd > this.config.requestBudgetUsd) {
+    // At the cap there is no remaining headroom for another model call.
+    if (this.requestCost.estimated_cost_usd >= this.config.requestBudgetUsd) {
       return `Request budget exceeded: $${this.config.requestBudgetUsd} per request`;
     }
     return null;
