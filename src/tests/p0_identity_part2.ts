@@ -209,15 +209,28 @@ export const p0IdentityStaticChecks: Check[] = [
       if (claimStart < 0 || claimEnd < 0) return false;
       const claim = middleware.slice(claimStart, claimEnd);
       const completionStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('function installIdempotencyResponse'));
-      const completionEnd = middleware.indexOf("}).then(() => {", completionStart);
+      const completionEnd = middleware.indexOf("}).then(committed => {", completionStart);
       if (completionStart < 0 || completionEnd < 0) return false;
       const completion = middleware.slice(completionStart, completionEnd);
-      return !/res\.json|res\.status/.test(claim) &&
+      return !/res\\.json|res\\.status/.test(claim) &&
         claim.includes("state: 'IN_FLIGHT'") &&
+        claim.includes('lock_token: lockToken') &&
         completion.includes("state: 'COMPLETED'") &&
+        completion.includes('data.lock_token !== options.lockToken') &&
         completion.includes('transaction.update(ref') &&
         middleware.includes('IDEMPOTENCY_STORE_UNAVAILABLE') &&
-        middleware.includes('sendIdempotencyError(\n      res, 503');
+        middleware.includes('sendIdempotencyError(\\n      res, 503');
+    },
+  },
+  {
+    name: 'expired idempotency reservations are fenced and legacy records receive bounded expiry',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      return middleware.includes('data.lock_token !== options.lockToken') &&
+        middleware.includes('current.lock_token !== options.lockToken') &&
+        middleware.includes('respondedAt ?? createdAt') &&
+        middleware.includes('(createdAt ?? 0) + IDEMPOTENCY_PENDING_TTL_MS') &&
+        middleware.includes("userId + '|' + method + '|' + path + '|' + idempotencyKey");
     },
   },
   {
