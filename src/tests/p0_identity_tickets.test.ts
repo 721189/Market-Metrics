@@ -54,7 +54,8 @@ export const p0IdentityChecks: Check[] = [
     fn: async () => {
       const store = new InMemoryStreamTicketStore();
       const issued = await store.issue('job-1', 'usr-a', 60_000);
-      const tampered = issued.ticket.slice(0, -2) + 'ff';
+      const replacementSuffix = issued.ticket.slice(-2) === 'ff' ? '00' : 'ff';
+      const tampered = issued.ticket.slice(0, -2) + replacementSuffix;
       const unknown = await store.consume('deadbeef'.repeat(8), 'job-1');
       const bad = await store.consume(tampered, 'job-1');
       return unknown === null && bad === null;
