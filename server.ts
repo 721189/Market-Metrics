@@ -222,10 +222,8 @@ async function startServer() {
   // -------------------------------------------------------------
   // OPERATIONAL METRICS (admin only)
   // -------------------------------------------------------------
-  // adminPathBlocker() (installed before every route) returns 404 to any caller
-  // that is not an authenticated admin, so this handler is reachable only by an
-  // authorized operator. Front-end visibility is irrelevant — the authorization
-  // decision is made server-side, on every request.
+  // Authentication runs before the admin allow-list check on this route.
+  // Front-end visibility is irrelevant — authorization is enforced server-side.
   app.get('/metrics', authMiddleware, adminPathBlocker(), rateLimiterByCategory(), (req: Request, res: Response) => {
     const snapshot = observabilitySnapshot();
     res.status(200).json({
