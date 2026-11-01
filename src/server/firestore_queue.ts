@@ -263,18 +263,16 @@ export class FirestoreQueue {
     }
 
     /**
-     * Transactional, lease_version-verified recovery of a single stale job.
+     * Transactionally recover one expired lease.
      *
-     * A job is recoverable only if:
-     *   - status === 'RUNNING'
-     *   - leased_until <= now
-     *   - the lease version in the document still matches the version we observed
-     *     in the stale snapshot (else a heartbeat just extended the lease, and we
-     *     must not steal it).
+     * The live document is re-read inside the transaction and is recoverable
+     * only when status is still RUNNING and leased_until is still expired.
+     * If a heartbeat commits first, Firestore retries this transaction against
+     * the extended lease and the recovery is refused. A later claim assigns a
+     * fresh lease_id atomically, fencing the previous worker.
      *
-     * On success, the job is returned to QUEUED with a cleared lease.
-     * We do NOT assign a new worker here — that stays in claimNextJob so the
-     * claim is atomic with respect to other workers.
+     * On success, the job is returned to QUEUED with a cleared lease. We do
+     * NOT assign a new worker here — that stays in claimNextJob.
      */
     private async _recoverStaleJobTransaction(jobId: string): Promise<boolean> {
         const jobRef = adminDb.collection(this.collectionName).doc(jobId);
