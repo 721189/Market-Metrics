@@ -109,6 +109,46 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'admin authorization verifies Firebase identity before checking admin role',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const metricsStart = server.indexOf("app.get('/metrics'");
+      const metricsRoute = server.slice(metricsStart, metricsStart + 220);
+      return metricsStart >= 0 &&
+        metricsRoute.includes('authMiddleware, adminPathBlocker()') &&
+        !server.includes('app.use(adminPathBlocker())');
+    },
+  },
+  {
+    name: 'identity-aware rate limits run only after user authentication',
+    fn: async () => {
+      const server = readSource('server.ts');
+      const researchAuth = server.indexOf("app.use('/api/v1/research', authMiddleware)");
+      const userAuth = server.indexOf("app.use('/api/v1/user', authMiddleware)");
+      const categoryLimiter = server.indexOf('app.use(rateLimiterByCategory())');
+      return researchAuth >= 0 && userAuth > researchAuth && categoryLimiter > userAuth;
+    },
+  },
+  {
+    name: 'job and report repository reads reject missing owner metadata',
+    fn: async () => {
+      const db = readSource('src/server/db.ts');
+      return (db.match(/if \(data\.user_id !== userId\) return null;/g) || []).length === 2 &&
+        db.includes('!existing?.user_id || existing.user_id !== userId');
+    },
+  },
+  {
+    name: 'environment labels fail closed and staging cannot mount Vite dev middleware',
+    fn: async () => {
+      const environment = readSource('src/server/environment.ts');
+      return environment.includes('Unknown \${source} value') &&
+        environment.includes('conflicts with NODE_ENV') &&
+        environment.includes("allowViteDevServer: name === 'development' || name === 'test'") &&
+        environment.includes("cfg.name === 'staging'") &&
+        environment.includes('APPLET_DEV_PROJECT_ID');
+    },
+  },
+  {
     name: 'all nine pipeline stages have explicit start and completion transitions',
     fn: async () => {
       const pipeline = readSource('src/server/pipeline.ts');
