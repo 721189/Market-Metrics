@@ -34,9 +34,9 @@ export interface UnitEconomicsInputs {
 export interface SensitivityMatrixCell {
   arpu: number;
   churn_pct: number;
-  ltv: number;
-  ltv_to_cac: number;
-  payback_months: number;
+  ltv: number | null;
+  ltv_to_cac: number | null;
+  payback_months: number | null;
 }
 
 export interface VerifiedMarketSizing {
