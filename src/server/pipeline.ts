@@ -42,7 +42,7 @@ import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext }
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
-import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
+import { RealClaimVerifier, NumericNormalizer, ContradictionEngine } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
@@ -770,86 +770,94 @@ export class ResearchPipelineManager {
     const claims: Claim[] = [];
     let claimIdx = 1;
 
-    if (extractedLLMClaims.length > 0) {
-      for (const item of extractedLLMClaims) {
-        const sourceText = sourceTexts.get(item.source_id) || '';
-        const offset = RealDocumentFetcher.findExactEvidenceOffset(sourceText, item.extracted_quote);
-        const source = sources.find(s => s.id === item.source_id);
+    // Merge exact duplicate assertions while retaining each independent evidence
+    // item. This enables corroboration across distinct source domains.
+    const claimGroups = new Map<string, {
+      statement: string; claim_type: Claim['claim_type']; confidence: number;
+      reasoning: string; evidenceIds: string[]; sourceIds: Set<string>;
+    }>();
 
-        if (offset.startOffset === -1 || offset.endOffset === -1 || offset.startOffset >= offset.endOffset) {
-          continue; // Reject invalid offsets
-        }
+    for (const item of extractedLLMClaims) {
+      const sourceText = sourceTexts.get(item.source_id) || '';
+      const offset = RealDocumentFetcher.findExactEvidenceOffset(sourceText, item.extracted_quote);
+      const source = sources.find(s => s.id === item.source_id);
+      if (offset.startOffset < 0 || offset.endOffset <= offset.startOffset || !source) continue;
 
-        const newEvidence: Evidence = {
-          id: `ev-dyn-${evId++}`,
-          job_id: job.id,
-          document_id: `doc-${item.source_id}`,
-          source_id: item.source_id,
-          evidence_type: 'PRIMARY_SOURCE',
-          text: offset.quote,
-          quote: offset.quote,
-          start_offset: offset.startOffset,
-          end_offset: offset.endOffset,
-          section: 'Market Intelligence & Facts',
-          extraction_confidence: 98,
-          provenance_type: 'OBSERVED',
-          created_at: new Date().toISOString(),
-          source_url: source?.url || '',
-          source_domain: source?.domain || '',
-          citation_number: 0,
-          statement: offset.quote,
-          extracted_quote: offset.quote,
-          relevance_score: 0,
-          verification_status: 'UNVERIFIED',
-          confidence: 98,
-          provenance: {
-            document_text: offset.quote,
-            document_hash: source?.content_hash || '',
-            source_url: source?.url || '',
-            retrieved_at: source?.retrieved_at || new Date().toISOString(),
-            parser_version: '1.0.0',
-            normalizer_version: '1.0.0',
-            start_offset: 0,
-            end_offset: offset.quote.length,
-            source_document_start_offset: offset.startOffset,
-            source_document_end_offset: offset.endOffset,
-            source_document_ref: sourceArtifacts.get(item.source_id)?.normalized_text_ref,
-            quote: offset.quote,
-            exact_normalized_match: true,
-          },
-          retrieved_at: source?.retrieved_at || new Date().toISOString(),
-          parser_version: '1.0.0',
-          normalizer_version: '1.0.0',
-          supporting_claim_ids: [],
-          contradicting_claim_ids: [],
-          source: source,
+      const newEvidence: Evidence = {
+        id: 'ev-dyn-' + (evId++), job_id: job.id, document_id: 'doc-' + item.source_id,
+        source_id: item.source_id, evidence_type: 'PRIMARY_SOURCE', text: offset.quote, quote: offset.quote,
+        start_offset: offset.startOffset, end_offset: offset.endOffset, section: 'Market Intelligence & Facts',
+        extraction_confidence: 98, provenance_type: 'OBSERVED', created_at: new Date().toISOString(),
+        source_url: source.url || '', source_domain: source.domain || '', citation_number: 0,
+        statement: offset.quote, extracted_quote: offset.quote, relevance_score: 0,
+        verification_status: 'UNVERIFIED', confidence: 98,
+        provenance: {
+          document_text: sourceText, document_hash: source.content_hash || '', source_url: source.url || '',
+          retrieved_at: source.retrieved_at || new Date().toISOString(), parser_version: '1.0.0',
+          normalizer_version: '1.0.0', start_offset: offset.startOffset, end_offset: offset.endOffset,
+          source_document_start_offset: offset.startOffset, source_document_end_offset: offset.endOffset,
+          source_document_ref: sourceArtifacts.get(item.source_id)?.normalized_text_ref,
+          quote: offset.quote, exact_normalized_match: true,
+        },
+        retrieved_at: source.retrieved_at || new Date().toISOString(), parser_version: '1.0.0',
+        normalizer_version: '1.0.0', supporting_claim_ids: [], contradicting_claim_ids: [], source,
+      };
+      evidencePool.push(newEvidence);
+
+      const claimType = (item.claim_type as Claim['claim_type']) || 'MARKET_SIZE';
+      const normalizedStatement = String(item.statement || '').normalize('NFKC').toLocaleLowerCase()
+        .replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, '-')
+        .replace(/\s+/g, ' ').replace(/[.,;:!?]+$/g, '').trim();
+      if (!normalizedStatement) continue;
+      const groupKey = claimType + '\u0000' + normalizedStatement;
+      let group = claimGroups.get(groupKey);
+      if (!group) {
+        const extractedConfidence = Number((item as any).confidence);
+        group = {
+          statement: String(item.statement).trim(), claim_type: claimType,
+          confidence: Number.isFinite(extractedConfidence) ? Math.max(0, Math.min(100, extractedConfidence)) : 70,
+          reasoning: String((item as any).reasoning || 'Extracted verbatim from a source document.'),
+          evidenceIds: [], sourceIds: new Set<string>(),
         };
-        evidencePool.push(newEvidence);
-
-        const cType = (item.claim_type as any) || 'MARKET_SIZE';
-        const provType: 'OBSERVED' | 'INFERRED' | 'ASSUMED' | 'CALCULATED' =
-          ['MARKET_SIZE', 'REVENUE', 'VALUATION', 'FINANCIAL'].includes(cType) ? 'CALCULATED' :
-          ['TREND', 'OPPORTUNITY', 'STRATEGIC'].includes(cType) ? 'INFERRED' :
-          ['RISK', 'REGULATION'].includes(cType) ? 'ASSUMED' : 'OBSERVED';
-
-        claims.push({
-          id: `clm-${claimIdx}`,
-          job_id: job.id,
-          citation_number: claimIdx,
-          statement: item.statement,
-          claim_type: cType,
-          supporting_evidence_ids: [newEvidence.id],
-          contradicting_evidence_ids: [],
-          verification_status: 'SUPPORTED',
-          confidence: (item as any).confidence || 95,
-          reasoning: (item as any).reasoning || 'Grounded in extracted empirical quote.',
-          provenance_type: provType,
-          created_at: new Date().toISOString(),
-        });
-        claimIdx++;
+        claimGroups.set(groupKey, group);
       }
+      // Retain all evidence for audit; duplicate documents from one domain
+      // will not count as independent corroboration in the verifier.
+      group.evidenceIds.push(newEvidence.id);
+      group.sourceIds.add(item.source_id);
     }
 
+    for (const group of claimGroups.values()) {
+      const claimType = group.claim_type;
+      const provenanceType: Claim['provenance_type'] =
+        ['MARKET_SIZE', 'REVENUE', 'VALUATION', 'FINANCIAL'].includes(claimType) ? 'CALCULATED' :
+        ['TREND', 'OPPORTUNITY', 'STRATEGIC'].includes(claimType) ? 'INFERRED' :
+        ['RISK', 'REGULATION'].includes(claimType) ? 'ASSUMED' : 'OBSERVED';
+      claims.push({
+        id: 'clm-' + claimIdx, job_id: job.id, citation_number: claimIdx,
+        statement: group.statement, claim_type: claimType, supporting_evidence_ids: group.evidenceIds,
+        contradicting_evidence_ids: [], verification_status: 'EXTRACTED', confidence: group.confidence,
+        reasoning: group.reasoning, provenance_type: provenanceType, created_at: new Date().toISOString(),
+      });
+      claimIdx++;
+    }
+
+    // Map detected conflict edges back to both claims before verification.
+    const contradictionAnalysis = ContradictionEngine.analyzeContradictions(claims, evidencePool);
+    const claimById = new Map(claims.map(claim => [claim.id, claim]));
+    for (const conflict of contradictionAnalysis.contradictionsFound) {
+      const left = claimById.get(conflict.claimId1);
+      const right = conflict.claimId2 ? claimById.get(conflict.claimId2) : undefined;
+      if (!left) continue;
+      if (right) {
+        left.contradicting_evidence_ids = Array.from(new Set([
+          ...(left.contradicting_evidence_ids || []), ...(right.supporting_evidence_ids || []),
+        ]));
+        right.contradicting_evidence_ids = Array.from(new Set([
+          ...(right.contradicting_evidence_ids || []), ...(left.supporting_evidence_ids || []),
+        ]));
+      }
+    }
     await logAndEmitEvent(
       job,
       'stage_completed',
