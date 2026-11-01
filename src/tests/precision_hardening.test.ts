@@ -13,6 +13,7 @@
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
@@ -472,6 +473,40 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ HTML extraction preserves paragraphs, order, tables, titles, and verified publication metadata.');
 
+  // ===== 11. Claim verification regression tests =====
+  const recentDate = new Date().toISOString();
+  const sourceA = makeSource('src-corroboration-a', { domain: 'research-a.example', published_at: recentDate });
+  const sourceB = makeSource('src-corroboration-b', { domain: 'research-b.example', published_at: recentDate });
+  const evidenceA = makeEvidence('ev-corroboration-a', sourceA.id);
+  const evidenceB = makeEvidence('ev-corroboration-b', sourceB.id);
+  evidenceA.provenance.document_hash = 'a'.repeat(64);
+  evidenceB.provenance.document_hash = 'b'.repeat(64);
+  const corroboratedClaim = makeClaim('clm-corroborated', 1, [evidenceA.id, evidenceB.id]);
+  corroboratedClaim.statement = 'The market size is $100 million.';
+  const corroborationResult = RealClaimVerifier.verifyAll(
+    [corroboratedClaim], [sourceA, sourceB], [evidenceA, evidenceB],
+  );
+  if (corroborationResult.verifiedClaims[0]?.verification_status !== 'SUPPORTED') {
+    return { passed: false, message: 'A recent, reliable claim supported by two independent domains must pass corroboration' };
+  }
+
+  const unsupportedClaim = makeClaim('clm-unsupported', 2, ['missing-evidence']);
+  const unsupportedResult = RealClaimVerifier.verifyAll([unsupportedClaim], [sourceA], [evidenceA]);
+  if (unsupportedResult.verifiedClaims[0]?.verification_status !== 'INSUFFICIENT') {
+    return { passed: false, message: 'Claims with no resolvable supporting evidence must remain INSUFFICIENT' };
+  }
+
+  const conflictingClaimA = makeClaim('clm-conflict-a', 3, [evidenceA.id]);
+  const conflictingClaimB = makeClaim('clm-conflict-b', 4, [evidenceB.id]);
+  conflictingClaimA.statement = 'The market size is $100 million.';
+  conflictingClaimB.statement = 'The market size is $500 million.';
+  const conflictResult = ContradictionEngine.analyzeContradictions(
+    [conflictingClaimA, conflictingClaimB], [evidenceA, evidenceB],
+  );
+  if (!conflictResult.contradictionsFound.some(conflict => conflict.claimId1 === conflictingClaimA.id && conflict.claimId2 === conflictingClaimB.id)) {
+    return { passed: false, message: 'Contradiction analysis must identify materially divergent values for the same claim proposition' };
+  }
+  console.log('✔ Claim verifier enforces independent corroboration and unsupported-claim rejection; contradiction detection is exercised.');
   // ===== 10. Golden benchmark fixture must itself satisfy the citation graph =====
 
 
