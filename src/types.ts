@@ -276,14 +276,27 @@ export interface CustomerSegment {
 }
 
 export interface FinancialOutputs {
-  cagr_pct: number;
-  tam_current: number;
-  tam_forecast: number;
-  sam: number;
-  som: number;
-  currency: string;
-  year_start: number;
-  year_end: number;
+  /** Values are populated only when extracted from fully verified source claims. */
+  data_status?: 'SOURCE_BACKED' | 'INSUFFICIENT_EVIDENCE';
+  source_claim_ids?: string[];
+  metric_claim_ids?: {
+    tam_current?: string;
+    tam_forecast?: string;
+    sam?: string;
+    som?: string;
+    cagr?: string;
+  };
+  limitations?: string[];
+  cagr_pct: number | null;
+  tam_current: number | null;
+  tam_forecast: number | null;
+  sam: number | null;
+  som: number | null;
+  currency: string | null;
+  year_start: number | null;
+  year_end: number | null;
+  // Automated pipeline projections are withheld unless real operating inputs
+  // are verified; the interactive calculator is a separate assumption sandbox.
   scenario_conservative: {
     year_3_revenue: number;
     gross_margin_pct: number;
@@ -291,7 +304,7 @@ export interface FinancialOutputs {
     cac: number;
     ltv: number;
     ltv_to_cac: number;
-  };
+  } | null;
   scenario_base: {
     year_3_revenue: number;
     gross_margin_pct: number;
@@ -299,7 +312,7 @@ export interface FinancialOutputs {
     cac: number;
     ltv: number;
     ltv_to_cac: number;
-  };
+  } | null;
   scenario_aggressive: {
     year_3_revenue: number;
     gross_margin_pct: number;
@@ -307,7 +320,7 @@ export interface FinancialOutputs {
     cac: number;
     ltv: number;
     ltv_to_cac: number;
-  };
+  } | null;
 }
 
 export interface StrategicRecommendation {
