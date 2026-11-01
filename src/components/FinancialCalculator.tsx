@@ -47,7 +47,7 @@ export const FinancialCalculator: React.FC<FinancialCalculatorProps> = ({
 
   const scenarios = FinancialEngine.generateScenarios(arpu, cac, grossMargin, currency, customerCount, salesCycleMonths);
 
-  const formatCurr = (amount: number) => FinancialEngine.formatCurrency(amount, currency);
+  const formatCurr = (amount: number | null) => FinancialEngine.formatCurrency(amount, currency);
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 space-y-6">
