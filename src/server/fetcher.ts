@@ -606,9 +606,9 @@ export class RealDocumentFetcher {
       }
     }
 
-    return selected
-      .sort((a, b) => a.index - b.index)
-      .map(paragraph => paragraph.text)
+    const selectedIndexes = new Set(selected.map(paragraph => paragraph.index));
+    return paragraphs
+      .filter((paragraph, index) => paragraph.includes('\t') || selectedIndexes.has(index))
       .join('\n\n');
   }
 
