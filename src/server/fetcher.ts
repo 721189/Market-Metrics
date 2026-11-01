@@ -612,8 +612,49 @@ export class RealDocumentFetcher {
       .join('\n\n');
   }
 
-  private static parseCsvToText(csv: string): string {
-    return csv.split(/\r?\n/).filter((l: string) => l.trim().length > 0).map((line: string) => line.split(',').map((c: string) => c.trim()).join('\t')).join('\n');
+  public static parseCsvToText(csv: string): string {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = '';
+    let quoted = false;
+
+    for (let index = 0; index < csv.length; index++) {
+      const char = csv[index];
+
+      if (char === '"') {
+        if (quoted && csv[index + 1] === '"') {
+          field += '"';
+          index++;
+        } else {
+          quoted = !quoted;
+        }
+        continue;
+      }
+
+      if (char === ',' && !quoted) {
+        row.push(field.trim());
+        field = '';
+        continue;
+      }
+
+      if ((char === '\n' || char === '\r') && !quoted) {
+        if (char === '\r' && csv[index + 1] === '\n') index++;
+        row.push(field.trim());
+        if (row.some(cell => cell.length > 0)) rows.push(row);
+        row = [];
+        field = '';
+        continue;
+      }
+
+      field += char;
+    }
+
+    row.push(field.trim());
+    if (row.some(cell => cell.length > 0)) rows.push(row);
+
+    // Preserve field boundaries for downstream extraction. Quoted commas and
+    // escaped quotes are decoded, and embedded newlines remain inside a cell.
+    return rows.map(cells => cells.join('\t')).join('\n');
   }
 
   private static normalizeJsonToText(json: any): string {
