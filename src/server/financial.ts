@@ -187,16 +187,25 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
     const statement = String(claim.statement || '');
     if (!/\bCAGR\b|compound annual growth/i.test(statement)) continue;
 
-    // Bind the numeric percentage to the CAGR phrase itself. A sentence may
-    // contain unrelated growth, churn, or penetration percentages before it.
+    // Bind the numeric percentage nearest to the CAGR phrase itself. A
+    // sentence may contain unrelated growth, churn, or margin percentages on
+    // either side of the actual CAGR value.
+    const cagrPhrase = /\b(?:CAGR|compound annual growth(?: rate)?)\b/i.exec(statement);
     const percentAfterCagr = statement.match(
       /\b(?:CAGR|compound annual growth(?: rate)?)\b[^.;]{0,60}?(\d+(?:\.\d+)?)\s*%/i,
     );
     const percentBeforeCagr = statement.match(
       /(\d+(?:\.\d+)?)\s*%\s*(?:annualized\s+)?(?:CAGR|compound annual growth(?: rate)?)\b/i,
     );
-    const value = Number(percentAfterCagr?.[1] ?? percentBeforeCagr?.[1]);
-    if (!Number.isFinite(value)) continue;
+    const distanceFromCagr = (match: RegExpMatchArray | null): number => {
+      if (!match || !cagrPhrase) return Number.POSITIVE_INFINITY;
+      const valueIndex = (match.index ?? 0) + match[0].indexOf(match[1]);
+      return Math.abs(valueIndex - (cagrPhrase.index ?? 0));
+    };
+    const percentMatch = distanceFromCagr(percentAfterCagr) <= distanceFromCagr(percentBeforeCagr)
+      ? percentAfterCagr
+      : percentBeforeCagr;
+    const value = Number(percentMatch?.[1]);
     if (!Number.isFinite(value) || value < 0 || value > 200) continue;
 
     cagrCandidates.push({ value, claimId: claim.id });
