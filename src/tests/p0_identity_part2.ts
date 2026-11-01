@@ -174,7 +174,9 @@ export const p0IdentityStaticChecks: Check[] = [
         deleteJob.includes('deletion_requested_at: FieldValue.serverTimestamp()') &&
         deleteJob.includes('const chunkSize = 450') &&
         pipeline.includes('DatabaseRepository.addEvent(job.id, event, userId)') &&
-        pipeline.includes('if (!eventSaved) return false');
+        pipeline.includes('if (!eventSaved) return false') &&
+        pipeline.includes('A prior deletion attempt may have committed its tombstone') &&
+        pipeline.includes('const resumed = await DatabaseRepository.deleteJob(jobId, userId)');
     },
   },
   {
