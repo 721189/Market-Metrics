@@ -208,24 +208,29 @@ async function startServer() {
   });
 
   app.get('/ready', async (req: Request, res: Response) => {
-    // Readiness must fail when Firestore cannot report the operational queue
-    // state. An all-zero fallback would falsely advertise a healthy service.
+    // A platform probe runs every few seconds. Verify the critical Firestore
+    // dependency with a bounded one-document read, not five queue-wide counts.
     try {
-      const queueStats = await researchQueue.getStats();
+      await researchQueue.checkReady();
+      if (!process.env.GEMINI_API_KEY?.trim()) {
+        return res.status(503).json({
+          status: 'not_ready',
+          error: { code: 'GEMINI_NOT_CONFIGURED', message: 'Research provider is not configured.' },
+        });
+      }
       return res.status(200).json({
         status: 'ready',
-        gemini_configured: Boolean(process.env.GEMINI_API_KEY),
-        environment: process.env.NODE_ENV || 'development',
-        queue: queueStats,
+        environment: process.env.APP_ENV || process.env.NODE_ENV || 'development',
+        dependencies: { firestore: 'available', gemini: 'configured' },
         version: '2.0.0',
       });
     } catch (err) {
-      logger.warn('health.readiness_failed', 'Queue readiness probe failed', {
+      logger.warn('health.readiness_failed', 'Critical dependency readiness probe failed', {
         status: (err as Error)?.message || String(err),
       });
       return res.status(503).json({
         status: 'not_ready',
-        error: { code: 'QUEUE_STATUS_UNAVAILABLE', message: 'Queue status could not be verified.' },
+        error: { code: 'FIRESTORE_UNAVAILABLE', message: 'A required data dependency could not be reached.' },
       });
     }
   });
