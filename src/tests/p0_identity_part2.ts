@@ -180,6 +180,45 @@ export const p0IdentityStaticChecks: Check[] = [
     },
   },
   {
+    name: 'production defaults all persistence-critical stores to Firestore',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      const cost = readSource('src/server/cost_governor.ts');
+      const rate = readSource('src/server/rate_limits.ts');
+      const cache = readSource('src/server/cache.ts');
+      const render = readSource('render.yaml');
+      const productionDefault = /productionDefaults = process\.env\.NODE_ENV === 'production' \|\| process\.env\.APP_ENV === 'production'/;
+      return productionDefault.test(middleware) &&
+        productionDefault.test(cost) &&
+        productionDefault.test(rate) &&
+        productionDefault.test(cache) &&
+        render.includes('key: IDEMPOTENCY_STORE\\n        value: firestore') &&
+        render.includes('key: COST_STORE\\n        value: firestore') &&
+        render.includes('key: RATE_LIMIT_STORE\\n        value: firestore') &&
+        render.includes('key: CACHE_STORE\\n        value: firestore');
+    },
+  },
+  {
+    name: 'idempotency reserves before handler and fails closed when Firestore is unavailable',
+    fn: async () => {
+      const middleware = readSource('src/server/middleware.ts');
+      const claimStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('export function idempotencyMiddleware'));
+      const claimEnd = middleware.indexOf("}).then((decision: IdempotencyDecision)", claimStart);
+      if (claimStart < 0 || claimEnd < 0) return false;
+      const claim = middleware.slice(claimStart, claimEnd);
+      const completionStart = middleware.indexOf('void adminDb.runTransaction(async transaction => {', middleware.indexOf('function installIdempotencyResponse'));
+      const completionEnd = middleware.indexOf("}).then(() => {", completionStart);
+      if (completionStart < 0 || completionEnd < 0) return false;
+      const completion = middleware.slice(completionStart, completionEnd);
+      return !/res\.json|res\.status/.test(claim) &&
+        claim.includes("state: 'IN_FLIGHT'") &&
+        completion.includes("state: 'COMPLETED'") &&
+        completion.includes('transaction.update(ref') &&
+        middleware.includes('IDEMPOTENCY_STORE_UNAVAILABLE') &&
+        middleware.includes('sendIdempotencyError(\n      res, 503');
+    },
+  },
+  {
     name: 'environment labels fail closed and staging cannot mount Vite dev middleware',
     fn: async () => {
       const environment = readSource('src/server/environment.ts');
