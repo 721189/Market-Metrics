@@ -533,6 +533,15 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A CAGR may extrapolate a verified TAM only when its stated start year matches the TAM baseline year' };
   }
 
+  const cagrWithEarlierPercentage = makeClaim('clm-cagr-adjacent-percent', 12, []);
+  cagrWithEarlierPercentage.claim_type = 'MARKET_GROWTH';
+  cagrWithEarlierPercentage.verification_status = 'SUPPORTED';
+  cagrWithEarlierPercentage.statement = 'The annual retention improved 14%, while the TAM CAGR was 10% from 2025 to 2030.';
+  const cagrBoundedSizing = extractVerifiedMarketSizing([mismatchedBaseYear, cagrWithEarlierPercentage]);
+  if (cagrBoundedSizing.cagr_pct !== 10 || cagrBoundedSizing.tam_forecast !== 161_051_000) {
+    return { passed: false, message: 'CAGR extraction must bind to the percentage adjacent to the CAGR phrase, not an earlier unrelated percentage' };
+  }
+
   console.log('✔ Market sizing accepts only verified claims and explicit, unambiguous currency values.');
 
   const trustedGovernment = classifyDomainTier('https://www.sec.gov/reports');
