@@ -315,12 +315,20 @@ export const p0IdentityStaticChecks: Check[] = [
       const pipeline = readSource('src/server/pipeline.ts');
       const providerCalls = gemini.split('ai.models.generateContent({').length - 1;
       const trackedCalls = gemini.split('generateWithCostTracking(').length - 1;
-      return providerCalls === 6 &&
-        trackedCalls === 7 &&
-        gemini.includes('response.usageMetadata') &&
-        gemini.includes('costGovernor.allowModelCall()') &&
-        gemini.includes('costGovernor.checkRequestBudget()') &&
-        gemini.includes('costGovernor.recordModelCall(') &&
+      const trackingHelperStart = gemini.indexOf('async function generateWithCostTracking');
+      const trackingHelperEnd = gemini.indexOf('\n}\n', trackingHelperStart);
+      const trackingHelper = trackingHelperStart >= 0 && trackingHelperEnd > trackingHelperStart
+        ? gemini.slice(trackingHelperStart, trackingHelperEnd)
+        : '';
+      // Count actual call sites rather than a brittle fixed number. Each direct
+      // provider invocation must be wrapped by the shared cost-tracking helper.
+      return providerCalls > 0 &&
+        providerCalls === trackedCalls &&
+        trackingHelper.includes('readGeminiTokenUsage(response)') &&
+        trackingHelper.includes('costGovernor.allowModelCall()') &&
+        trackingHelper.includes('costGovernor.checkRequestBudget()') &&
+        trackingHelper.includes('costGovernor.recordModelCall(') &&
+        gemini.includes('response?.usageMetadata') &&
         gemini.includes('GEMINI_MODEL_PRICING_JSON') &&
         pipeline.includes('signal: operationSignal,') && pipeline.includes('costGovernor,') &&
         pipeline.includes('await costGovernor.recordJobCost(userId, job.id, costUsd, executionId)') &&
