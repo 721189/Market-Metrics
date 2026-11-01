@@ -6,6 +6,7 @@ import zlib from 'zlib';
 import { URL } from 'url';
 import { logger } from './logger.js';
 import { DocumentChunk } from '../types.js';
+import { PDFParse } from 'pdf-parse';
 
 export class DocumentFetchAbortedError extends Error {
   constructor(message = 'Document fetch was cancelled') {
@@ -183,39 +184,47 @@ export class RealDocumentFetcher {
    * Returns null when the date cannot be verified — an unknown publication
    * date must remain unknown (null), never fabricated as "now".
    */
-  public static extractPublicationDate(html: string, headers: Headers): string | null {
-    const metaDateMatch = html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i) ||
-                          html.match(/<meta[^>]+name=["']date["'][^>]+content=["']([^"']+)["']/i) ||
-                          html.match(/<meta[^>]+property=["']og:published_time["'][^>]+content=["']([^"']+)["']/i);
-    if (metaDateMatch && metaDateMatch[1]) {
-      const parsed = Date.parse(metaDateMatch[1]);
-      if (!isNaN(parsed)) return new Date(parsed).toISOString();
+  public static extractPublicationDate(html: string, _headers: Headers): string | null {
+    // Parse meta elements independently so attribute order is irrelevant.
+    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of metaTags) {
+      const key = tag.match(/(?:property|name|itemprop)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!key || !['article:published_time', 'og:published_time', 'date', 'datepublished', 'pubdate', 'parsely-pub-date'].includes(key)) continue;
+      const value = tag.match(/content\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (!value) continue;
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
     }
 
-    const jsonLdMatch = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
-    if (jsonLdMatch) {
-      for (let block of jsonLdMatch) {
-        try {
-          const contentMatch = block.match(/>([\s\S]*?)<\/script>/i);
-          if (contentMatch && contentMatch[1]) {
-            const data = JSON.parse(contentMatch[1]);
-            const datePub = data.datePublished || data['datePublished'] || data.uploadDate;
-            if (datePub) {
-              const parsed = Date.parse(datePub);
-              if (!isNaN(parsed)) return new Date(parsed).toISOString();
-            }
-          }
-        } catch (e) {}
+    // JSON-LD can be an object, array, or @graph. Only explicit datePublished
+    // values qualify as publication dates.
+    const jsonLdBlocks = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+    const findPublishedDate = (value: any): string | null => {
+      if (!value || typeof value !== 'object') return null;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = findPublishedDate(item);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (typeof value.datePublished === 'string') {
+        const parsed = Date.parse(value.datePublished);
+        if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+      }
+      return findPublishedDate(value['@graph']);
+    };
+    for (const block of jsonLdBlocks) {
+      const json = block.replace(/^<script\b[^>]*>/i, '').replace(/<\/script>$/i, '');
+      try {
+        const found = findPublishedDate(JSON.parse(json));
+        if (found) return found;
+      } catch {
+        // Malformed JSON-LD is ignored; unknown dates remain unknown.
       }
     }
 
-    const lastMod = headers.get('last-modified');
-    if (lastMod) {
-      const parsed = Date.parse(lastMod);
-      if (!isNaN(parsed)) return new Date(parsed).toISOString();
-    }
-
-    // Unknown publication date -> null. Do NOT fabricate a date.
+    // Last-Modified is a file/cache timestamp, not necessarily publication.
     return null;
   }
 
@@ -309,14 +318,22 @@ export class RealDocumentFetcher {
         if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
         else if (v !== undefined) fetchHeaders.append(k, v);
       });
-      const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
-      const title = this.extractTitle(extractedText, url);
+      // Preserve the original HTML long enough to extract metadata. The
+      // normalized text no longer contains <title>, Open Graph, or JSON-LD tags.
+      const isHtmlDocument =
+        /(?:text\/html|application\/xhtml\+xml)/i.test(contentType) ||
+        /\.(?:html?|xhtml)(?:[?#]|$)/i.test(url);
+      const originalHtml = isHtmlDocument ? body.toString('utf8') : '';
+      const publishedAt = originalHtml
+        ? this.extractPublicationDate(originalHtml, fetchHeaders)
+        : null;
+      const title = originalHtml ? this.extractTitle(originalHtml, url) : this.extractTitle('', url);
       const contentHash = this.computeSha256(extractedText);
       const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
       const chunks = this.chunkText(sourceId, title, extractedText);
       return {
         url, title, domain: new URL(url).hostname,
-        publisher: this.extractPublisher(extractedText, url),
+        publisher: this.extractPublisher(originalHtml || extractedText, url),
         httpStatus: status, extractedText,
         paragraphs: this.splitParagraphs(extractedText),
         contentLength, publishedAt, contentHash, chunks,
@@ -343,7 +360,14 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractPublisher(text: string, url: string): string {
+  public static extractPublisher(html: string, url: string): string {
+    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of metaTags) {
+      const key = tag.match(/(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!key || !['og:site_name', 'application-name', 'publisher'].includes(key)) continue;
+      const value = tag.match(/content\s*=\s*["']([^"']+)["']/i)?.[1]?.trim();
+      if (value) return value;
+    }
     try { return new URL(url).hostname; } catch { return 'Unknown'; }
   }
 
@@ -522,28 +546,135 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractHtmlText(html: string, url: string): string | null {
+  public static extractHtmlText(html: string, _url: string): string | null {
     if (!html || html.length < 50) return null;
-    let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<svg[\s\S]*?<\/svg>/gi, ' ').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#[0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
-    if (text.length < 100) return null;
-    const paragraphs = text.split(/\n\s*\n/).filter((p: string) => p.trim().length > 50);
-    if (paragraphs.length === 0) return text;
-    const scored = paragraphs.map((p: string) => ({ t: p.trim(), w: p.trim().split(/\s+/).length }))
-      .filter((p: { w: number }) => p.w >= 20).sort((a: { w: number }, b: { w: number }) => b.w - a.w);
-    if (scored.length === 0) return text;
-    const tw = scored.reduce((s: number, p: { w: number }) => s + p.w, 0);
-    let cum = 0;
-    const sel = scored.filter((p: { w: number }) => { cum += p.w; return cum <= tw * 0.8 || sel.length < 3; });
-    if (sel.length < 3) return paragraphs.join('\n\n');
-    return sel.map((p: { t: string }) => p.t).join('\n\n');
+
+    // Drop non-content regions before inserting structural separators. In
+    // particular, retain paragraph and table boundaries rather than flattening
+    // every whitespace character into a single space.
+    let text = html
+      .replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, ' ')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+      .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<br\b[^>]*\/?>/gi, '\n')
+      .replace(/<\/(?:td|th)\s*>/gi, ' | ')
+      .replace(/<\/tr\s*>/gi, '\n\n')
+      .replace(/<tr\b[^>]*>/gi, '\n\n')
+      .replace(/<\/(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|ul)\s*>/gi, '\n\n')
+      .replace(/<(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|ul)\b[^>]*>/gi, '\n\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&#x([0-9a-f]+);/gi, (_match: string, hex: string) => {
+        const codePoint = Number.parseInt(hex, 16);
+        return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : ' ';
+      })
+      .replace(/&#(\d+);/g, (_match: string, decimal: string) => {
+        const codePoint = Number.parseInt(decimal, 10);
+        return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : ' ';
+      });
+
+    const paragraphs = text
+      .split(/\n\s*\n+/)
+      .map((paragraph: string) => paragraph
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\s*\n\s*/g, ' ')
+        .trim())
+      .filter((paragraph: string) => paragraph.length > 50 || (paragraph.includes('|') && paragraph.length > 3));
+
+    if (paragraphs.length === 0) {
+      const fallback = text.replace(/\s+/g, ' ').trim();
+      return fallback.length >= 100 ? fallback : null;
+    }
+
+    const scored = paragraphs
+      .map((paragraph: string, index: number) => ({
+        text: paragraph,
+        index,
+        words: paragraph.split(/\s+/).length,
+      }))
+      .filter((paragraph: { words: number }) => paragraph.words >= 20);
+
+    if (scored.length === 0) return paragraphs.join('\n\n');
+
+    // Select the substantial paragraphs covering roughly 80% of the text,
+    // but always retain up to the first three candidates. Selection is done
+    // explicitly (not inside Array.filter, where referencing the result array
+    // would hit its temporal dead zone), then restored to document order.
+    const ranked = [...scored].sort((a, b) => b.words - a.words || a.index - b.index);
+    const selected: typeof ranked = [];
+    const totalWords = ranked.reduce((sum, paragraph) => sum + paragraph.words, 0);
+    let selectedWords = 0;
+
+    for (const paragraph of ranked) {
+      if (selected.length < Math.min(3, ranked.length) || selectedWords < totalWords * 0.8) {
+        selected.push(paragraph);
+        selectedWords += paragraph.words;
+      } else {
+        break;
+      }
+    }
+
+    const selectedIndexes = new Set(selected.map(paragraph => paragraph.index));
+    return paragraphs
+      .filter((paragraph, index) => paragraph.includes('|') || selectedIndexes.has(index))
+      .join('\n\n');
   }
 
-  private static parseCsvToText(csv: string): string {
-    return csv.split(/\r?\n/).filter((l: string) => l.trim().length > 0).map((line: string) => line.split(',').map((c: string) => c.trim()).join('\t')).join('\n');
+  public static parseCsvToText(csv: string): string {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = '';
+    let quoted = false;
+
+    for (let index = 0; index < csv.length; index++) {
+      const char = csv[index];
+
+      if (char === '"') {
+        if (quoted && csv[index + 1] === '"') {
+          field += '"';
+          index++;
+        } else {
+          quoted = !quoted;
+        }
+        continue;
+      }
+
+      if (char === ',' && !quoted) {
+        row.push(field.trim());
+        field = '';
+        continue;
+      }
+
+      if ((char === '\n' || char === '\r') && !quoted) {
+        if (char === '\r' && csv[index + 1] === '\n') index++;
+        row.push(field.trim());
+        if (row.some(cell => cell.length > 0)) rows.push(row);
+        row = [];
+        field = '';
+        continue;
+      }
+
+      field += char;
+    }
+
+    row.push(field.trim());
+    if (row.some(cell => cell.length > 0)) rows.push(row);
+
+    // Preserve field boundaries for downstream extraction. Quoted commas and
+    // escaped quotes are decoded, and embedded newlines remain inside a cell.
+    return rows.map(cells => cells.join('\t')).join('\n');
   }
 
   private static normalizeJsonToText(json: any): string {
@@ -553,25 +684,20 @@ export class RealDocumentFetcher {
     return String(json);
   }
 
-  private static async extractPdfText(body: Buffer): Promise<string> {
+  public static async extractPdfText(body: Buffer): Promise<string> {
+    // Use the package's documented v2 class API. A static import is important
+    // here: this code runs as an ES module in tests and is bundled as CJS for
+    // production, so the old implicit require() path is not available.
+    const parser = new PDFParse({ data: body });
     try {
-      const pdfParse = require('pdf-parse');
-      if (typeof pdfParse === 'function') { const data = await pdfParse(body); return this.normalizeText(data.text || ''); }
-    } catch { /* not available */ }
-    try {
-      const pdfjs = require('pdfjs-dist');
-      if (typeof pdfjs !== 'undefined' && typeof pdfjs.getDocument === 'function') {
-        const doc = await pdfjs.getDocument({ data: body.slice(0) }).promise;
-        const pages = await Promise.all(Array.from({ length: doc.numPages }, async (_: any, i: number) => {
-          const page = await doc.getPage(i + 1); const content = await page.getTextContent();
-          return content.items.map((item: any) => item.str).join(' ');
-        }));
-        return this.normalizeText(pages.join('\n\n'));
-      }
-    } catch { /* not available */ }
-    throw new Error('No PDF parser available (install pdf-parse or pdfjs-dist)');
+      const result = await parser.getText();
+      const text = this.normalizeText(result?.text || '');
+      if (!text) throw new Error('PDF parser returned no extractable text');
+      return text;
+    } finally {
+      await parser.destroy();
+    }
   }
-
 
   private static normalizeText(text: string): string {
     return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();

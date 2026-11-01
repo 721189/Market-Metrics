@@ -13,6 +13,7 @@
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
@@ -430,6 +431,109 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Fetch cancellation and timeout errors are distinguishable.');
 
+
+  // ===== 10. HTML ingestion regression tests =====
+  const htmlParagraphs = [
+    'The commercial market expanded steadily during the reporting period, with enterprise customers increasing their annual procurement budgets and prioritizing measurable operational efficiency improvements.',
+    'Independent industry participants reported that infrastructure investment accelerated across major metropolitan regions, while procurement teams evaluated reliability, lifecycle cost, and interoperability before selecting vendors.',
+    'The policy framework introduced additional compliance requirements for operators, including transparent reporting, periodic audits, and documented service-level commitments for critical infrastructure.',
+    'Market participants also noted that regional differences in grid capacity, financing availability, and local permitting continue to influence the pace of deployment.',
+  ];
+  const htmlFixture = `<!doctype html><html><head><title>Market Outlook 2026</title></head><body><main>${htmlParagraphs.map(p => `<p>${p}</p>`).join('')}</main></body></html>`;
+  const extractedHtml = RealDocumentFetcher.extractHtmlText(htmlFixture, 'https://example.com/report');
+  if (!extractedHtml || htmlParagraphs.some(p => !extractedHtml.includes(p))) {
+    return { passed: false, message: 'HTML extraction must preserve all substantial paragraphs in ordinary multi-paragraph pages' };
+  }
+  if (extractedHtml.indexOf(htmlParagraphs[0]) > extractedHtml.indexOf(htmlParagraphs[1])) {
+    return { passed: false, message: 'HTML extraction must preserve document order after paragraph selection' };
+  }
+
+  const oneParagraphHtml = `<html><body><article><p>${htmlParagraphs[0]}</p></article></body></html>`;
+  const oneParagraphText = RealDocumentFetcher.extractHtmlText(oneParagraphHtml, 'https://example.com/one');
+  if (!oneParagraphText || !oneParagraphText.includes(htmlParagraphs[0])) {
+    return { passed: false, message: 'HTML extraction must retain a single substantial paragraph' };
+  }
+
+  const tableHtml = '<html><body><table><tr><th>Year</th><th>Revenue</th></tr><tr><td>2024</td><td>₹120 crore</td></tr></table><p>' + htmlParagraphs[0] + '</p></body></html>';
+  const tableText = RealDocumentFetcher.extractHtmlText(tableHtml, 'https://example.com/table');
+  if (!tableText || !tableText.includes('Year') || !tableText.includes('Revenue') || !tableText.includes('₹120 crore')) {
+    return { passed: false, message: 'HTML extraction must retain readable table cell values' };
+  }
+
+  const metadataHtml = '<html><head><title>Verified Report Title</title><meta property="article:published_time" content="2025-04-03T10:00:00Z"></head><body><p>Content</p></body></html>';
+  if (RealDocumentFetcher.extractTitle(metadataHtml, 'https://example.com/fallback') !== 'Verified Report Title') {
+    return { passed: false, message: 'HTML title extraction must use the original document title' };
+  }
+  const publishedDate = RealDocumentFetcher.extractPublicationDate(metadataHtml, new Headers());
+  if (publishedDate !== '2025-04-03T10:00:00.000Z') {
+    return { passed: false, message: 'Publication date extraction must read explicit article metadata' };
+  }
+  if (RealDocumentFetcher.extractPublicationDate('<html><body>no publication date</body></html>', new Headers({ 'last-modified': 'Wed, 21 Oct 2015 07:28:00 GMT' })) !== null) {
+    return { passed: false, message: 'Last-Modified must not be misrepresented as a publication date' };
+  }
+  console.log('✔ HTML extraction preserves paragraphs, order, tables, titles, and verified publication metadata.');
+
+  const reversedMetaHtml = '<html><head><meta content="2025-04-03T10:00:00Z" property="article:published_time"><meta content="Example Research" property="og:site_name"></head></html>';
+  if (RealDocumentFetcher.extractPublicationDate(reversedMetaHtml, new Headers()) !== '2025-04-03T10:00:00.000Z') {
+    return { passed: false, message: 'Publication metadata extraction must not depend on meta attribute order' };
+  }
+  if (RealDocumentFetcher.extractPublisher(reversedMetaHtml, 'https://example.com/report') !== 'Example Research') {
+    return { passed: false, message: 'Publisher extraction must prefer explicit Open Graph site metadata' };
+  }
+  const graphHtml = '<script type="application/ld+json">{"@graph":[{"@type":"NewsArticle","datePublished":"2025-02-01T00:00:00Z"}]}</script>';
+  if (RealDocumentFetcher.extractPublicationDate(graphHtml, new Headers()) !== '2025-02-01T00:00:00.000Z') {
+    return { passed: false, message: 'Publication metadata extraction must support JSON-LD @graph structures' };
+  }
+
+  const csvText = RealDocumentFetcher.parseCsvToText('Company,Description,Revenue\r\nAcme,"Research, analytics and forecasting",120\r\nBeta,"Line one\nLine two with ""quoted"" text",240');
+  if (!csvText.includes('Research, analytics and forecasting') || !csvText.includes('Line one\nLine two with "quoted" text') || !csvText.includes('120')) {
+    return { passed: false, message: 'CSV extraction must preserve quoted commas, escaped quotes, and embedded newlines' };
+  }
+  console.log('✔ CSV extraction preserves quoted fields, escaped quotes, and multiline cells.');
+
+  // Small, valid one-page PDF generated with ReportLab. The parser must read
+  // actual PDF bytes rather than passing only a type-level or mocked check.
+  const pdfFixtureBase64 = 'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0NvbnRlbnRzIDcgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1BhcmVudCA2IDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9QYWdlTW9kZSAvVXNlTm9uZSAvUGFnZXMgNiAwIFIgL1R5cGUgL0NhdGFsb2cKPj4KZW5kb2JqCjUgMCBvYmoKPDwKL0F1dGhvciAoYW5vbnltb3VzKSAvQ3JlYXRpb25EYXRlIChEOjIwMjYxMTAxMTYyODE2KzAwJzAwJykgL0NyZWF0b3IgKGFub255bW91cykgL0tleXdvcmRzICgpIC9Nb2REYXRlIChEOjIwMjYxMTAxMTYyODE2KzAwJzAwJykgL1Byb2R1Y2VyIChSZXBvcnRMYWIgUERGIExpYnJhcnkgLSBcKG9wZW5zb3VyY2VcKSkgCiAgL1N1YmplY3QgKHVuc3BlY2lmaWVkKSAvVGl0bGUgKHVudGl0bGVkKSAvVHJhcHBlZCAvRmFsc2UKPj4KZW5kb2JqCjYgMCBvYmoKPDwKL0NvdW50IDEgL0tpZHMgWyAzIDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKNyAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAxMTIKPj4Kc3RyZWFtCkdhcFFoMEU9RiwwVVxIM1RccE5ZVF5RS2s/dGM+SVAsO1cjVTFeMjNpaFBFTV8/Q1c0S0lTaTwhWzdgI09CX3NLISNJU0plO0JFYGA4bSoqciZmXShyMWBPZTluZVpbS2IsaHQtM1oiJWZwcm4rfj5lbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA2MSAwMDAwMCBuIAowMDAwMDAwMDkyIDAwMDAwIG4gCjAwMDAwMDAxOTkgMDAwMDAgbiAKMDAwMDAwMDM5MiAwMDAwMCBuIAowMDAwMDAwNDYwIDAwMDAwIG4gCjAwMDAwMDA3MjEgMDAwMDAgbiAKMDAwMDAwMDc4MCAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9JRCAKWzxiNzcyYTNjYzE5NDg0OGQ0ZDAzM2UyMDEwMzE1ZmRkNT48Yjc3MmEzY2MxOTQ4NDhkNGQwMzNlMjAxMDMxNWZkZDU+XQolIFJlcG9ydExhYiBnZW5lcmF0ZWQgUERGIGRvY3VtZW50IC0tIGRpZ2VzdCAob3BlbnNvdXJjZSkKCi9JbmZvIDUgMCBSCi9Sb290IDQgMCBSCi9TaXplIDgKPj4Kc3RhcnR4cmVmCjk4MgolJUVPRgo=';
+  const pdfText = await RealDocumentFetcher.extractPdfText(Buffer.from(pdfFixtureBase64, 'base64'));
+  if (!pdfText.includes('PDF extraction works')) {
+    return { passed: false, message: 'The installed pdf-parse v2 API must extract text from a real PDF fixture' };
+  }
+  console.log('✔ PDF extraction succeeds through the installed pdf-parse API.');
+
+  // ===== 11. Claim verification regression tests =====
+  const recentDate = new Date().toISOString();
+  const sourceA = makeSource('src-corroboration-a', { domain: 'research-a.example', published_at: recentDate });
+  const sourceB = makeSource('src-corroboration-b', { domain: 'research-b.example', published_at: recentDate });
+  const evidenceA = makeEvidence('ev-corroboration-a', sourceA.id);
+  const evidenceB = makeEvidence('ev-corroboration-b', sourceB.id);
+  evidenceA.provenance.document_hash = 'a'.repeat(64);
+  evidenceB.provenance.document_hash = 'b'.repeat(64);
+  const corroboratedClaim = makeClaim('clm-corroborated', 1, [evidenceA.id, evidenceB.id]);
+  corroboratedClaim.statement = 'The market size is $100 million.';
+  const corroborationResult = RealClaimVerifier.verifyAll(
+    [corroboratedClaim], [sourceA, sourceB], [evidenceA, evidenceB],
+  );
+  if (corroborationResult.verifiedClaims[0]?.verification_status !== 'SUPPORTED') {
+    return { passed: false, message: 'A recent, reliable claim supported by two independent domains must pass corroboration' };
+  }
+
+  const unsupportedClaim = makeClaim('clm-unsupported', 2, ['missing-evidence']);
+  const unsupportedResult = RealClaimVerifier.verifyAll([unsupportedClaim], [sourceA], [evidenceA]);
+  if (unsupportedResult.verifiedClaims[0]?.verification_status !== 'INSUFFICIENT') {
+    return { passed: false, message: 'Claims with no resolvable supporting evidence must remain INSUFFICIENT' };
+  }
+
+  const conflictingClaimA = makeClaim('clm-conflict-a', 3, [evidenceA.id]);
+  const conflictingClaimB = makeClaim('clm-conflict-b', 4, [evidenceB.id]);
+  conflictingClaimA.statement = 'The market size is $100 million.';
+  conflictingClaimB.statement = 'The market size is $500 million.';
+  const conflictResult = ContradictionEngine.analyzeContradictions(
+    [conflictingClaimA, conflictingClaimB], [evidenceA, evidenceB],
+  );
+  if (!conflictResult.contradictionsFound.some(conflict => conflict.claimId1 === conflictingClaimA.id && conflict.claimId2 === conflictingClaimB.id)) {
+    return { passed: false, message: 'Contradiction analysis must identify materially divergent values for the same claim proposition' };
+  }
+  console.log('✔ Claim verifier enforces independent corroboration and unsupported-claim rejection; contradiction detection is exercised.');
   // ===== 10. Golden benchmark fixture must itself satisfy the citation graph =====
 
 
