@@ -425,7 +425,7 @@ export class FinancialEngine {
 
     return {
       ltv,
-      cac: inputs.cac,
+      cac: safeCac,
       ltv_to_cac,
       payback_period_months,
       annual_gross_profit_per_user: Math.round(safeArpu * grossMarginDecimal),
