@@ -190,6 +190,20 @@ export async function runApiAuthTest() {
     }
     otherTenantRes.status(201).json({ id: 'job_other_tenant' });
 
+    // The same key and path can be used independently by a different HTTP
+    // method. The request fingerprint already includes the method; the
+    // reservation key must include it as well.
+    const { req: deleteReq, res: deleteRes } = createMockReqRes({
+      headers: { 'x-idempotency-key': idempotencyKey },
+      method: 'DELETE',
+    });
+    let deleteNext = false;
+    idempotencyMiddleware(deleteReq, deleteRes, () => { deleteNext = true; });
+    if (!deleteNext) {
+      throw new Error('Idempotency reservations must be scoped by HTTP method.');
+    }
+    deleteRes.status(200).json({ deleted: true });
+
     // Reserve a key before route execution so simultaneous duplicate requests
     // cannot both enter the handler.
     const inflightKey = 'idem_key_concurrent_1122';
