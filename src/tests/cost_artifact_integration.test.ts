@@ -43,6 +43,30 @@ async function runCostGovernorTests(): Promise<{ passed: boolean; message: strin
     return { passed: false, message: 'checkRequestBudget should fire when estimated cost exceeds budget' };
   }
 
+  // --- SSRF address classification: special-purpose ranges fail closed --- 
+  const privateAddressCases = [
+    '127.0.0.1',
+    '100.127.0.1',
+    '192.0.2.10',
+    '198.18.0.1',
+    '203.0.113.8',
+    '::1',
+    'fc00::1',
+    'fe80::1',
+    '2001:db8::1',
+    '2002::1',
+    '3fff::1',
+    '::ffff:127.0.0.1',
+    '0:0:0:0:0:ffff:7f00:1',
+  ];
+  if (privateAddressCases.some(address => !RealDocumentFetcher.isPrivateIp(address))) {
+    return { passed: false, message: 'Private, mapped-private, documentation, and special-purpose IP ranges must be blocked' };
+  }
+  const publicAddressCases = ['8.8.8.8', '1.1.1.1', '2001:4860:4860::8888', '2606:4700:4700::1111'];
+  if (publicAddressCases.some(address => RealDocumentFetcher.isPrivateIp(address))) {
+    return { passed: false, message: 'Globally-routable IPv4 and IPv6 addresses must remain fetchable' };
+  }
+
   // --- Artifact persistence ---
   const storage = new InMemoryArtifactStorage();
   const ref = await storage.putRaw('src-1', 'job-1', 'https://example.test/src-1', 'text/plain', Buffer.from('hello world'));
