@@ -376,7 +376,10 @@ export class ResearchPipelineManager {
       // during chunked cleanup. Retry cleanup idempotently without exposing the
       // tombstoned job to ordinary reads.
       const resumed = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts);
-      return resumed ? 'deleted' : 'not_found';
+      if (!resumed) return 'not_found';
+      const { CacheLayer } = await import('./cache.js');
+      await CacheLayer.invalidateReportCache(jobId, userId);
+      return 'deleted';
     }
 
     // Compare as plain strings: JobStatus includes stage-prefixed values
@@ -391,6 +394,8 @@ export class ResearchPipelineManager {
 
     const deleted = await DatabaseRepository.deleteJob(jobId, userId, cleanupArtifacts);
     if (!deleted) return 'not_found';
+    const { CacheLayer } = await import('./cache.js');
+    await CacheLayer.invalidateReportCache(jobId, userId);
     logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
     return 'deleted';
   }
