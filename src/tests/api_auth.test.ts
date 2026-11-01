@@ -10,6 +10,10 @@ function createMockReqRes(overrides: {
   headers?: Record<string, string>;
   query?: Record<string, string>;
   ip?: string;
+  body?: any;
+  userId?: string;
+  method?: string;
+  path?: string;
 } = {}) {
   let statusCode = 200;
   let responseBody: any = null;
@@ -20,6 +24,11 @@ function createMockReqRes(overrides: {
     query: overrides.query || {},
     ip: overrides.ip || '127.0.0.1',
     socket: { remoteAddress: overrides.ip || '127.0.0.1' },
+    body: overrides.body ?? { question: 'test market research' },
+    user: { uid: overrides.userId || 'usr_idempotency_test' },
+    method: overrides.method || 'POST',
+    path: overrides.path || '/api/v1/research',
+    originalUrl: overrides.path || '/api/v1/research',
   };
 
   const res: any = {
@@ -155,6 +164,56 @@ export async function runApiAuthTest() {
     if (res2.responseBody?.id !== 'job_created_001') {
       throw new Error(`Idempotency returned unexpected body: ${JSON.stringify(res2.responseBody)}`);
     }
+
+    // Reusing a key for different input must not silently replay another request's result.
+    const { req: mismatchReq, res: mismatchRes } = createMockReqRes({
+      headers: { 'x-idempotency-key': idempotencyKey },
+      body: { question: 'different request payload' },
+    });
+    let mismatchNext = false;
+    idempotencyMiddleware(mismatchReq, mismatchRes, () => { mismatchNext = true; });
+    if (mismatchNext || mismatchRes.statusCode !== 409 ||
+        mismatchRes.responseBody?.error?.code !== 'IDEMPOTENCY_KEY_REUSED') {
+      throw new Error('Reusing an idempotency key with a different payload must return 409.');
+    }
+
+    // The same key is scoped to the authenticated tenant; another user must
+    // not receive or collide with the first user's replay record.
+    const { req: otherTenantReq, res: otherTenantRes } = createMockReqRes({
+      headers: { 'x-idempotency-key': idempotencyKey },
+      userId: 'usr_other_tenant',
+    });
+    let otherTenantNext = false;
+    idempotencyMiddleware(otherTenantReq, otherTenantRes, () => { otherTenantNext = true; });
+    if (!otherTenantNext) {
+      throw new Error('Idempotency cache keys must be isolated by authenticated user.');
+    }
+    otherTenantRes.status(201).json({ id: 'job_other_tenant' });
+
+    // Reserve a key before route execution so simultaneous duplicate requests
+    // cannot both enter the handler.
+    const inflightKey = 'idem_key_concurrent_1122';
+    const { req: inflightReq1, res: inflightRes1 } = createMockReqRes({
+      headers: { 'x-idempotency-key': inflightKey },
+    });
+    let firstInFlightExecution = 0;
+    idempotencyMiddleware(inflightReq1, inflightRes1, () => { firstInFlightExecution++; });
+
+    const { req: inflightReq2, res: inflightRes2 } = createMockReqRes({
+      headers: { 'x-idempotency-key': inflightKey },
+    });
+    let secondInFlightExecution = 0;
+    idempotencyMiddleware(inflightReq2, inflightRes2, () => { secondInFlightExecution++; });
+    if (
+      firstInFlightExecution !== 1 ||
+      secondInFlightExecution !== 0 ||
+      inflightRes2.statusCode !== 409 ||
+      inflightRes2.responseBody?.error?.code !== 'IDEMPOTENCY_IN_PROGRESS'
+    ) {
+      throw new Error('Concurrent duplicate requests must not both execute the route.');
+    }
+    inflightRes1.status(201).json({ id: 'job_concurrent_001' });
+
     console.log('✓ Verified: Idempotency middleware caches identical mutation requests and prevents duplicate execution.');
   }
 
