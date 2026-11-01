@@ -17,7 +17,7 @@ export class DatabaseRepository {
     if (!userId) throw new Error('[DB] userId is required for saveJob');
     try {
       const jobRef = adminDb.collection('jobs').doc(job.id);
-      await jobRef.set({
+      await jobRef.create({
         ...stripUndefined(job),
         user_id: userId,
         updated_at: FieldValue.serverTimestamp(),
@@ -47,8 +47,8 @@ export class DatabaseRepository {
         const snapshot = await transaction.get(jobRef);
         if (snapshot.exists) {
           const existing = snapshot.data() as (ResearchJob & { user_id?: string }) | undefined;
-          if (existing?.user_id && existing.user_id !== userId) {
-            throw new Error('[DB] refusing to update a job owned by another user');
+          if (!existing?.user_id || existing.user_id !== userId) {
+            throw new Error('[DB] refusing to update a job without an exact matching owner');
           }
           if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(existing?.status))) return false;
         }
@@ -74,9 +74,9 @@ export class DatabaseRepository {
       const docSnap = await adminDb.collection('jobs').doc(jobId).get();
       if (!docSnap.exists) return null;
       const data = docSnap.data() as ResearchJob & { user_id?: string };
-      if (data.user_id && data.user_id !== userId) {
-        return null;
-      }
+      // Legacy records without an owner are inaccessible until an explicit,
+      // audited migration assigns the correct tenant. Never fail open.
+      if (data.user_id !== userId) return null;
       return data;
     } catch (err) {
       logger.error('db.get_job_failed', `Error getting job ${jobId}`, {
@@ -165,10 +165,19 @@ export class DatabaseRepository {
     if (!userId) throw new Error('[DB] userId is required for saveReport');
     try {
       const reportRef = adminDb.collection('reports').doc(report.job_id);
-      await reportRef.set({
-        ...report,
-        user_id: userId,
-        saved_at: FieldValue.serverTimestamp(),
+      await adminDb.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reportRef);
+        if (snapshot.exists) {
+          const existingUserId = snapshot.get('user_id');
+          if (!existingUserId || existingUserId !== userId) {
+            throw new Error('[DB] refusing to overwrite a report without an exact matching owner');
+          }
+        }
+        transaction.set(reportRef, {
+          ...report,
+          user_id: userId,
+          saved_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
       });
     } catch (err) {
       logger.error('db.save_report_failed', `Error saving report ${report.job_id}`, {
