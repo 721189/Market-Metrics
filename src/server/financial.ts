@@ -116,12 +116,17 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   );
   const tamBaseCandidates: Array<{ value: number; claimId: string }> = [];
   const tamForecastCandidates: Array<{ value: number; claimId: string }> = [];
+  const tamBaseYearCandidates: Array<{ value: number; claimId: string }> = [];
+  const tamForecastYearCandidates: Array<{ value: number; claimId: string }> = [];
   const samCandidates: Array<{ value: number; claimId: string }> = [];
   const somCandidates: Array<{ value: number; claimId: string }> = [];
   const cagrCandidates: Array<{ value: number; claimId: string }> = [];
+  const cagrPeriodCandidates: Array<{
+    value: { start_year: number; end_year: number };
+    claimId: string;
+  }> = [];
   const ambiguousTAMClaims: string[] = [];
   const currencies = new Set<string>();
-  const years = new Set<number>();
   const sourceClaimIds = new Set<string>();
 
   for (const claim of supported.filter(item => item.claim_type === 'MARKET_SIZE')) {
@@ -129,7 +134,7 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
     const amounts = parseExplicitMoneyAmounts(statement);
     if (amounts.length === 0) continue;
 
-    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
+    const yearMatches = (statement.match(/\b20\d{2}\b/g) || []).map(Number);
     const isSam = /\bSAM\b|serviceable available market/i.test(statement);
     const isSom = /\bSOM\b|serviceable obtainable market/i.test(statement);
     const isTam = /\bTAM\b|total addressable market|market size/i.test(statement) ||
@@ -147,60 +152,97 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
       sourceClaimIds.add(claim.id);
       continue;
     }
-    if (isTam) {
-      yearMatches.forEach(year => years.add(Number(year)));
-      amounts.forEach(amount => currencies.add(amount.currency));
-      if (amounts.length >= 2) {
-        const hasExplicitRange = yearMatches.length >= 2 || /\bfrom\b[\s\S]*\bto\b/i.test(statement);
-        if (amounts.length !== 2 || !hasExplicitRange) {
-          ambiguousTAMClaims.push(claim.id);
-          continue;
-        }
-        tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
-        tamForecastCandidates.push({ value: amounts[1].value, claimId: claim.id });
-        sourceClaimIds.add(claim.id);
-      } else if (/\b(by|forecast|projected|reach|reaching)\b/i.test(statement)) {
-        tamForecastCandidates.push({ value: amounts[0].value, claimId: claim.id });
-        sourceClaimIds.add(claim.id);
-      } else {
-        tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
-        sourceClaimIds.add(claim.id);
+    if (!isTam) continue;
+
+    amounts.forEach(amount => currencies.add(amount.currency));
+    if (amounts.length >= 2) {
+      const hasExplicitRange = yearMatches.length >= 2 || /\bfrom\b[\s\S]*\bto\b/i.test(statement);
+      if (amounts.length !== 2 || !hasExplicitRange) {
+        ambiguousTAMClaims.push(claim.id);
+        continue;
       }
+      tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
+      tamForecastCandidates.push({ value: amounts[1].value, claimId: claim.id });
+      if (yearMatches.length === 2) {
+        tamBaseYearCandidates.push({ value: yearMatches[0], claimId: claim.id });
+        tamForecastYearCandidates.push({ value: yearMatches[1], claimId: claim.id });
+      }
+      sourceClaimIds.add(claim.id);
+    } else if (/\b(by|forecast|projected|reach|reaching)\b/i.test(statement)) {
+      tamForecastCandidates.push({ value: amounts[0].value, claimId: claim.id });
+      if (yearMatches.length === 1) {
+        tamForecastYearCandidates.push({ value: yearMatches[0], claimId: claim.id });
+      }
+      sourceClaimIds.add(claim.id);
+    } else {
+      tamBaseCandidates.push({ value: amounts[0].value, claimId: claim.id });
+      if (yearMatches.length === 1) {
+        tamBaseYearCandidates.push({ value: yearMatches[0], claimId: claim.id });
+      }
+      sourceClaimIds.add(claim.id);
     }
   }
 
   for (const claim of supported.filter(item => item.claim_type === 'MARKET_GROWTH')) {
     const statement = String(claim.statement || '');
-    const yearMatches = statement.match(/\b20\d{2}\b/g) || [];
-    yearMatches.forEach(year => years.add(Number(year)));
     if (!/\bCAGR\b|compound annual growth/i.test(statement)) continue;
+
     const percent = statement.match(/(\d+(?:\.\d+)?)\s*%/);
-    if (percent) {
-      const value = Number(percent[1]);
-      if (Number.isFinite(value) && value >= 0 && value <= 200) {
-        cagrCandidates.push({ value, claimId: claim.id });
-        sourceClaimIds.add(claim.id);
+    if (!percent) continue;
+    const value = Number(percent[1]);
+    if (!Number.isFinite(value) || value < 0 || value > 200) continue;
+
+    cagrCandidates.push({ value, claimId: claim.id });
+    sourceClaimIds.add(claim.id);
+
+    // Only a stated period on this very CAGR claim may drive an extrapolation.
+    // Years from unrelated claims (or incidental dates in prose) are never
+    // combined into a synthetic forecast period.
+    const range = statement.match(/\bfrom\s+(20\d{2})\s+to\s+(20\d{2})\b/i) ||
+      statement.match(/\bbetween\s+(20\d{2})\s+and\s+(20\d{2})\b/i) ||
+      statement.match(/\b(20\d{2})\s*(?:-|–|—)\s*(20\d{2})\b/);
+    if (range) {
+      const startYear = Number(range[1]);
+      const endYear = Number(range[2]);
+      if (endYear > startYear) {
+        cagrPeriodCandidates.push({
+          value: { start_year: startYear, end_year: endYear },
+          claimId: claim.id,
+        });
       }
     }
   }
 
   const tamBase = uniqueCandidate(tamBaseCandidates);
   const tamForecast = uniqueCandidate(tamForecastCandidates);
+  const tamBaseYear = uniqueCandidate(tamBaseYearCandidates);
+  const tamForecastYear = uniqueCandidate(tamForecastYearCandidates);
   const sam = uniqueCandidate(samCandidates);
   const som = uniqueCandidate(somCandidates);
   const cagr = uniqueCandidate(cagrCandidates);
+  const cagrPeriod = uniqueCandidate(cagrPeriodCandidates);
   const currency = currencies.size === 1 ? Array.from(currencies)[0] : null;
-  const yearList = Array.from(years).sort((a, b) => a - b);
-  const yearStart = yearList.length >= 2
-    ? yearList[0]
-    : (tamBase ? yearList[0] ?? null : null);
-  const yearEnd = yearList.length >= 2
-    ? yearList[yearList.length - 1]
-    : (tamForecast ? yearList[0] ?? null : null);
+
+  const cagrPeriodMatchesBaseline = Boolean(
+    tamBaseYear && cagr && cagrPeriod &&
+    cagr.claimId === cagrPeriod.claimId &&
+    cagrPeriod.value.start_year === tamBaseYear.value,
+  );
+  const yearStart = tamBaseYear?.value ?? null;
+  const yearEnd = tamForecastYear?.value ??
+    (cagrPeriodMatchesBaseline ? cagrPeriod!.value.end_year : null);
 
   let forecastValue = tamForecast?.value ?? null;
   let forecastClaimId = tamForecast?.claimId;
-  if (forecastValue === null && tamBase && cagr && yearStart !== null && yearEnd !== null && yearEnd > yearStart) {
+  if (
+    forecastValue === null &&
+    tamBase &&
+    cagr &&
+    cagrPeriodMatchesBaseline &&
+    yearStart !== null &&
+    yearEnd !== null &&
+    yearEnd > yearStart
+  ) {
     forecastValue = Math.round(tamBase.value * Math.pow(1 + cagr.value / 100, yearEnd - yearStart));
     forecastClaimId = cagr.claimId;
   }
@@ -222,7 +264,10 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
   if (!currencyConsistent) limitations.push('A single explicit currency could not be established from verified market-size claims.');
   if (tamCurrentValue === null) limitations.push('No unambiguous, currency-explicit verified TAM base value was found.');
   if (cagrValue === null) limitations.push('No verified CAGR claim with an explicit percentage was found.');
-  if (tamForecastValue === null) limitations.push('Forecast TAM is unavailable without a verified forecast value or verified TAM, CAGR, and year range.');
+  if (tamForecastValue === null) limitations.push('Forecast TAM is unavailable without a verified forecast value or a period-aligned verified TAM, CAGR, and year range.');
+  if (tamBase && cagr && !tamForecast && !cagrPeriodMatchesBaseline) {
+    limitations.push('Forecast TAM was not extrapolated because the verified CAGR period could not be matched to the verified TAM baseline year.');
+  }
   if (samValue === null) limitations.push('SAM is unavailable because no unambiguous, explicitly stated verified SAM value was found.');
   if (somValue === null) limitations.push('SOM is unavailable because no unambiguous, explicitly stated verified SOM value was found.');
   if (tamBaseCandidates.length > 1 && !tamBase) limitations.push('Multiple different verified TAM base values were found; no value was selected.');
