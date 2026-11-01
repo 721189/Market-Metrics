@@ -183,35 +183,47 @@ export class RealDocumentFetcher {
    * Returns null when the date cannot be verified — an unknown publication
    * date must remain unknown (null), never fabricated as "now".
    */
-  public static extractPublicationDate(html: string, headers: Headers): string | null {
-    const metaDateMatch = html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i) ||
-                          html.match(/<meta[^>]+name=["']date["'][^>]+content=["']([^"']+)["']/i) ||
-                          html.match(/<meta[^>]+property=["']og:published_time["'][^>]+content=["']([^"']+)["']/i);
-    if (metaDateMatch && metaDateMatch[1]) {
-      const parsed = Date.parse(metaDateMatch[1]);
-      if (!isNaN(parsed)) return new Date(parsed).toISOString();
+  public static extractPublicationDate(html: string, _headers: Headers): string | null {
+    // Parse meta elements independently so attribute order is irrelevant.
+    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of metaTags) {
+      const key = tag.match(/(?:property|name|itemprop)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!key || !['article:published_time', 'og:published_time', 'date', 'datepublished', 'pubdate', 'parsely-pub-date'].includes(key)) continue;
+      const value = tag.match(/content\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (!value) continue;
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
     }
 
-    const jsonLdMatch = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
-    if (jsonLdMatch) {
-      for (let block of jsonLdMatch) {
-        try {
-          const contentMatch = block.match(/>([\s\S]*?)<\/script>/i);
-          if (contentMatch && contentMatch[1]) {
-            const data = JSON.parse(contentMatch[1]);
-            const datePub = data.datePublished || data['datePublished'] || data.uploadDate;
-            if (datePub) {
-              const parsed = Date.parse(datePub);
-              if (!isNaN(parsed)) return new Date(parsed).toISOString();
-            }
-          }
-        } catch (e) {}
+    // JSON-LD can be an object, array, or @graph. Only explicit datePublished
+    // values qualify as publication dates.
+    const jsonLdBlocks = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+    const findPublishedDate = (value: any): string | null => {
+      if (!value || typeof value !== 'object') return null;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = findPublishedDate(item);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (typeof value.datePublished === 'string') {
+        const parsed = Date.parse(value.datePublished);
+        if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+      }
+      return findPublishedDate(value['@graph']);
+    };
+    for (const block of jsonLdBlocks) {
+      const json = block.replace(/^<script\b[^>]*>/i, '').replace(/<\/script>$/i, '');
+      try {
+        const found = findPublishedDate(JSON.parse(json));
+        if (found) return found;
+      } catch {
+        // Malformed JSON-LD is ignored; unknown dates remain unknown.
       }
     }
 
-    // Last-Modified is a transport/cache timestamp, not proof of the
-    // document's publication date. Keep publication time unknown unless the
-    // document explicitly exposes datePublished/article:published_time metadata.
+    // Last-Modified is a file/cache timestamp, not necessarily publication.
     return null;
   }
 
@@ -320,7 +332,7 @@ export class RealDocumentFetcher {
       const chunks = this.chunkText(sourceId, title, extractedText);
       return {
         url, title, domain: new URL(url).hostname,
-        publisher: this.extractPublisher(extractedText, url),
+        publisher: this.extractPublisher(originalHtml || extractedText, url),
         httpStatus: status, extractedText,
         paragraphs: this.splitParagraphs(extractedText),
         contentLength, publishedAt, contentHash, chunks,
@@ -347,7 +359,14 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractPublisher(text: string, url: string): string {
+  private static extractPublisher(html: string, url: string): string {
+    const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of metaTags) {
+      const key = tag.match(/(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!key || !['og:site_name', 'application-name', 'publisher'].includes(key)) continue;
+      const value = tag.match(/content\s*=\s*["']([^"']+)["']/i)?.[1]?.trim();
+      if (value) return value;
+    }
     try { return new URL(url).hostname; } catch { return 'Unknown'; }
   }
 
