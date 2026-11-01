@@ -16,6 +16,7 @@ import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutErr
 import { RealClaimVerifier, ContradictionEngine } from '../server/claim_engine.js';
 import { loadEnvironmentConfig, findEnvironmentViolations, resolveEnvironmentName, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { resolveModel } from '../server/gemini.js';
+import { classifyDomainTier } from '../server/pipeline.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -388,6 +389,16 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+  const trustedGovernment = classifyDomainTier('https://www.sec.gov/reports');
+  const trustedPublisher = classifyDomainTier('research.bloomberg.com');
+  const lookalikePublisher = classifyDomainTier('bloomberg.com.attacker.example');
+  const unknownPublisher = classifyDomainTier('unlisted-research.example');
+  if (trustedGovernment.tier !== 'TIER_A' || trustedPublisher.tier !== 'TIER_B' ||
+      lookalikePublisher.reliability >= 70 || unknownPublisher.reliability >= 70) {
+    return { passed: false, message: 'Source credibility must use canonical host allowlists and keep unknown domains below the verification threshold' };
+  }
+  console.log('✔ Source credibility rejects lookalike domains and conservatively scores unknown publishers.');
+
   // Environment labels must never downgrade an explicitly production process.
   if (resolveEnvironmentName({ APP_ENV: 'prod', NODE_ENV: 'production' } as NodeJS.ProcessEnv) !== 'production') {
     return { passed: false, message: 'Equivalent production aliases must resolve consistently' };
