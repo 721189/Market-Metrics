@@ -198,7 +198,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   const path = String(req.originalUrl || req.path || '/').split('?')[0];
   const requestHash = idempotencyRequestHash(method, path, req.body ?? null);
   const docKey = crypto.createHash('sha256')
-    .update(userId + '|' + method + '|' + path + '|' + idempotencyKey)
+    .update(userId + '|' + path + '|' + idempotencyKey)
     .digest('hex');
 
   const productionDefaults = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
