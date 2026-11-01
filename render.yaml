@@ -34,7 +34,8 @@ services:
     # start the production server which serves dist/ statically.
     buildCommand: npm ci && npm run build
     startCommand: npm start
-    healthCheckPath: /health
+    # /health is liveness only; /ready verifies Firestore + Gemini with one bounded read.
+    healthCheckPath: /ready
     autoDeployTrigger: commit
     envVars:
       # --- Runtime environment ------------------------------------------------
