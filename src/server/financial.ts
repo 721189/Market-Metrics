@@ -292,8 +292,12 @@ export class FinancialEngine {
    * SaaS Unit Economics Engine
    */
   public static calculateUnitEconomics(inputs: UnitEconomicsInputs) {
-    const grossMarginDecimal = Math.min(1, Math.max(0, inputs.gross_margin_pct / 100));
-    const churnDecimal = Math.min(1, Math.max(0, inputs.annual_churn_rate_pct / 100));
+    const grossMarginDecimal = Number.isFinite(inputs.gross_margin_pct)
+      ? Math.min(1, Math.max(0, inputs.gross_margin_pct / 100))
+      : 0;
+    const churnDecimal = Number.isFinite(inputs.annual_churn_rate_pct)
+      ? Math.min(1, Math.max(0, inputs.annual_churn_rate_pct / 100))
+      : 0;
     const safeArpu = Number.isFinite(inputs.arpu_annual) ? Math.max(0, inputs.arpu_annual) : 0;
     const safeCac = Number.isFinite(inputs.cac) ? Math.max(0, inputs.cac) : 0;
 
