@@ -735,8 +735,8 @@ Return a strict JSON object:
     industry: string;
     geography: string;
     timeHorizon: string;
-    tamForecast: number;
-    cagr: number;
+    tamForecast: number | null;
+    cagr: number | null;
     claims: SynthesisClaimContext[];
     evidence: SynthesisEvidenceContext[];
     signal?: AbortSignal;
@@ -760,8 +760,8 @@ CONTEXT:
 - Industry: "${params.industry}"
 - Geography: "${params.geography}"
 - Time Horizon: "${params.timeHorizon}"
-- Deterministic Forecast TAM: ${params.tamForecast.toLocaleString()}
-- Deterministic Verified CAGR: ${params.cagr}%
+- Verified Forecast TAM: ${params.tamForecast === null ? 'Not established from verified claims' : params.tamForecast.toLocaleString()}
+- Verified CAGR: ${params.cagr === null ? 'Not established from verified claims' : params.cagr + '%'}
 
 VERIFIED CLAIM REGISTRY (the ONLY permissible factual basis):
 ${JSON.stringify(params.claims, null, 1)}
