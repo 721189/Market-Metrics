@@ -435,6 +435,16 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
       FinancialEngine.calculateCAGR(100, 200, 0) !== null) {
     return { passed: false, message: 'Invalid CAGR inputs must be represented as unavailable, not zero growth' };
   }
+  if (
+    FinancialEngine.formatCurrency(1_000_000, 'USD') !== '$1.00M' ||
+    FinancialEngine.formatCurrency(1_000_000, 'EUR') !== '€1.00M' ||
+    FinancialEngine.formatCurrency(1_000_000, 'GBP') !== '£1.00M' ||
+    FinancialEngine.formatCurrency(100_000_000, 'INR') !== '₹1.00 Cr' ||
+    FinancialEngine.formatCurrency(1_000_000, 'JPY') !== '1,000,000 JPY'
+  ) {
+    return { passed: false, message: 'Currency formatting must preserve the explicit currency and never label EUR/GBP/unknown amounts as USD' };
+  }
+
   const invalidSizing = FinancialEngine.calculateMarketSizing({
     tam_current: 1000, tam_forecast: 1200, year_start: 2030, year_end: 2025,
     sam_share_pct: 40, som_share_pct: 10, currency: 'USD',
