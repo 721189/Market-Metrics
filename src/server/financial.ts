@@ -187,9 +187,16 @@ export function extractVerifiedMarketSizing(claims: Claim[]): VerifiedMarketSizi
     const statement = String(claim.statement || '');
     if (!/\bCAGR\b|compound annual growth/i.test(statement)) continue;
 
-    const percent = statement.match(/(\d+(?:\.\d+)?)\s*%/);
-    if (!percent) continue;
-    const value = Number(percent[1]);
+    // Bind the numeric percentage to the CAGR phrase itself. A sentence may
+    // contain unrelated growth, churn, or penetration percentages before it.
+    const percentAfterCagr = statement.match(
+      /\b(?:CAGR|compound annual growth(?: rate)?)\b[^.;]{0,60}?(\d+(?:\.\d+)?)\s*%/i,
+    );
+    const percentBeforeCagr = statement.match(
+      /(\d+(?:\.\d+)?)\s*%\s*(?:annualized\s+)?(?:CAGR|compound annual growth(?: rate)?)\b/i,
+    );
+    const value = Number(percentAfterCagr?.[1] ?? percentBeforeCagr?.[1]);
+    if (!Number.isFinite(value)) continue;
     if (!Number.isFinite(value) || value < 0 || value > 200) continue;
 
     cagrCandidates.push({ value, claimId: claim.id });
