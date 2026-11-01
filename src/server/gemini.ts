@@ -601,7 +601,7 @@ ${JSON.stringify(params.claims, null, 1)}`;
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await generateWithCostTracking(
           resolveModel('COMPETITORS'),
-          costGovernor,
+          params.costGovernor,
           () => ai.models.generateContent({
         model: resolveModel('COMPETITORS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -768,7 +768,7 @@ Documents: `;
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await generateWithCostTracking(
           resolveModel('EXTRACTION'),
-          costGovernor,
+          params.costGovernor,
           () => ai.models.generateContent({
         model: resolveModel('EXTRACTION'),
         contents: [{ role: 'user', parts: [{ text: prompt + JSON.stringify(params.sourceDocuments).slice(0, 10000) }] }],
@@ -832,7 +832,7 @@ Return a strict JSON object:
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await generateWithCostTracking(
           resolveModel('FORECAST'),
-          costGovernor,
+          params.costGovernor,
           () => ai.models.generateContent({
         model: resolveModel('FORECAST'),
         contents: prompt,
@@ -907,7 +907,7 @@ Write: summary (executive summary), section1 (market dynamics), section2 (custom
       if (params.signal?.aborted) throw new Error('Operation aborted');
       const response = await generateWithCostTracking(
           resolveModel('SYNTHESIS'),
-          costGovernor,
+          params.costGovernor,
           () => ai.models.generateContent({
         model: resolveModel('SYNTHESIS'),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
