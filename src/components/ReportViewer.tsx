@@ -311,6 +311,16 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
                 <span className="text-[11px] text-slate-400">Only explicit, verified values are shown</span>
               </div>
             </div>
+            {report.financial_models.limitations && report.financial_models.limitations.length > 0 && (
+              <div className="rounded-xl border border-amber-500/20 bg-slate-900/40 p-4 text-xs text-slate-300 space-y-2">
+                <h3 className="font-semibold text-amber-300">Financial evidence limitations</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  {report.financial_models.limitations.map((limitation, index) => (
+                    <li key={index}>{limitation}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
 
           {/* 3. Competitor Matrix */}
