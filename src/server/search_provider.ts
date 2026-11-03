@@ -117,7 +117,7 @@ function classifyHttpFailure(status: number): SearchProviderError {
 function normalizeResult(value: unknown): LiveSearchSource | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Record<string, unknown>;
-  if (typeof item.url !== 'string' || typeof item.url !== 'string') return null;
+  if (typeof item.url !== 'string') return null;
 
   let parsedUrl: URL;
   try {
