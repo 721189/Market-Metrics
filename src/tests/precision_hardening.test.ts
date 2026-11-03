@@ -484,7 +484,7 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
           results: [
             { title: 'Official market report', url: 'https://www.example.gov/report#section', content: 'Verified market evidence.' },
             { title: 'Unsafe URL', url: 'javascript:alert(1)', content: 'Must be discarded.' },
-            { title: 'Duplicate URL', url: 'https://example.gov/report', content: 'Duplicate must be deduplicated.' },
+            { title: 'Duplicate URL', url: 'https://www.example.gov/report', content: 'Duplicate must be deduplicated.' },
           ],
           usage: { credits: 1 },
         }), { status: 200, headers: { 'content-type': 'application/json' } });
