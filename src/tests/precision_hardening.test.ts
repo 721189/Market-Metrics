@@ -14,7 +14,7 @@ import { canTransition, assertTransition, cancellationRegistry } from '../server
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
-import { resolveModel, classifyProviderError } from '../server/gemini.js';
+import { resolveModel, classifyProviderError, extractProviderErrorDiagnostics } from '../server/gemini.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -427,6 +427,35 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A transient per-minute rate limit must remain retryable' };
   }
   console.log('✔ Gemini distinguishes exhausted project quota from transient rate limiting.');
+  const structuredQuota = extractProviderErrorDiagnostics(new Error(JSON.stringify({
+    error: {
+      code: 429, status: 'RESOURCE_EXHAUSTED',
+      details: [
+        { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{
+          subject: 'project:do-not-log-this-project',
+          quotaMetric: 'generativelanguage.googleapis.com/generate_content_free_tier_requests',
+          quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier',
+          quotaDimensions: { model: 'gemini-3.8-flash', location: 'global' }, quotaValue: '20',
+        }] },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1s' },
+      ],
+    },
+  })));
+  if (structuredQuota.provider_code !== 429 || structuredQuota.provider_status !== 'RESOURCE_EXHAUSTED' ||
+      !structuredQuota.quota_ids[0]?.includes('RequestsPerDay') || structuredQuota.quota_models[0] !== 'gemini-3.8-flash' ||
+      structuredQuota.retry_delays[0] !== '1s' || JSON.stringify(structuredQuota).includes('do-not-log-this-project')) {
+    return { passed: false, message: 'Structured quota diagnostics must retain allowlisted fields and omit project subjects' };
+  }
+  const dailyQuotaClassification = classifyProviderError(new Error(JSON.stringify({
+    error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [{
+      '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+      violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }],
+    }] },
+  })));
+  if (dailyQuotaClassification.retryable || dailyQuotaClassification.reason !== 'quota_exhausted') {
+    return { passed: false, message: 'Structured daily quota details must classify as non-retryable quota exhaustion' };
+  }
+  console.log('✔ Structured Google RPC quota diagnostics retain safe fields and redact project subjects.');
 
 
   // ===== 9. Pre-aborted document fetch rejects without starting network work =====
