@@ -213,6 +213,7 @@ async function searchOneQuery(
     signal?.removeEventListener('abort', onParentAbort);
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
       const failure = classifyHttpFailure(response.status);
       if (failure.retryable && attempt < MAX_RETRIES) {
         await abortableSleep(
@@ -263,7 +264,7 @@ export async function discoverSourcesWithTavily(
   }
 
   const normalizedQueries = [...new Set(
-    queries.map(query => String(query || '').trim()).filter(Boolean),
+    queries.map(query => String(query || '').trim().slice(0, 400)).filter(Boolean),
   )].slice(0, MAX_QUERIES_PER_RESEARCH);
   if (normalizedQueries.length === 0) {
     throw new SearchProviderError('invalid_request', 'No valid search queries were provided.');
