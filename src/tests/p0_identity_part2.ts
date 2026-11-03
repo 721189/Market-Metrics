@@ -177,13 +177,16 @@ export const p0IdentityStaticChecks: Check[] = [
     name: 'Gemini model requests have bounded HTTP deadlines and planner output budget',
     fn: async () => {
       const gemini = readSource('src/server/gemini.ts');
+      const pipeline = readSource('src/server/pipeline.ts');
+      const search = readSource('src/server/search_provider.ts');
       const requestCount = gemini.split('ai.models.generateContent({').length - 1;
       const timeoutCount = gemini.split('httpOptions: { timeout:').length - 1;
       const plannerStart = gemini.indexOf('planResearch(');
-      const plannerEnd = gemini.indexOf('discoverLiveSources(', plannerStart);
+      const plannerEnd = gemini.indexOf('synthesizeReportDetails(', plannerStart);
       const planner = gemini.slice(plannerStart, plannerEnd);
-      return requestCount === 6 &&
-        timeoutCount === 6 &&
+      return requestCount === 5 &&
+        timeoutCount === 5 &&
+        plannerEnd > plannerStart &&
         planner.includes('timeoutMs = 90_000') &&
         planner.includes('maxOutputTokens: 1024') &&
         planner.includes('thinkingLevel: ThinkingLevel.LOW') &&
@@ -193,7 +196,10 @@ export const p0IdentityStaticChecks: Check[] = [
         planner.includes("logger.info('gemini.planning_started'") &&
         planner.includes("logger.warn('gemini.planning_fallback_started'") &&
         !planner.includes('temperature:') &&
-        gemini.includes('deadline[_ ]?expired|deadline expired|504|gateway_timeout');
+        gemini.includes('deadline[_ ]?expired|deadline expired|504|gateway_timeout') &&
+        !gemini.includes('googleSearch') &&
+        pipeline.includes('discoverSourcesWithTavily') &&
+        search.includes('https://api.tavily.com/search');
     },
   },
   {
