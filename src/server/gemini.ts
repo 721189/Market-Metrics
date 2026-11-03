@@ -102,7 +102,7 @@ export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDi
   const details = Array.isArray(body?.details) ? body.details : [];
   const clean = (value: unknown, max = 120): string | undefined => {
     if (typeof value !== 'string' && typeof value !== 'number') return undefined;
-    const valueText = String(value).replace(/[\\r\\n\\t]/g, ' ').trim();
+    const valueText = String(value).replace(/[\r\n\t]/g, ' ').trim();
     return valueText ? valueText.slice(0, max) : undefined;
   };
   const collect = (values: unknown[]): string[] => [...new Set(values.map(value => clean(value)).filter((value): value is string => Boolean(value)))].slice(0, 8);
