@@ -485,7 +485,7 @@ export class ResearchPipelineManager {
     // -------------------------------------------------------------
     // STAGE 2: DISCOVERING (Live Grounded Search)
     // -------------------------------------------------------------
-    await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
+    await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Searching live web sources with Tavily across the planned query families...', 15);
 
     const liveDiscovered = await withTimeout(
       (operationSignal) => discoverSourcesWithTavily(plan.search_query_families, { signal: operationSignal }).then(result => {
