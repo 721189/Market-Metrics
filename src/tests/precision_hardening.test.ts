@@ -15,6 +15,7 @@ import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
 import { resolveModel, classifyProviderError, extractProviderErrorDiagnostics } from '../server/gemini.js';
+import { discoverSourcesWithTavily, SearchProviderError } from '../server/search_provider.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
 import type { FullResearchReport, Source, Evidence, Claim } from '../types.js';
 
@@ -377,13 +378,18 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     STORAGE_BUCKET: 'market-metrics-production.appspot.com',
     FIREBASE_AUTH_DOMAIN: 'market-metrics-production.firebaseapp.com',
     GEMINI_CREDENTIAL_SOURCE: 'env:GEMINI_API_KEY',
+    TAVILY_API_KEY: 'test-tavily-key',
   } as NodeJS.ProcessEnv;
+  const missingSearchKey = loadEnvironmentConfig({ ...productionEnvBase, TAVILY_API_KEY: '' });
+  if (!findEnvironmentViolations(missingSearchKey).some(message => message.includes('TAVILY_API_KEY'))) {
+    return { passed: false, message: 'Production readiness must require the actual TAVILY_API_KEY for source discovery' };
+  }
   const descriptorOnly = loadEnvironmentConfig({ ...productionEnvBase, GEMINI_API_KEY: '' });
   if (!findEnvironmentViolations(descriptorOnly).some(message => message.includes('GEMINI_API_KEY'))) {
     return { passed: false, message: 'A descriptive source label must not satisfy production readiness without GEMINI_API_KEY' };
   }
-  const keyPresent = loadEnvironmentConfig({ ...productionEnvBase, GEMINI_API_KEY: 'test-gemini-key' });
-  if (findEnvironmentViolations(keyPresent).some(message => message.includes('GEMINI_API_KEY'))) {
+  const keyPresent = loadEnvironmentConfig({ ...productionEnvBase, GEMINI_API_KEY: 'test-gemini-key', TAVILY_API_KEY: 'test-tavily-key' });
+  if (findEnvironmentViolations(keyPresent).some(message => message.includes('GEMINI_API_KEY') || message.includes('TAVILY_API_KEY'))) {
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
@@ -456,6 +462,80 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Structured daily quota details must classify as non-retryable quota exhaustion' };
   }
   console.log('✔ Structured Google RPC quota diagnostics retain safe fields and redact project subjects.');
+
+  // ===== 9. Tavily discovery is isolated from Gemini and validates real source URLs =====
+  let tavilyCalls = 0;
+  const tavilyResult = await discoverSourcesWithTavily(
+    ['market growth official statistics', 'competitor market share', 'market growth official statistics', 'pricing reports', 'regulatory changes', 'ignored fifth query'],
+    {
+      apiKey: 'test-tavily-key',
+      fetchImpl: async (_input, init) => {
+        tavilyCalls += 1;
+        const headers = new Headers(init?.headers);
+        if (headers.get('authorization') !== 'Bearer test-tavily-key') {
+          throw new Error('Tavily bearer token was not sent correctly');
+        }
+        const body = JSON.parse(String(init?.body || '{}'));
+        if (body.search_depth !== 'basic' || body.max_results !== 5 ||
+            body.include_answer !== false || body.include_raw_content !== false || body.include_usage !== true) {
+          throw new Error('Tavily request must use bounded, low-cost basic search parameters');
+        }
+        return new Response(JSON.stringify({
+          results: [
+            { title: 'Official market report', url: 'https://www.example.gov/report#section', content: 'Verified market evidence.' },
+            { title: 'Unsafe URL', url: 'javascript:alert(1)', content: 'Must be discarded.' },
+            { title: 'Duplicate URL', url: 'https://example.gov/report', content: 'Duplicate must be deduplicated.' },
+          ],
+          usage: { credits: 1 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    },
+  );
+  if (tavilyCalls !== 4 || tavilyResult.queriesRun !== 4 || tavilyResult.creditsUsed !== 4 ||
+      tavilyResult.sources.length !== 1 || tavilyResult.sources[0].publisher !== 'example.gov' ||
+      tavilyResult.sources[0].snippet !== 'Verified market evidence.') {
+    return { passed: false, message: 'Tavily discovery must cap queries, deduplicate valid URLs, and report actual credit use' };
+  }
+  console.log('✔ Tavily discovery performs capped basic searches, validates URLs, deduplicates sources and tracks credits.');
+
+  let quotaFailureCalls = 0;
+  let tavilyQuotaFailedFast = false;
+  try {
+    await discoverSourcesWithTavily(['first query', 'second query'], {
+      apiKey: 'test-tavily-key',
+      fetchImpl: async () => {
+        quotaFailureCalls += 1;
+        return new Response(JSON.stringify({ detail: 'usage limit reached' }), { status: 432 });
+      },
+    });
+  } catch (error) {
+    tavilyQuotaFailedFast = error instanceof SearchProviderError && error.reason === 'quota_exhausted' &&
+      error.statusCode === 432 && !error.retryable;
+  }
+  if (!tavilyQuotaFailedFast || quotaFailureCalls !== 1) {
+    return { passed: false, message: 'Tavily account quota exhaustion must stop discovery immediately without retries or subsequent queries' };
+  }
+  console.log('✔ Tavily account quota exhaustion fails fast without logging provider response bodies.');
+
+  let unauthorizedCalls = 0;
+  let tavilyAuthFailed = false;
+  try {
+    await discoverSourcesWithTavily(['query'], {
+      apiKey: 'test-tavily-key',
+      fetchImpl: async () => {
+        unauthorizedCalls += 1;
+        return new Response('{}', { status: 401 });
+      },
+    });
+  } catch (error) {
+    tavilyAuthFailed = error instanceof SearchProviderError && error.reason === 'unauthorized' &&
+      !error.message.includes('test-tavily-key');
+  }
+  if (!tavilyAuthFailed || unauthorizedCalls !== 1) {
+    return { passed: false, message: 'Tavily authentication failures must be safe, explicit and non-retryable' };
+  }
+  console.log('✔ Tavily authentication failures are explicit and do not expose API credentials.');
+
 
 
   // ===== 9. Pre-aborted document fetch rejects without starting network work =====
