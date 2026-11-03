@@ -39,6 +39,7 @@ import type {
 } from '../types.js';
 import { FinancialEngine } from './financial.js';
 import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext } from './gemini.js';
+import { discoverSourcesWithTavily } from './search_provider.js';
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
 import { RealDocumentFetcher } from './fetcher.js';
@@ -487,7 +488,15 @@ export class ResearchPipelineManager {
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Initiating live grounded source discovery across Tier 1-4 registries...', 15);
 
     const liveDiscovered = await withTimeout(
-      (operationSignal) => GeminiResearchEngine.discoverLiveSources(plan.search_query_families, operationSignal),
+      (operationSignal) => discoverSourcesWithTavily(plan.search_query_families, { signal: operationSignal }).then(result => {
+        logger.info('search.discovery_completed', 'Tavily source discovery completed', {
+          provider: 'tavily',
+          queries_run: result.queriesRun,
+          credits_used: result.creditsUsed,
+          sources_count: result.sources.length,
+        });
+        return result.sources;
+      }),
       5 * 60 * 1000,
       'DISCOVERING',
       signal
