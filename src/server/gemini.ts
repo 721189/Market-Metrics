@@ -77,6 +77,50 @@ export function resolveModel(role?: GeminiModelRole): string {
   return DEFAULT_GEMINI_MODEL;
 }
 
+export interface ProviderErrorDiagnostics {
+  provider_code?: string | number;
+  provider_status?: string;
+  detail_types: string[];
+  quota_metrics: string[];
+  quota_ids: string[];
+  quota_models: string[];
+  quota_locations: string[];
+  quota_values: string[];
+  retry_delays: string[];
+}
+
+/** Extract allowlisted Google RPC diagnostics; omit subjects, project IDs, prompts and arbitrary metadata. */
+export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDiagnostics {
+  const source = error as any;
+  let payload: any = source;
+  const rawMessage = typeof source?.message === 'string' ? source.message : '';
+  if (rawMessage) {
+    const start = rawMessage.indexOf('{');
+    if (start >= 0) { try { payload = { ...source, ...JSON.parse(rawMessage.slice(start)) }; } catch { /* retain SDK fields */ } }
+  }
+  const body = payload?.error ?? payload?.response?.data?.error ?? payload?.response?.data ?? payload;
+  const details = Array.isArray(body?.details) ? body.details : [];
+  const clean = (value: unknown, max = 120): string | undefined => {
+    if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+    const valueText = String(value).replace(/[\\r\\n\\t]/g, ' ').trim();
+    return valueText ? valueText.slice(0, max) : undefined;
+  };
+  const collect = (values: unknown[]): string[] => [...new Set(values.map(value => clean(value)).filter((value): value is string => Boolean(value)))].slice(0, 8);
+  const quotaDetails = details.filter((detail: any) => String(detail?.['@type'] || '').includes('QuotaFailure'));
+  const violations = quotaDetails.flatMap((detail: any) => Array.isArray(detail?.violations) ? detail.violations : []);
+  const retryDetails = details.filter((detail: any) => String(detail?.['@type'] || '').includes('RetryInfo'));
+  return {
+    provider_code: typeof body?.code === 'number' || typeof body?.code === 'string' ? body.code : undefined,
+    provider_status: clean(body?.status, 80),
+    detail_types: collect(details.map((detail: any) => detail?.['@type'])),
+    quota_metrics: collect(violations.map((item: any) => item?.quotaMetric)),
+    quota_ids: collect(violations.map((item: any) => item?.quotaId)),
+    quota_models: collect(violations.map((item: any) => item?.quotaDimensions?.model)),
+    quota_locations: collect(violations.map((item: any) => item?.quotaDimensions?.location)),
+    quota_values: collect(violations.map((item: any) => item?.quotaValue)),
+    retry_delays: collect(retryDetails.map((detail: any) => detail?.retryDelay)),
+  };
+}
 /**
  * Retry taxonomy (production hardening, item 13).
  *
@@ -131,6 +175,11 @@ export function classifyProviderError(err: any): RetryClassification {
   // must not be retried.
   for (const [pattern, reason] of NON_RETRYABLE_PATTERNS) {
     if (pattern.test(message)) return { retryable: false, reason };
+  }
+  const diagnostics = extractProviderErrorDiagnostics(err);
+  const quotaSignals = (diagnostics.quota_ids.join(' ') + ' ' + diagnostics.quota_metrics.join(' ')).toLowerCase();
+  if (/perday|daily|requestsperday|tokensperday/.test(quotaSignals)) {
+    return { retryable: false, reason: 'quota_exhausted' };
   }
   for (const [pattern, reason] of NON_RETRYABLE_QUOTA_PATTERNS) {
     if (pattern.test(message)) return { retryable: false, reason };
@@ -207,6 +256,11 @@ export async function executeWithRetry<T>(
 
       // Never retry a deterministic failure — fail fast with the real reason.
       if (!classification.retryable) {
+        logger.error('gemini.provider_error_diagnostics', 'Gemini provider call failed with non-retryable error', {
+          operation,
+          reason: classification.reason,
+          ...extractProviderErrorDiagnostics(err),
+        });
         logEnvelope('provider_call_failed', {
           status: 'non_retryable',
           duration_ms: Date.now() - startedAt,
@@ -227,6 +281,11 @@ export async function executeWithRetry<T>(
   }
 
   const finalReason = classifyProviderError(lastError).reason;
+  logger.error('gemini.provider_error_diagnostics', 'Gemini provider retries exhausted', {
+    operation,
+    reason: finalReason,
+    ...extractProviderErrorDiagnostics(lastError),
+  });
   logEnvelope('provider_call_failed', {
     status: 'retries_exhausted',
   }, `${operation}: ${finalReason} after ${maxRetries} attempts: ${safeProviderErrorMessage(lastError)}`);
