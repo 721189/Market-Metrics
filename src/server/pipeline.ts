@@ -483,7 +483,7 @@ export class ResearchPipelineManager {
     if (isCancelled(job, signal)) return;
 
     // -------------------------------------------------------------
-    // STAGE 2: DISCOVERING (Live Grounded Search)
+    // STAGE 2: DISCOVERING (Tavily Live Web Search)
     // -------------------------------------------------------------
     await logAndEmitEvent(job, 'stage_started', 'DISCOVERING', 'Searching live web sources with Tavily across the planned query families...', 15);
 
