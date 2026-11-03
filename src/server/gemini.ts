@@ -6,7 +6,7 @@
  * - Model C (Claim Builder): Atomic claim structuring with exact character coordinate bindings.
  * - Model D (Adversarial Verifier): Cross-verification, contradiction checking, and confidence calibration.
  * - Model E & F (Intelligence Synthesizer): Grounded dossier synthesis with zero hallucinations.
- * - Real Grounded Web Search tools for genuine live discovery.
+ * - Live source discovery is delegated to the dedicated search provider adapter.
  * - Real Cost Guard & Token Usage Metering with exponential backoff retries.
  */
 
