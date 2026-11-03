@@ -169,6 +169,7 @@ async function searchOneQuery(
     }, REQUEST_TIMEOUT_MS);
 
     let response: Response;
+    let responseText = '';
     try {
       response = await fetchImpl(TAVILY_SEARCH_URL, {
         method: 'POST',
@@ -187,6 +188,7 @@ async function searchOneQuery(
         }),
         signal: controller.signal,
       });
+      if (response.ok) responseText = await response.text();
     } catch (error) {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onParentAbort);
@@ -224,7 +226,7 @@ async function searchOneQuery(
 
     let payload: TavilySearchPayload;
     try {
-      payload = await response.json() as TavilySearchPayload;
+      payload = JSON.parse(responseText) as TavilySearchPayload;
     } catch {
       throw new SearchProviderError('invalid_response', 'Tavily returned an unreadable response.');
     }
