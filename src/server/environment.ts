@@ -142,15 +142,13 @@ export function findEnvironmentViolations(cfg: EnvironmentConfig): string[] {
     }
   }
 
-  // Allowed for standalone deploy if explicit
-  // if (cfg.name === 'production' || cfg.name === 'staging') {
-  //   if (cfg.projectId === APPLET_DEV_PROJECT_ID) {
-  //     violations.push(
-  //       `[${cfg.name}] refuses to bind the AI Studio applet (development) project `
-  //       + `'${APPLET_DEV_PROJECT_ID}'. Provision a separate Firebase project for ${cfg.name}.`,
-  //     );
-  //   }
-  // }
+  // Production and staging must never reuse the AI Studio applet project.
+  if ((cfg.name === 'production' || cfg.name === 'staging') && cfg.projectId === APPLET_DEV_PROJECT_ID) {
+    violations.push(
+      `[${cfg.name}] refuses to bind the AI Studio applet (development) project '${APPLET_DEV_PROJECT_ID}'. `
+      + `Provision a separate Firebase project for ${cfg.name}.`,
+    );
+  }
 
   // A non-production environment must never point at production resources.
   const productionProjectId = (process.env.PRODUCTION_PROJECT_ID || '').trim();

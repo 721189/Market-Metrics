@@ -42,13 +42,14 @@ import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext }
 import { discoverSourcesWithTavily } from './search_provider.js';
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
-import { RealDocumentFetcher } from './fetcher.js';
+import { RealDocumentFetcher, sanitizeFetchFailureReason } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
+import { resolveEnvironmentName } from './environment.js';
 import { logEnvelope } from './rate_limits.js';
 import {
   recordJobStarted,
@@ -74,11 +75,7 @@ export const PIPELINE_TIMEOUT_MS = 30 * 60 * 1000;
  */
 export function formatPipelineFetchFailure(error: unknown, phase: string): string {
   const err = error as (Error & { code?: unknown }) | null;
-  const rawMessage = err instanceof Error ? err.message : String(error ?? 'Unknown error');
-  const safeMessage = rawMessage
-    .replace(/[\r\n]+/g, ' ')
-    .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
-    .slice(0, 180);
+  const safeMessage = sanitizeFetchFailureReason(error);
   const code = typeof err?.code === 'string'
     ? err.code
     : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
@@ -357,6 +354,13 @@ export class ResearchPipelineManager {
     // (or after) its documents are removed.
     cancellationRegistry.abort(jobId, 'USER_CANCEL');
 
+    // Artifacts live in Firebase Storage under artifacts/{job_id}/..., not in
+    // Firestore. Delete the full prefix before removing the report that tracks
+    // source metadata, so failures remain retryable and do not orphan objects.
+    if (resolveEnvironmentName() === 'production') {
+      await new FirestoreArtifactStorage().deleteJob(jobId);
+    }
+
     await DatabaseRepository.deleteJob(jobId, userId);
     logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
     return 'deleted';
@@ -449,9 +453,15 @@ export class ResearchPipelineManager {
     let artifactStorage: import('./artifacts.js').ArtifactStorage;
     try {
       artifactStorage = new FirestoreArtifactStorage();
-    } catch {
+    } catch (error) {
+      if (resolveEnvironmentName() === 'production') {
+        logger.error('pipeline.artifact_storage_unavailable', 'Production artifact storage is unavailable; refusing ephemeral fallback', {
+          status: error instanceof Error ? error.name : 'UNKNOWN',
+        });
+        throw new Error('Production artifact storage is required; ephemeral artifact fallback is disabled.');
+      }
       artifactStorage = new InMemoryArtifactStorage();
-      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory in non-production', {});
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
@@ -615,12 +625,13 @@ export class ResearchPipelineManager {
           throw new Error(`Fetch rejected by cost governor: ${fetchReject}`);
         }
 
-        // Persist the raw + normalized artifact boundary (in-memory for now;
-        // production swaps InMemoryArtifactStorage for object storage).
-        const rawBytes = Buffer.from(fetchedDoc.extractedText, 'utf8');
+        // Preserve the actual HTTP response for parser replay/audit, separately
+        // from the normalized text used for evidence offsets.
+        const rawBytes = Buffer.from(fetchedDoc.rawContent);
         const normalizedText = fetchedDoc.extractedText;
+        const rawContentType = fetchedDoc.contentType || 'application/octet-stream';
         fetchPhase = 'artifact_raw_write';
-        const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, 'text/plain', rawBytes);
+        const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, rawContentType, rawBytes);
         fetchPhase = 'artifact_normalized_write';
         const textRef = await artifactStorage.putNormalizedText(src.id, job.id, normalizedText);
 
@@ -631,7 +642,7 @@ export class ResearchPipelineManager {
           retrieved_at: fetchedDoc.retrievedAt,
           parser_version: '1.0.0',
           normalizer_version: '1.0.0',
-          content_type: 'text/plain',
+          content_type: rawContentType,
           content_hash: fetchedDoc.contentHash,
           raw_size_bytes: rawBytes.length,
           normalized_text_size_bytes: Buffer.from(normalizedText, 'utf8').length,
@@ -662,14 +673,14 @@ export class ResearchPipelineManager {
         // Truthful failure accounting: the source is explicitly FETCH_FAILED,
         // excluded from analysis, and surfaced to the user — never silently dropped.
         src.fetch_status = 'FETCH_FAILED';
-        src.fetch_error = err?.message || 'Unknown retrieval error';
+        const failureDetail = formatPipelineFetchFailure(err, fetchPhase);
+        src.fetch_error = failureDetail;
         src.http_status = null;
         failedCount++;
-        const failureDetail = formatPipelineFetchFailure(err, fetchPhase);
         logger.warn('pipeline.fetch_failed', `FETCH_FAILED [${failureDetail}] ${src.url}`, {
           job_id: job.id,
           phase: fetchPhase,
-          status: src.fetch_error,
+          status: failureDetail,
         });
       }
     }
@@ -1353,6 +1364,17 @@ export async function startWorker() {
             cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
             controller.abort();
           }
+        } catch (error) {
+          // Unknown lease state is unsafe: stop this worker rather than risk
+          // continuing work after the lease may have expired or transferred.
+          logger.error('queue.heartbeat_failed', 'Could not verify queue lease; aborting worker to prevent duplicate processing', {
+            job_id: job!.id,
+            worker_id: workerId,
+            error_name: error instanceof Error ? error.name : 'UNKNOWN',
+          });
+          leaseOwned = false;
+          cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+          controller.abort(new Error('Queue lease heartbeat failed'));
         } finally {
           heartbeatInFlight = false;
         }

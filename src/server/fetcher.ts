@@ -47,6 +47,18 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
   }
 }
 
+/** Redact credentials and bound untrusted transport errors before they reach logs. */
+export function sanitizeFetchFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? 'Unknown fetch failure');
+  return message
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,&}]+/gi, '$1[REDACTED]')
+    .replace(/\bbearer\s+[^\s,&}]+/gi, 'Bearer [REDACTED]')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]')
+    .slice(0, 180);
+}
+
 export interface FetchedDocument {
   url: string;
   title: string;
@@ -54,6 +66,10 @@ export interface FetchedDocument {
   publisher: string;
   httpStatus: number;
   extractedText: string;
+  /** Original response bytes retained for durable, re-playable provenance. */
+  rawContent: Buffer;
+  /** Verified response Content-Type, preserved for artifact storage. */
+  contentType: string;
   paragraphs: string[];
   contentLength: number;
   publishedAt: string | null; // null = publication date could not be verified; NEVER fabricated
@@ -309,7 +325,10 @@ export class RealDocumentFetcher {
         if (Array.isArray(v)) v.forEach(val => fetchHeaders.append(k, val));
         else if (v !== undefined) fetchHeaders.append(k, v);
       });
-      const publishedAt = this.extractPublicationDate(extractedText, fetchHeaders as any);
+      const publicationDateInput = contentType.startsWith('text/html') || contentType.includes('application/xhtml+xml')
+        ? body.toString('utf8')
+        : '';
+      const publishedAt = this.extractPublicationDate(publicationDateInput, fetchHeaders as any);
       const title = this.extractTitle(extractedText, url);
       const contentHash = this.computeSha256(extractedText);
       const sourceId = 'src-' + Math.random().toString(36).substring(2, 8);
@@ -317,7 +336,10 @@ export class RealDocumentFetcher {
       return {
         url, title, domain: new URL(url).hostname,
         publisher: this.extractPublisher(extractedText, url),
-        httpStatus: status, extractedText,
+        httpStatus: status,
+        extractedText,
+        rawContent: Buffer.from(body),
+        contentType: contentType || 'application/octet-stream',
         paragraphs: this.splitParagraphs(extractedText),
         contentLength, publishedAt, contentHash, chunks,
         retrievedAt: new Date().toISOString(),
@@ -333,10 +355,7 @@ export class RealDocumentFetcher {
         throw reason;
       }
       if (err instanceof DocumentFetchTimeoutError || err instanceof DocumentFetchAbortedError || err?.name === 'AbortError') throw err;
-      const reason = (err instanceof Error ? err.message : String(err))
-        .replace(/[\\r\\n]+/g, ' ')
-        .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret)\\s*[:=]\\s*)[^\\s,&}]+/gi, '$1[REDACTED]')
-        .slice(0, 180);
+      const reason = sanitizeFetchFailureReason(err);
       const code = typeof err?.code === 'string' ? err.code : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
       logger.warn('fetcher.fetch_failed', `HTTP fetch failed [${code}]: ${reason}`, {
         url, code, reason,
@@ -527,27 +546,60 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static extractHtmlText(html: string, url: string): string | null {
+  private static extractHtmlText(html: string, _url: string): string | null {
     if (!html || html.length < 50) return null;
-    let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<svg[\s\S]*?<\/svg>/gi, ' ').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#[0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
+
+    let text = html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+      .replace(/<svg\b[\s\S]*?<\/svg>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<br\b[^>]*\/?>/gi, '\n')
+      .replace(/<\/(?:head|body|p|div|section|article|h[1-6]|li|tr|blockquote|pre|header|footer|main|table|ul|ol)\s*>/gi, '\n\n')
+      .replace(/<(?:head|body|p|div|section|article|h[1-6]|li|tr|blockquote|pre|header|footer|main|table|ul|ol)\b[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/&#(\d+);/g, (_match: string, code: string) => {
+        const point = Number(code);
+        return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+          ? String.fromCodePoint(point)
+          : ' ';
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_match: string, code: string) => {
+        const point = Number.parseInt(code, 16);
+        return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+          ? String.fromCodePoint(point)
+          : ' ';
+      })
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .map((line: string) => line.replace(/[ \t\f\v]+/g, ' ').trim())
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
     if (text.length < 100) return null;
-    const paragraphs = text.split(/\n\s*\n/).filter((p: string) => p.trim().length > 50);
+
+    const paragraphs = text.split(/\n\s*\n/).map((p: string) => p.trim()).filter((p: string) => p.length > 50);
     if (paragraphs.length === 0) return text;
-    const scored = paragraphs.map((p: string) => ({ t: p.trim(), w: p.trim().split(/\s+/).length }))
-      .filter((p: { w: number }) => p.w >= 20).sort((a: { w: number }, b: { w: number }) => b.w - a.w);
+
+    // Keep paragraph order: source sequencing can matter for tables, timelines, and claims.
+    const scored = paragraphs
+      .map((paragraph: string) => ({ t: paragraph, w: paragraph.split(/\s+/).length }))
+      .filter((paragraph: { w: number }) => paragraph.w >= 20);
     if (scored.length === 0) return text;
 
     const totalWords = scored.reduce((sum: number, paragraph: { w: number }) => sum + paragraph.w, 0);
     const selected: Array<{ t: string; w: number }> = [];
     let cumulativeWords = 0;
 
-    // Keep the original 80% content budget while guaranteeing up to three
-    // substantial paragraphs. Do not reference the collection from inside
-    // its own initializer (which triggers a temporal-dead-zone ReferenceError).
+    // Retain up to the first 80% of substantial content while guaranteeing up to three paragraphs.
     for (const paragraph of scored) {
       const nextCumulativeWords = cumulativeWords + paragraph.w;
       if (nextCumulativeWords <= totalWords * 0.8 || selected.length < 3) {
@@ -558,9 +610,11 @@ export class RealDocumentFetcher {
       }
     }
 
-    if (selected.length < 3) return paragraphs.join('\n\n');
-    return selected.map((paragraph: { t: string }) => paragraph.t).join('\n\n');
+    return selected.length >= 3
+      ? selected.map((paragraph: { t: string }) => paragraph.t).join('\n\n')
+      : paragraphs.join('\n\n');
   }
+
 
   private static parseCsvToText(csv: string): string {
     return csv.split(/\r?\n/).filter((l: string) => l.trim().length > 0).map((line: string) => line.split(',').map((c: string) => c.trim()).join('\t')).join('\n');
@@ -687,6 +741,7 @@ export class RealDocumentFetcher {
       throwIfAborted(controller.signal);
 
       if (response.status >= 300 && response.status < 400 && response.headers['location']) {
+        (response.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
         if (redirectCount >= this.MAX_REDIRECTS) throw new Error('Redirect limit exceeded (' + this.MAX_REDIRECTS + ')');
         const redirectUrl = new URL(response.headers['location']!, url).toString();
         this.validateUrl(redirectUrl);

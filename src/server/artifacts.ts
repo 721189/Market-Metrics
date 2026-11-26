@@ -56,6 +56,9 @@ export interface ArtifactStorage {
    * Delete an artifact (for cleanup / retention policies).
    */
   delete(source_id: string, job_id: string): Promise<void>;
+
+  /** Delete every raw and normalized object belonging to a job. */
+  deleteJob(job_id: string): Promise<void>;
 }
 
 /**
@@ -96,6 +99,16 @@ export class InMemoryArtifactStorage implements ArtifactStorage {
     this.textStore.delete(textRef);
     return Promise.resolve();
   }
+
+  async deleteJob(job_id: string): Promise<void> {
+    const prefix = `artifacts/${job_id}/`;
+    for (const ref of this.store.keys()) {
+      if (ref.startsWith(prefix)) this.store.delete(ref);
+    }
+    for (const ref of this.textStore.keys()) {
+      if (ref.startsWith(prefix)) this.textStore.delete(ref);
+    }
+  }
 }
 
 export function artifactRef(source_id: string, job_id: string, kind: 'raw' | 'normalized'): string {
@@ -131,8 +144,8 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
       metadata: {
         cacheControl: 'no-cache',
         metadata: {
-          source_id: storageRef.split('/')[1] || 'unknown',
-          job_id: storageRef.split('/')[2] || 'unknown',
+          job_id: storageRef.split('/')[1] || 'unknown',
+          source_id: storageRef.split('/')[2] || 'unknown',
           kind: storageRef.split('/').slice(-1)[0] || 'unknown',
         },
       },
@@ -180,8 +193,20 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
         bucket.file(normRef).delete().catch(() => {}),
       ]);
     } catch {
-      // Best-effort cleanup.
+      // Best-effort per-source cleanup.
     }
+  }
+
+  async deleteJob(job_id: string): Promise<void> {
+    const bucket = getStorageInstance();
+    const [files] = await bucket.getFiles({ prefix: `artifacts/${job_id}/` });
+    await Promise.all(files.map(async (file) => {
+      try {
+        await file.delete();
+      } catch (error) {
+        if ((error as { code?: number })?.code !== 404) throw error;
+      }
+    }));
   }
 }
 

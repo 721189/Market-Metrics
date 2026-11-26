@@ -224,8 +224,11 @@ export class FirestoreQueue {
             }
             return { owned, definitive };
         } catch (err) {
-            logger.error('queue.heartbeat_failed', `Failed to heartbeat job ${jobId}`, { job_id: jobId, status: (err as Error)?.message || String(err) });
-            return { owned: false, definitive: false };
+            logger.error('queue.heartbeat_failed', 'Failed to verify queue heartbeat ownership', {
+                job_id: jobId,
+                error_name: err instanceof Error ? err.name : 'UNKNOWN',
+            });
+            throw err;
         }
     }
 

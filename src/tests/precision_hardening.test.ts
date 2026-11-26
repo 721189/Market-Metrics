@@ -12,9 +12,11 @@
 
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
-import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError, sanitizeFetchFailureReason } from '../server/fetcher.js';
 import { formatPipelineFetchFailure } from '../server/pipeline.js';
-import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
+import { loadEnvironmentConfig, findEnvironmentViolations, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
+import { isOwnedByUser } from '../server/db.js';
+import { InMemoryArtifactStorage } from '../server/artifacts.js';
 import { resolveModel, classifyProviderError, extractProviderErrorDiagnostics } from '../server/gemini.js';
 import { discoverSourcesWithTavily, SearchProviderError } from '../server/search_provider.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
@@ -159,6 +161,45 @@ function makeReport(overrides: {
 
 export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; message: string }> {
   console.log('\n--- Running Test 10: Precision Hardening Suite ---');
+
+  // ===== Tenant ownership must fail closed for missing or mismatched owners =====
+  if (!isOwnedByUser('owner-a', 'owner-a') ||
+      isOwnedByUser('owner-b', 'owner-a') ||
+      isOwnedByUser(undefined, 'owner-a') ||
+      isOwnedByUser('', 'owner-a')) {
+    return { passed: false, message: 'Tenant ownership checks must require a non-empty exact owner match' };
+  }
+  console.log('✔ Tenant-scoped reads and writes reject missing or mismatched owner IDs.');
+
+  const redactedFetchError = sanitizeFetchFailureReason(
+    new Error('authorization: Bearer bearer-secret api_key=api-secret\r\ncontinuation'),
+  );
+  if (redactedFetchError.includes('bearer-secret') ||
+      redactedFetchError.includes('api-secret') ||
+      redactedFetchError.includes('\r') ||
+      redactedFetchError.includes('\n') ||
+      !redactedFetchError.includes('[REDACTED]')) {
+    return { passed: false, message: 'Fetcher diagnostics must redact credentials and remove multiline log injection' };
+  }
+  console.log('✔ Fetcher error diagnostics redact bearer/API credentials and flatten line breaks.');
+
+  const authorizationDiagnostic = formatPipelineFetchFailure(
+    new Error('authorization: Bearer pipeline-secret'),
+    'http_fetch',
+  );
+  if (authorizationDiagnostic.includes('pipeline-secret')) {
+    return { passed: false, message: 'Pipeline fetch failure state must not retain bearer credentials' };
+  }
+
+  const artifactStore = new InMemoryArtifactStorage();
+  const rawArtifactRef = await artifactStore.putRaw('src-cleanup', 'job-cleanup', 'https://example.com', 'text/html', Buffer.from('<p>raw</p>'));
+  const normalizedArtifactRef = await artifactStore.putNormalizedText('src-cleanup', 'job-cleanup', 'normalized text');
+  await artifactStore.deleteJob('job-cleanup');
+  if (await artifactStore.getRaw(rawArtifactRef) !== null ||
+      await artifactStore.getNormalizedText(normalizedArtifactRef) !== null) {
+    return { passed: false, message: 'Deleting a job must remove all raw and normalized artifacts for that job' };
+  }
+  console.log('✔ Job-scoped artifact cleanup removes raw and normalized objects.');
 
   // ===== 1. Cancellation state machine =====
   if (!canTransition('QUEUED', 'RUNNING')) {
@@ -316,22 +357,34 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     );
     return `<p>${words.join(' ')}</p>`;
   }).join('');
+  const htmlResponse = `<html><head><title>Evidence report</title><meta property="article:published_time" content="2024-05-01T00:00:00Z"></head><body>${htmlParagraphs}</body></html>`;
   const originalSafeFetch = (RealDocumentFetcher as any).safeFetch;
   (RealDocumentFetcher as any).safeFetch = async () => ({
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
-    body: Buffer.from(`<html><body>${htmlParagraphs}</body></html>`),
-    contentLength: Buffer.byteLength(htmlParagraphs),
+    body: Buffer.from(htmlResponse),
+    contentLength: Buffer.byteLength(htmlResponse),
   });
   try {
     const htmlDocument = await RealDocumentFetcher.fetchUrl('https://example.com/html-extraction-regression', 1000);
     if (!htmlDocument) {
       return { passed: false, message: 'Valid HTML must be fetched and extracted without a ReferenceError' };
     }
+    const extractedParagraphs = htmlDocument.extractedText.split(/\n\s*\n/).filter(Boolean);
+    if (extractedParagraphs.length !== 3) {
+      return { passed: false, message: `HTML extraction must preserve three distinct paragraphs, got ${extractedParagraphs.length}` };
+    }
     for (let paragraphIndex = 1; paragraphIndex <= 3; paragraphIndex += 1) {
-      if (!htmlDocument.extractedText.includes(`paragraph-${paragraphIndex}-evidence`)) {
-        return { passed: false, message: `HTML extraction must preserve the minimum three substantial paragraphs (missing paragraph ${paragraphIndex})` };
+      if (!extractedParagraphs[paragraphIndex - 1].includes(`paragraph-${paragraphIndex}-evidence`)) {
+        return { passed: false, message: `HTML extraction must retain source order (paragraph ${paragraphIndex})` };
       }
+    }
+    if (htmlDocument.rawContent.toString('utf8') !== htmlResponse ||
+        htmlDocument.contentType !== 'text/html; charset=utf-8') {
+      return { passed: false, message: 'Fetcher must preserve original response bytes and content type for raw artifacts' };
+    }
+    if (htmlDocument.publishedAt !== '2024-05-01T00:00:00.000Z') {
+      return { passed: false, message: 'Publication dates must be extracted from original HTML metadata before text normalization' };
     }
   } finally {
     (RealDocumentFetcher as any).safeFetch = originalSafeFetch;
@@ -439,6 +492,15 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'A non-empty actual GEMINI_API_KEY should satisfy credential-presence validation' };
   }
   console.log('✔ Gemini production credential readiness is tied to GEMINI_API_KEY.');
+
+  const appletProjectAsProduction = loadEnvironmentConfig({
+    ...productionEnvBase,
+    FIREBASE_PROJECT_ID: APPLET_DEV_PROJECT_ID,
+  });
+  if (!findEnvironmentViolations(appletProjectAsProduction).some(message => message.includes(APPLET_DEV_PROJECT_ID))) {
+    return { passed: false, message: 'Production and staging must reject the AI Studio applet Firebase project' };
+  }
+  console.log('✔ Production Firebase project isolation rejects the AI Studio applet project.');
 
   // ===== 8. Gemini model selection defaults to a currently supported stable model =====
   const savedGlobalModel = process.env.GEMINI_MODEL;

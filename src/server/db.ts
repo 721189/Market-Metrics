@@ -12,6 +12,13 @@ import type {
   FullResearchReport 
 } from '../types.js';
 
+/** Strict ownership check shared by every tenant-scoped database read/write. */
+export function isOwnedByUser(ownerUserId: unknown, userId: string): boolean {
+  return typeof userId === 'string' && userId.trim().length > 0
+    && typeof ownerUserId === 'string' && ownerUserId.trim().length > 0
+    && ownerUserId === userId;
+}
+
 export class DatabaseRepository {
   public static async saveJob(job: ResearchJob, userId: string): Promise<void> {
     if (!userId) throw new Error('[DB] userId is required for saveJob');
@@ -45,13 +52,12 @@ export class DatabaseRepository {
       const jobRef = adminDb.collection('jobs').doc(job.id);
       return await adminDb.runTransaction(async (transaction) => {
         const snapshot = await transaction.get(jobRef);
-        if (snapshot.exists) {
-          const existing = snapshot.data() as (ResearchJob & { user_id?: string }) | undefined;
-          if (existing?.user_id && existing.user_id !== userId) {
-            throw new Error('[DB] refusing to update a job owned by another user');
-          }
-          if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(existing?.status))) return false;
+        if (!snapshot.exists) return false;
+        const existing = snapshot.data() as (ResearchJob & { user_id?: string }) | undefined;
+        if (!isOwnedByUser(existing?.user_id, userId)) {
+          throw new Error('[DB] refusing to update a job without a matching owner');
         }
+        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(existing?.status))) return false;
         transaction.set(jobRef, stripUndefined({
           ...stripUndefined(job),
           user_id: userId,
@@ -74,7 +80,7 @@ export class DatabaseRepository {
       const docSnap = await adminDb.collection('jobs').doc(jobId).get();
       if (!docSnap.exists) return null;
       const data = docSnap.data() as ResearchJob & { user_id?: string };
-      if (data.user_id && data.user_id !== userId) {
+      if (!isOwnedByUser(data.user_id, userId)) {
         return null;
       }
       return data;
@@ -185,7 +191,7 @@ export class DatabaseRepository {
       const docSnap = await adminDb.collection('reports').doc(jobId).get();
       if (!docSnap.exists) return null;
       const data = docSnap.data() as FullResearchReport & { user_id?: string };
-      if (data.user_id && data.user_id !== userId) {
+      if (!isOwnedByUser(data.user_id, userId)) {
         return null;
       }
       return data;
