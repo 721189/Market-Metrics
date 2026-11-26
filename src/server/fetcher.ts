@@ -540,11 +540,26 @@ export class RealDocumentFetcher {
     const scored = paragraphs.map((p: string) => ({ t: p.trim(), w: p.trim().split(/\s+/).length }))
       .filter((p: { w: number }) => p.w >= 20).sort((a: { w: number }, b: { w: number }) => b.w - a.w);
     if (scored.length === 0) return text;
-    const tw = scored.reduce((s: number, p: { w: number }) => s + p.w, 0);
-    let cum = 0;
-    const sel = scored.filter((p: { w: number }) => { cum += p.w; return cum <= tw * 0.8 || sel.length < 3; });
-    if (sel.length < 3) return paragraphs.join('\n\n');
-    return sel.map((p: { t: string }) => p.t).join('\n\n');
+
+    const totalWords = scored.reduce((sum: number, paragraph: { w: number }) => sum + paragraph.w, 0);
+    const selected: Array<{ t: string; w: number }> = [];
+    let cumulativeWords = 0;
+
+    // Keep the original 80% content budget while guaranteeing up to three
+    // substantial paragraphs. Do not reference the collection from inside
+    // its own initializer (which triggers a temporal-dead-zone ReferenceError).
+    for (const paragraph of scored) {
+      const nextCumulativeWords = cumulativeWords + paragraph.w;
+      if (nextCumulativeWords <= totalWords * 0.8 || selected.length < 3) {
+        selected.push(paragraph);
+        cumulativeWords = nextCumulativeWords;
+      } else {
+        break;
+      }
+    }
+
+    if (selected.length < 3) return paragraphs.join('\n\n');
+    return selected.map((paragraph: { t: string }) => paragraph.t).join('\n\n');
   }
 
   private static parseCsvToText(csv: string): string {
