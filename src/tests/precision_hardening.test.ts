@@ -12,7 +12,7 @@
 
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
-import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError, sanitizeFetchFailureReason } from '../server/fetcher.js';
 import { formatPipelineFetchFailure } from '../server/pipeline.js';
 import { loadEnvironmentConfig, findEnvironmentViolations, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { isOwnedByUser } from '../server/db.js';
@@ -169,6 +169,18 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Tenant ownership checks must require a non-empty exact owner match' };
   }
   console.log('✔ Tenant-scoped reads and writes reject missing or mismatched owner IDs.');
+
+  const redactedFetchError = sanitizeFetchFailureReason(
+    new Error('authorization: Bearer bearer-secret api_key=api-secret\\r\\ncontinuation'),
+  );
+  if (redactedFetchError.includes('bearer-secret') ||
+      redactedFetchError.includes('api-secret') ||
+      redactedFetchError.includes('\\r') ||
+      redactedFetchError.includes('\\n') ||
+      !redactedFetchError.includes('[REDACTED]')) {
+    return { passed: false, message: 'Fetcher diagnostics must redact credentials and remove multiline log injection' };
+  }
+  console.log('✔ Fetcher error diagnostics redact bearer/API credentials and flatten line breaks.');
 
   // ===== 1. Cancellation state machine =====
   if (!canTransition('QUEUED', 'RUNNING')) {

@@ -48,6 +48,18 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
 }
 
 export interface FetchedDocument {
+/** Redact credentials and bound untrusted transport errors before they reach logs. */
+export function sanitizeFetchFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? 'Unknown fetch failure');
+  return message
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,&}]+/gi, '$1[REDACTED]')
+    .replace(/\bbearer\s+[^\s,&}]+/gi, 'Bearer [REDACTED]')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]')
+    .slice(0, 180);
+}
+
   url: string;
   title: string;
   domain: string;
@@ -343,10 +355,7 @@ export class RealDocumentFetcher {
         throw reason;
       }
       if (err instanceof DocumentFetchTimeoutError || err instanceof DocumentFetchAbortedError || err?.name === 'AbortError') throw err;
-      const reason = (err instanceof Error ? err.message : String(err))
-        .replace(/[\\r\\n]+/g, ' ')
-        .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret)\\s*[:=]\\s*)[^\\s,&}]+/gi, '$1[REDACTED]')
-        .slice(0, 180);
+      const reason = sanitizeFetchFailureReason(err);
       const code = typeof err?.code === 'string' ? err.code : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
       logger.warn('fetcher.fetch_failed', `HTTP fetch failed [${code}]: ${reason}`, {
         url, code, reason,
@@ -732,6 +741,7 @@ export class RealDocumentFetcher {
       throwIfAborted(controller.signal);
 
       if (response.status >= 300 && response.status < 400 && response.headers['location']) {
+        (response.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
         if (redirectCount >= this.MAX_REDIRECTS) throw new Error('Redirect limit exceeded (' + this.MAX_REDIRECTS + ')');
         const redirectUrl = new URL(response.headers['location']!, url).toString();
         this.validateUrl(redirectUrl);
