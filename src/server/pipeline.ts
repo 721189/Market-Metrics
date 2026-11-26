@@ -67,6 +67,27 @@ pipelineEmitter.setMaxListeners(500);
 export const PIPELINE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
+ * Render a bounded, credential-redacted failure detail for one source-fetch
+ * pipeline attempt. Keep the phase in the message so production logs reveal
+ * whether failure occurred during HTTP retrieval, cost checks, or artifact
+ * persistence even when structured log fields are unavailable.
+ */
+export function formatPipelineFetchFailure(error: unknown, phase: string): string {
+  const err = error as (Error & { code?: unknown }) | null;
+  const rawMessage = err instanceof Error ? err.message : String(error ?? 'Unknown error');
+  const safeMessage = rawMessage
+    .replace(/[\\r\\n]+/g, ' ')
+    .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\\s*[:=]\\s*)[^\\s,&}]+/gi, '$1[REDACTED]')
+    .slice(0, 180);
+  const code = typeof err?.code === 'string'
+    ? err.code
+    : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
+  const safePhase = String(phase || 'unknown').replace(/[^a-z0-9_.-]/gi, '_').slice(0, 48);
+  return `${safePhase} failed [${code}]: ${safeMessage}`;
+}
+
+
+/**
  * Runs an async operation with a hard deadline. Rejects with a TimeoutError
  * if the operation does not settle before `ms` milliseconds. The returned
  * promise is tied to `signal` so an external abort also rejects it.
@@ -577,6 +598,7 @@ export class ResearchPipelineManager {
 
     for (const src of sources) {
       if (isCancelled(job, signal)) return;
+      let fetchPhase = 'http_fetch';
       try {
         const fetchedDoc = await RealDocumentFetcher.fetchUrl(src.url, 5000, signal);
         if (isCancelled(job, signal)) return;
@@ -586,6 +608,7 @@ export class ResearchPipelineManager {
         }
 
         // Cost governor: enforce per-request caps and document size budget.
+        fetchPhase = 'cost_governor';
         const estimatedSize = fetchedDoc.extractedText.length;
         const fetchReject = costGovernor.allowFetch(estimatedSize);
         if (fetchReject) {
@@ -596,7 +619,9 @@ export class ResearchPipelineManager {
         // production swaps InMemoryArtifactStorage for object storage).
         const rawBytes = Buffer.from(fetchedDoc.extractedText, 'utf8');
         const normalizedText = fetchedDoc.extractedText;
+        fetchPhase = 'artifact_raw_write';
         const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, 'text/plain', rawBytes);
+        fetchPhase = 'artifact_normalized_write';
         const textRef = await artifactStorage.putNormalizedText(src.id, job.id, normalizedText);
 
         const artifact: RetrievalArtifact = {
@@ -615,6 +640,7 @@ export class ResearchPipelineManager {
           raw_available: true,
           normalized_text_available: true,
         };
+        fetchPhase = 'artifact_metadata';
         sourceArtifacts.set(src.id, artifact);
         costGovernor.recordArtifact(artifact);
         costGovernor.recordFetch(rawBytes.length, 0.01);
@@ -639,8 +665,10 @@ export class ResearchPipelineManager {
         src.fetch_error = err?.message || 'Unknown retrieval error';
         src.http_status = null;
         failedCount++;
-        logger.warn('pipeline.fetch_failed', `FETCH_FAILED ${src.url}`, {
+        const failureDetail = formatPipelineFetchFailure(err, fetchPhase);
+        logger.warn('pipeline.fetch_failed', `FETCH_FAILED [${failureDetail}] ${src.url}`, {
           job_id: job.id,
+          phase: fetchPhase,
           status: src.fetch_error,
         });
       }
