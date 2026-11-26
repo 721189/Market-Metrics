@@ -171,12 +171,12 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   console.log('✔ Tenant-scoped reads and writes reject missing or mismatched owner IDs.');
 
   const redactedFetchError = sanitizeFetchFailureReason(
-    new Error('authorization: Bearer bearer-secret api_key=api-secret\\r\\ncontinuation'),
+    new Error('authorization: Bearer bearer-secret api_key=api-secret\r\ncontinuation'),
   );
   if (redactedFetchError.includes('bearer-secret') ||
       redactedFetchError.includes('api-secret') ||
-      redactedFetchError.includes('\\r') ||
-      redactedFetchError.includes('\\n') ||
+      redactedFetchError.includes('\r') ||
+      redactedFetchError.includes('\n') ||
       !redactedFetchError.includes('[REDACTED]')) {
     return { passed: false, message: 'Fetcher diagnostics must redact credentials and remove multiline log injection' };
   }
