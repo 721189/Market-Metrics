@@ -288,7 +288,7 @@ export class RealDocumentFetcher {
 
       const { status, headers, body, contentLength } = fetchResult;
       if (status !== 200) {
-        logger.warn('fetcher.non_200', 'Non-200 response', { url, status });
+        logger.warn('fetcher.non_200', `Non-200 response [HTTP ${status}]`, { url, status });
         return null;
       }
 
@@ -333,8 +333,13 @@ export class RealDocumentFetcher {
         throw reason;
       }
       if (err instanceof DocumentFetchTimeoutError || err instanceof DocumentFetchAbortedError || err?.name === 'AbortError') throw err;
-      logger.warn('fetcher.fetch_failed', 'HTTP fetch failed', {
-        url, reason: err instanceof Error ? err.message : String(err),
+      const reason = (err instanceof Error ? err.message : String(err))
+        .replace(/[\\r\\n]+/g, ' ')
+        .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret)\\s*[:=]\\s*)[^\\s,&}]+/gi, '$1[REDACTED]')
+        .slice(0, 180);
+      const code = typeof err?.code === 'string' ? err.code : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
+      logger.warn('fetcher.fetch_failed', `HTTP fetch failed [${code}]: ${reason}`, {
+        url, code, reason,
       });
       return null;
     } finally {
@@ -554,10 +559,32 @@ export class RealDocumentFetcher {
   }
 
   private static async extractPdfText(body: Buffer): Promise<string> {
+    let pdfParseModule: any;
     try {
-      const pdfParse = require('pdf-parse');
-      if (typeof pdfParse === 'function') { const data = await pdfParse(body); return this.normalizeText(data.text || ''); }
-    } catch { /* not available */ }
+      pdfParseModule = require('pdf-parse');
+    } catch {
+      pdfParseModule = null;
+    }
+
+    // pdf-parse v2 exposes the PDFParse class; v1 exposed a callable function.
+    // The project is pinned to v2, so prefer its documented class API and
+    // always release its worker/document resources.
+    if (typeof pdfParseModule?.PDFParse === 'function') {
+      const parser = new pdfParseModule.PDFParse({ data: body });
+      try {
+        const data = await parser.getText();
+        return this.normalizeText(data?.text || '');
+      } finally {
+        await parser.destroy();
+      }
+    }
+
+    // Backward compatibility if the dependency is deliberately downgraded to v1.
+    if (typeof pdfParseModule === 'function') {
+      const data = await pdfParseModule(body);
+      return this.normalizeText(data?.text || '');
+    }
+
     try {
       const pdfjs = require('pdfjs-dist');
       if (typeof pdfjs !== 'undefined' && typeof pdfjs.getDocument === 'function') {
@@ -690,17 +717,41 @@ export class RealDocumentFetcher {
     }
   }
 
-  private static async resolveIp(hostname: string): Promise<string | null> {
-    let results: Array<{ address: string }>;
-    try {
-      results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
-    } catch (err: any) {
-      throw new Error('DNS resolution failed for ' + hostname + ': ' + (err?.message || String(err)));
+  /**
+   * Render services currently use IPv4 for outbound internet connectivity.
+   * DNS answers can be returned IPv6-first, so select a public IPv4 address
+   * explicitly instead of pinning an unreachable AAAA record and failing the
+   * source. Keep the SSRF check across every answer, not just the chosen A record.
+   */
+  public static selectPublicIpv4Address(
+    records: Array<{ address: string; family: number }>,
+    hostname: string,
+  ): string {
+    if (!records.length) {
+      throw new Error('DNS resolution returned no addresses for ' + hostname);
     }
-    if (!results.length) throw new Error('DNS resolution returned no addresses for ' + hostname);
-    const addresses = results.map(record => record.address);
-    const privateAddress = addresses.find(address => this.isPrivateIp(address));
-    if (privateAddress) throw new Error('SSRF blocked: hostname ' + hostname + ' resolves to a private/internal address');
-    return addresses[0] || null;
+
+    const privateAddress = records.find(record => this.isPrivateIp(record.address));
+    if (privateAddress) {
+      throw new Error('SSRF blocked: hostname ' + hostname + ' resolves to a private/internal address');
+    }
+
+    const ipv4 = records.find(record => record.family === 4 && !this.isPrivateIp(record.address));
+    if (!ipv4) {
+      throw new Error('DNS resolution returned no public IPv4 address for ' + hostname + '; outbound document retrieval requires IPv4 connectivity');
+    }
+    return ipv4.address;
+  }
+
+  private static async resolveIp(hostname: string): Promise<string | null> {
+    let results: Array<{ address: string; family: number }>;
+    try {
+      results = await dns.promises.lookup(hostname, { all: true, order: 'ipv4first' });
+    } catch (err: any) {
+      const failure = new Error('DNS resolution failed for ' + hostname + ': ' + (err?.message || String(err))) as Error & { code?: string };
+      failure.code = typeof err?.code === 'string' ? err.code : 'DNS_LOOKUP_FAILED';
+      throw failure;
+    }
+    return this.selectPublicIpv4Address(results, hostname);
   }
 }

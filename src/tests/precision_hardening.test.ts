@@ -555,6 +555,48 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Fetch cancellation and timeout errors are distinguishable.');
 
+  // ===== 10. Outbound document fetch selects IPv4 on IPv4-only hosts =====
+  const selectedIpv4 = RealDocumentFetcher.selectPublicIpv4Address(
+    [
+      { address: '2606:4700:4700::1111', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ],
+    'dualstack.example',
+  );
+  if (selectedIpv4 !== '93.184.216.34') {
+    return { passed: false, message: 'A dual-stack hostname must select IPv4 even when its IPv6 answer appears first' };
+  }
+
+  let ipv6OnlyRejected = false;
+  try {
+    RealDocumentFetcher.selectPublicIpv4Address(
+      [{ address: '2606:4700:4700::1111', family: 6 }],
+      'ipv6-only.example',
+    );
+  } catch (error) {
+    ipv6OnlyRejected = error instanceof Error && error.message.includes('no public IPv4 address');
+  }
+  if (!ipv6OnlyRejected) {
+    return { passed: false, message: 'IPv6-only destinations must fail explicitly on the IPv4-only production egress path' };
+  }
+
+  let privateAddressRejected = false;
+  try {
+    RealDocumentFetcher.selectPublicIpv4Address(
+      [
+        { address: '10.0.0.8', family: 4 },
+        { address: '93.184.216.34', family: 4 },
+      ],
+      'unsafe.example',
+    );
+  } catch (error) {
+    privateAddressRejected = error instanceof Error && error.message.includes('SSRF blocked');
+  }
+  if (!privateAddressRejected) {
+    return { passed: false, message: 'IPv4 selection must retain the all-answer private-address SSRF guard' };
+  }
+  console.log('✔ Outbound fetch prefers public IPv4, rejects IPv6-only hosts clearly, and preserves SSRF checks.');
+
   // ===== 10. Golden benchmark fixture must itself satisfy the citation graph =====
 
 
