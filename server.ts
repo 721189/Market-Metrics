@@ -88,7 +88,7 @@ dotenv.config();
     console.log('[bootstrap] GOOGLE_APPLICATION_CREDENTIALS written to', tmpPath);
   } else {
     console.warn('[bootstrap] FIREBASE_SERVICE_ACCOUNT is set but could not be parsed as JSON or base64-encoded JSON.');
-    console.warn('[bootstrap] First 80 chars:', raw.substring(0, 80));
+    console.warn('[bootstrap] Credential contents are intentionally omitted from logs.');
   }
 })();
 

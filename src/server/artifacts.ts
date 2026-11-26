@@ -131,8 +131,8 @@ export class FirestoreArtifactStorage implements ArtifactStorage {
       metadata: {
         cacheControl: 'no-cache',
         metadata: {
-          source_id: storageRef.split('/')[1] || 'unknown',
-          job_id: storageRef.split('/')[2] || 'unknown',
+          job_id: storageRef.split('/')[1] || 'unknown',
+          source_id: storageRef.split('/')[2] || 'unknown',
           kind: storageRef.split('/').slice(-1)[0] || 'unknown',
         },
       },

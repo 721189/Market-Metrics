@@ -49,6 +49,7 @@ import { CitationGraphValidator } from './citation_graph.js';
 import { InMemoryArtifactStorage, FirestoreArtifactStorage, artifactRef, RetrievalArtifact } from './artifacts.js';
 import { CostGovernor } from './cost_governor.js';
 import { logger } from './logger.js';
+import { resolveEnvironmentName } from './environment.js';
 import { logEnvelope } from './rate_limits.js';
 import {
   recordJobStarted,
@@ -449,9 +450,15 @@ export class ResearchPipelineManager {
     let artifactStorage: import('./artifacts.js').ArtifactStorage;
     try {
       artifactStorage = new FirestoreArtifactStorage();
-    } catch {
+    } catch (error) {
+      if (resolveEnvironmentName() === 'production') {
+        logger.error('pipeline.artifact_storage_unavailable', 'Production artifact storage is unavailable; refusing ephemeral fallback', {
+          status: error instanceof Error ? error.name : 'UNKNOWN',
+        });
+        throw new Error('Production artifact storage is required; ephemeral artifact fallback is disabled.');
+      }
       artifactStorage = new InMemoryArtifactStorage();
-      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory', {});
+      logger.warn('pipeline.artifact_fallback', 'Firestore artifact storage unavailable - using in-memory in non-production', {});
     }
     const sourceArtifacts = new Map<string, RetrievalArtifact>();
 
@@ -615,12 +622,13 @@ export class ResearchPipelineManager {
           throw new Error(`Fetch rejected by cost governor: ${fetchReject}`);
         }
 
-        // Persist the raw + normalized artifact boundary (in-memory for now;
-        // production swaps InMemoryArtifactStorage for object storage).
-        const rawBytes = Buffer.from(fetchedDoc.extractedText, 'utf8');
+        // Preserve the actual HTTP response for parser replay/audit, separately
+        // from the normalized text used for evidence offsets.
+        const rawBytes = Buffer.from(fetchedDoc.rawContent);
         const normalizedText = fetchedDoc.extractedText;
+        const rawContentType = fetchedDoc.contentType || 'application/octet-stream';
         fetchPhase = 'artifact_raw_write';
-        const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, 'text/plain', rawBytes);
+        const rawRef = await artifactStorage.putRaw(src.id, job.id, src.url, rawContentType, rawBytes);
         fetchPhase = 'artifact_normalized_write';
         const textRef = await artifactStorage.putNormalizedText(src.id, job.id, normalizedText);
 
@@ -631,7 +639,7 @@ export class ResearchPipelineManager {
           retrieved_at: fetchedDoc.retrievedAt,
           parser_version: '1.0.0',
           normalizer_version: '1.0.0',
-          content_type: 'text/plain',
+          content_type: rawContentType,
           content_hash: fetchedDoc.contentHash,
           raw_size_bytes: rawBytes.length,
           normalized_text_size_bytes: Buffer.from(normalizedText, 'utf8').length,
@@ -1353,6 +1361,17 @@ export async function startWorker() {
             cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
             controller.abort();
           }
+        } catch (error) {
+          // Unknown lease state is unsafe: stop this worker rather than risk
+          // continuing work after the lease may have expired or transferred.
+          logger.error('queue.heartbeat_failed', 'Could not verify queue lease; aborting worker to prevent duplicate processing', {
+            job_id: job!.id,
+            worker_id: workerId,
+            error_name: error instanceof Error ? error.name : 'UNKNOWN',
+          });
+          leaseOwned = false;
+          cancellationRegistry.abort(researchJobId, 'LEASE_LOST');
+          controller.abort(new Error('Queue lease heartbeat failed'));
         } finally {
           heartbeatInFlight = false;
         }
