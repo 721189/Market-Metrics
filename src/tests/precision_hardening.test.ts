@@ -13,6 +13,7 @@
 import { canTransition, assertTransition, cancellationRegistry } from '../server/job_state.js';
 import { CitationGraphValidator } from '../server/citation_graph.js';
 import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutError } from '../server/fetcher.js';
+import { formatPipelineFetchFailure } from '../server/pipeline.js';
 import { loadEnvironmentConfig, findEnvironmentViolations } from '../server/environment.js';
 import { resolveModel, classifyProviderError, extractProviderErrorDiagnostics } from '../server/gemini.js';
 import { discoverSourcesWithTavily, SearchProviderError } from '../server/search_provider.js';
@@ -291,6 +292,22 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Unicode dash normalization did not map to the verbatim original' };
   }
   console.log('✔ Exact normalized->original mapping returns the VERBATIM source slice, never the mutated query.');
+
+  // ===== Pipeline fetch failure diagnostics are phase-specific and redact credentials =====
+  const fetchDiagnostic = formatPipelineFetchFailure(
+    Object.assign(new Error('Permission denied for artifact upload; api_key=do-not-log-this-secret'), { code: 'EACCES' }),
+    'artifact_raw_write',
+  );
+  if (!fetchDiagnostic.includes('artifact_raw_write failed [EACCES]') ||
+      !fetchDiagnostic.includes('[REDACTED]') ||
+      fetchDiagnostic.includes('do-not-log-this-secret')) {
+    return { passed: false, message: 'Pipeline fetch diagnostics must expose phase/error code while redacting credentials' };
+  }
+  const unknownDiagnostic = formatPipelineFetchFailure('unexpected failure', 'http_fetch');
+  if (!unknownDiagnostic.includes('http_fetch failed [UNKNOWN]') || !unknownDiagnostic.includes('unexpected failure')) {
+    return { passed: false, message: 'Pipeline fetch diagnostics must safely handle non-Error failures' };
+  }
+  console.log('✔ Pipeline source failures report their failing phase and safe error detail.');
 
   // ===== HTML extraction regression: select substantial paragraphs without self-reference =====
   const htmlParagraphs = Array.from({ length: 3 }, (_, paragraphIndex) => {
