@@ -16,6 +16,7 @@ import { RealDocumentFetcher, DocumentFetchAbortedError, DocumentFetchTimeoutErr
 import { formatPipelineFetchFailure } from '../server/pipeline.js';
 import { loadEnvironmentConfig, findEnvironmentViolations, APPLET_DEV_PROJECT_ID } from '../server/environment.js';
 import { isOwnedByUser } from '../server/db.js';
+import { InMemoryArtifactStorage } from '../server/artifacts.js';
 import { resolveModel, classifyProviderError, extractProviderErrorDiagnostics } from '../server/gemini.js';
 import { discoverSourcesWithTavily, SearchProviderError } from '../server/search_provider.js';
 import { BENCHMARK_EV_CHARGING } from '../server/benchmarks.js';
@@ -181,6 +182,24 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     return { passed: false, message: 'Fetcher diagnostics must redact credentials and remove multiline log injection' };
   }
   console.log('✔ Fetcher error diagnostics redact bearer/API credentials and flatten line breaks.');
+
+  const authorizationDiagnostic = formatPipelineFetchFailure(
+    new Error('authorization: Bearer pipeline-secret'),
+    'http_fetch',
+  );
+  if (authorizationDiagnostic.includes('pipeline-secret')) {
+    return { passed: false, message: 'Pipeline fetch failure state must not retain bearer credentials' };
+  }
+
+  const artifactStore = new InMemoryArtifactStorage();
+  const rawArtifactRef = await artifactStore.putRaw('src-cleanup', 'job-cleanup', 'https://example.com', 'text/html', Buffer.from('<p>raw</p>'));
+  const normalizedArtifactRef = await artifactStore.putNormalizedText('src-cleanup', 'job-cleanup', 'normalized text');
+  await artifactStore.deleteJob('job-cleanup');
+  if (await artifactStore.getRaw(rawArtifactRef) !== null ||
+      await artifactStore.getNormalizedText(normalizedArtifactRef) !== null) {
+    return { passed: false, message: 'Deleting a job must remove all raw and normalized artifacts for that job' };
+  }
+  console.log('✔ Job-scoped artifact cleanup removes raw and normalized objects.');
 
   // ===== 1. Cancellation state machine =====
   if (!canTransition('QUEUED', 'RUNNING')) {

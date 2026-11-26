@@ -42,7 +42,7 @@ import { GeminiResearchEngine, SynthesisClaimContext, SynthesisEvidenceContext }
 import { discoverSourcesWithTavily } from './search_provider.js';
 import { DatabaseRepository } from './db.js';
 import { researchQueue, QueueJob } from './firestore_queue.js';
-import { RealDocumentFetcher } from './fetcher.js';
+import { RealDocumentFetcher, sanitizeFetchFailureReason } from './fetcher.js';
 import { RealClaimVerifier, NumericNormalizer } from './claim_engine.js';
 import { canTransition, cancellationRegistry, TERMINAL_JOB_STATUSES } from './job_state.js';
 import { CitationGraphValidator } from './citation_graph.js';
@@ -75,11 +75,7 @@ export const PIPELINE_TIMEOUT_MS = 30 * 60 * 1000;
  */
 export function formatPipelineFetchFailure(error: unknown, phase: string): string {
   const err = error as (Error & { code?: unknown }) | null;
-  const rawMessage = err instanceof Error ? err.message : String(error ?? 'Unknown error');
-  const safeMessage = rawMessage
-    .replace(/[\r\n]+/g, ' ')
-    .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
-    .slice(0, 180);
+  const safeMessage = sanitizeFetchFailureReason(error);
   const code = typeof err?.code === 'string'
     ? err.code
     : (typeof err?.name === 'string' ? err.name : 'UNKNOWN');
@@ -357,6 +353,13 @@ export class ResearchPipelineManager {
     // Defensive: ensure no lingering worker keeps writing to this job while
     // (or after) its documents are removed.
     cancellationRegistry.abort(jobId, 'USER_CANCEL');
+
+    // Artifacts live in Firebase Storage under artifacts/{job_id}/..., not in
+    // Firestore. Delete the full prefix before removing the report that tracks
+    // source metadata, so failures remain retryable and do not orphan objects.
+    if (resolveEnvironmentName() === 'production') {
+      await new FirestoreArtifactStorage().deleteJob(jobId);
+    }
 
     await DatabaseRepository.deleteJob(jobId, userId);
     logger.info('pipeline.job_deleted', `Job ${jobId} deleted by user`, { user_id: userId });
@@ -670,14 +673,14 @@ export class ResearchPipelineManager {
         // Truthful failure accounting: the source is explicitly FETCH_FAILED,
         // excluded from analysis, and surfaced to the user — never silently dropped.
         src.fetch_status = 'FETCH_FAILED';
-        src.fetch_error = err?.message || 'Unknown retrieval error';
+        const failureDetail = formatPipelineFetchFailure(err, fetchPhase);
+        src.fetch_error = failureDetail;
         src.http_status = null;
         failedCount++;
-        const failureDetail = formatPipelineFetchFailure(err, fetchPhase);
         logger.warn('pipeline.fetch_failed', `FETCH_FAILED [${failureDetail}] ${src.url}`, {
           job_id: job.id,
           phase: fetchPhase,
-          status: src.fetch_error,
+          status: failureDetail,
         });
       }
     }
