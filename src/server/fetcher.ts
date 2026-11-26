@@ -47,7 +47,6 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
   }
 }
 
-export interface FetchedDocument {
 /** Redact credentials and bound untrusted transport errors before they reach logs. */
 export function sanitizeFetchFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error ?? 'Unknown fetch failure');
@@ -60,6 +59,7 @@ export function sanitizeFetchFailureReason(error: unknown): string {
     .slice(0, 180);
 }
 
+export interface FetchedDocument {
   url: string;
   title: string;
   domain: string;
