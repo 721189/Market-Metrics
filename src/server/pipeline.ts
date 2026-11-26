@@ -76,8 +76,8 @@ export function formatPipelineFetchFailure(error: unknown, phase: string): strin
   const err = error as (Error & { code?: unknown }) | null;
   const rawMessage = err instanceof Error ? err.message : String(error ?? 'Unknown error');
   const safeMessage = rawMessage
-    .replace(/[\\r\\n]+/g, ' ')
-    .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\\s*[:=]\\s*)[^\\s,&}]+/gi, '$1[REDACTED]')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|secret|private[_-]?key)\s*[:=]\s*)[^\s,&}]+/gi, '$1[REDACTED]')
     .slice(0, 180);
   const code = typeof err?.code === 'string'
     ? err.code
