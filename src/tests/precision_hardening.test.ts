@@ -292,6 +292,35 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
   }
   console.log('✔ Exact normalized->original mapping returns the VERBATIM source slice, never the mutated query.');
 
+  // ===== HTML extraction regression: select substantial paragraphs without self-reference =====
+  const htmlParagraphs = Array.from({ length: 3 }, (_, paragraphIndex) => {
+    const words = Array.from({ length: 24 }, (_, wordIndex) =>
+      wordIndex === 0 ? `paragraph-${paragraphIndex + 1}-evidence` : `content${paragraphIndex}-${wordIndex}`
+    );
+    return `<p>${words.join(' ')}</p>`;
+  }).join('');
+  const originalSafeFetch = (RealDocumentFetcher as any).safeFetch;
+  (RealDocumentFetcher as any).safeFetch = async () => ({
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+    body: Buffer.from(`<html><body>${htmlParagraphs}</body></html>`),
+    contentLength: Buffer.byteLength(htmlParagraphs),
+  });
+  try {
+    const htmlDocument = await RealDocumentFetcher.fetchUrl('https://example.com/html-extraction-regression', 1000);
+    if (!htmlDocument) {
+      return { passed: false, message: 'Valid HTML must be fetched and extracted without a ReferenceError' };
+    }
+    for (let paragraphIndex = 1; paragraphIndex <= 3; paragraphIndex += 1) {
+      if (!htmlDocument.extractedText.includes(`paragraph-${paragraphIndex}-evidence`)) {
+        return { passed: false, message: `HTML extraction must preserve the minimum three substantial paragraphs (missing paragraph ${paragraphIndex})` };
+      }
+    }
+  } finally {
+    (RealDocumentFetcher as any).safeFetch = originalSafeFetch;
+  }
+  console.log('✔ HTML extraction handles minimum-paragraph selection without a temporal-dead-zone error.');
+
   // ===== 5. Unknown publication date = null =====
   const noDateHtml = '<html><head><title>No dates here</title></head><body><p>Plain content without metadata.</p></body></html>';
   const emptyHeaders = new Headers();
