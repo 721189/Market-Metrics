@@ -339,7 +339,7 @@ export async function runPrecisionHardeningTest(): Promise<{ passed: boolean; me
     if (!htmlDocument) {
       return { passed: false, message: 'Valid HTML must be fetched and extracted without a ReferenceError' };
     }
-    const extractedParagraphs = htmlDocument.extractedText.split(/\\n\\s*\\n/).filter(Boolean);
+    const extractedParagraphs = htmlDocument.extractedText.split(/\n\s*\n/).filter(Boolean);
     if (extractedParagraphs.length !== 3) {
       return { passed: false, message: `HTML extraction must preserve three distinct paragraphs, got ${extractedParagraphs.length}` };
     }
