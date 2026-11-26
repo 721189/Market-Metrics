@@ -44,6 +44,8 @@ export interface EnvironmentConfig {
    * The secret itself is never read into this structure.
    */
   geminiCredentialSource: string;
+  /** Whether the Tavily search credential is configured (never the secret). */
+  searchCredentialSource: string;
   /** Baseline log level; production defaults to `info`, dev to `debug`. */
   logLevel: LogLevel;
   /** Whether the Vite dev/static middleware may be mounted. */
@@ -120,6 +122,7 @@ export function loadEnvironmentConfig(
     // Derived only from the actual secret consumed by getGemini().
     // GEMINI_CREDENTIAL_SOURCE is descriptive metadata, not a credential.
     geminiCredentialSource: env.GEMINI_API_KEY?.trim() ? 'env:GEMINI_API_KEY' : 'unset',
+    searchCredentialSource: env.TAVILY_API_KEY?.trim() ? 'env:TAVILY_API_KEY' : 'unset',
     logLevel: (name === 'development' || name === 'test' ? 'debug' : 'info') as LogLevel,
     allowViteDevServer: name !== 'production',
   };
@@ -162,6 +165,10 @@ export function findEnvironmentViolations(cfg: EnvironmentConfig): string[] {
     violations.push('[production] GEMINI_API_KEY must be configured with a non-empty value; GEMINI_CREDENTIAL_SOURCE is not a credential.');
   }
 
+  if (cfg.name === 'production' && cfg.searchCredentialSource !== 'env:TAVILY_API_KEY') {
+    violations.push('[production] TAVILY_API_KEY must be configured with a non-empty value for live source discovery.');
+  }
+
   if (cfg.name === 'production' && cfg.allowViteDevServer) {
     violations.push('[production] the Vite dev middleware must not be mounted in production.');
   }
@@ -190,5 +197,5 @@ export function validateEnvironmentOrThrow(
 /** One-line, secret-free description for boot logs and readiness payloads. */
 export function describeEnvironment(cfg: EnvironmentConfig): string {
   return `env=${cfg.name} project=${cfg.projectId} database=${cfg.firestoreDatabaseId} `
-    + `bucket=${cfg.storageBucket} gemini=${cfg.geminiCredentialSource}`;
+    + `bucket=${cfg.storageBucket} gemini=${cfg.geminiCredentialSource} search=${cfg.searchCredentialSource}`;
 }

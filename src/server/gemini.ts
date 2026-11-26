@@ -6,7 +6,7 @@
  * - Model C (Claim Builder): Atomic claim structuring with exact character coordinate bindings.
  * - Model D (Adversarial Verifier): Cross-verification, contradiction checking, and confidence calibration.
  * - Model E & F (Intelligence Synthesizer): Grounded dossier synthesis with zero hallucinations.
- * - Real Grounded Web Search tools for genuine live discovery.
+ * - Live source discovery is delegated to the dedicated search provider adapter.
  * - Real Cost Guard & Token Usage Metering with exponential backoff retries.
  */
 
@@ -445,61 +445,6 @@ Return a strict JSON object matching:
         status: err?.status || err?.code || err?.name || 'provider_error',
       });
       throw new Error('Research planning failed: ' + (detail || 'Gemini service is currently unavailable.'));
-    }
-  }
-
-  /**
-   * Search & Discovery using Real Google Search Grounding Tool
-   */
-  public static async discoverLiveSources(
-    queries: string[],
-    signal?: AbortSignal
-  ): Promise<Array<{ title: string; url: string; snippet: string; publisher: string }>> {
-    const ai = getGemini();
-    if (!ai) {
-      throw new Error("Gemini API key required.");
-    }
-
-    const combinedQuery = queries.slice(0, 4).join(' | ');
-    const prompt = `Perform a comprehensive web search across these query families: "${combinedQuery}". Discover 5-8 authoritative, high-quality sources (reports, academic journals, official policy documents, financial filings). Return a JSON array of discovered sources, with details.`;
-
-    try {
-      return await executeWithRetry(async () => {
-        if (signal?.aborted) throw new Error('Operation aborted');
-
-        const response = await ai.models.generateContent({
-          model: resolveModel('DISCOVERY'),
-          contents: prompt,
-          config: {
-            abortSignal: signal,
-            httpOptions: { timeout: 90_000 },
-            tools: [{ googleSearch: {} }],
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  url: { type: Type.STRING },
-                  snippet: { type: Type.STRING },
-                  publisher: { type: Type.STRING },
-                },
-                required: ["title", "url", "snippet", "publisher"]
-              }
-            }
-          },
-        });
-
-        const text = response.text || '[]';
-        return JSON.parse(text);
-      }, { maxRetries: 2, signal });
-    } catch (e: any) {
-      const detail = safeProviderErrorMessage(e);
-      logger.error('gemini.discovery_failed', 'Discovery search failed: ' + detail, {
-        status: e?.status || e?.code || e?.name || 'provider_error',
-      });
-      throw new Error(`Web search and source discovery failed: ${detail || 'Google Search Grounding Service is currently unavailable.'}`);
     }
   }
 
