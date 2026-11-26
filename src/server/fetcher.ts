@@ -559,10 +559,32 @@ export class RealDocumentFetcher {
   }
 
   private static async extractPdfText(body: Buffer): Promise<string> {
+    let pdfParseModule: any;
     try {
-      const pdfParse = require('pdf-parse');
-      if (typeof pdfParse === 'function') { const data = await pdfParse(body); return this.normalizeText(data.text || ''); }
-    } catch { /* not available */ }
+      pdfParseModule = require('pdf-parse');
+    } catch {
+      pdfParseModule = null;
+    }
+
+    // pdf-parse v2 exposes the PDFParse class; v1 exposed a callable function.
+    // The project is pinned to v2, so prefer its documented class API and
+    // always release its worker/document resources.
+    if (typeof pdfParseModule?.PDFParse === 'function') {
+      const parser = new pdfParseModule.PDFParse({ data: body });
+      try {
+        const data = await parser.getText();
+        return this.normalizeText(data?.text || '');
+      } finally {
+        await parser.destroy();
+      }
+    }
+
+    // Backward compatibility if the dependency is deliberately downgraded to v1.
+    if (typeof pdfParseModule === 'function') {
+      const data = await pdfParseModule(body);
+      return this.normalizeText(data?.text || '');
+    }
+
     try {
       const pdfjs = require('pdfjs-dist');
       if (typeof pdfjs !== 'undefined' && typeof pdfjs.getDocument === 'function') {
